@@ -1,0 +1,101 @@
+version: '3.8' # 指定docker-compose文件格式的版本
+services: # 定义一系列的服务（容器）
+  swxy_api: # 自定义的服务名称，这里是主应用程序API服务
+    build: # 定义构建镜像的配置
+      context: ./app # 指定Dockerfile所在的目录路径
+      dockerfile: Dockerfile # 指定Dockerfile的文件名
+    hostname: swxy_api # 设置容器的主机名，在容器内部可见
+    container_name: swxy_api # 设置容器的名称，在Docker守护进程中可见
+    environment: # 设置容器内的环境变量
+      - HF_ENDPOINT=https://hf-mirror.com # Hugging Face镜像地址，用于加速模型下载
+      - DATABASE_URL=postgresql://postgres:pg123456@gsk_pg:5432/gsk # 数据库连接字符串
+      - ES_HOST=http://es01:9200 # Elasticsearch服务的地址
+      - ROOT_PATH=http://localhost:8000 # FastAPI应用的根路径，用于URL生成
+      - REDIS_HOST=redis # Redis服务的地址
+      - REDIS_PORT=6379 # Redis服务的端口
+      - REDIS_DB=0 # 使用的Redis数据库编号
+    extra_hosts: # 添加额外的主机名到IP地址的映射，类似于/etc/hosts文件
+      - "host.docker.internal:host-gateway" # 允许容器连接到宿主机的特殊地址
+    env_file: # 从文件加载环境变量
+      - .env # 指定加载.env文件，用于存放敏感信息或本地配置
+    ports: # 定义端口映射，格式为 "宿主机端口:容器端口"
+      - "8000:8000"  # 将宿主机的8000端口映射到容器的8000端口
+    volumes: # 定义数据卷挂载，用于数据持久化或代码同步
+      - ./app:/app/app # 将本地的./app目录挂载到容器的/app/app目录，实现代码热更新
+      - D:/Anaconda/envs/llm-dev/nltk_data:/usr/local/nltk_data # 挂载本地NLTK数据目录到容器中
+    command: ["uvicorn", "app_main:app", "--host", "0.0.0.0", "--port", "8000"] # 容器启动时执行的命令
+    restart: unless-stopped # 定义容器的重启策略，除非手动停止，否则容器会自动重启
+    depends_on: # 定义服务间的依赖关系，确保依赖的服务先启动
+      - gsk_pg # 依赖PostgreSQL数据库服务
+      - es01 # 依赖Elasticsearch服务
+      - redis # 依赖Redis服务
+    networks: # 指定服务连接的网络
+      - gsk_network # 连接到名为gsk_network的自定义网络
+
+  es01: # Elasticsearch服务
+    container_name: gsk-es-01 # 容器名称
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.3 # 使用的Elasticsearch镜像
+    volumes: # 数据卷挂载
+      - gsk_esdata01:/usr/share/elasticsearch/data # 将ES数据持久化到名为gsk_esdata01的数据卷
+    env_file: .env # 从.env文件加载环境变量
+    environment: # 环境变量设置
+      - node.name=es01 # ES节点名称
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD} # ES密码，从.env文件读取
+      - bootstrap.memory_lock=false # 是否锁定内存，开发环境通常设为false
+      - discovery.type=single-node # 设置为单节点模式
+      - xpack.security.enabled=true # 启用X-Pack安全特性
+      - xpack.security.http.ssl.enabled=false # 禁用HTTP SSL
+      - xpack.security.transport.ssl.enabled=false # 禁用传输层SSL
+      - cluster.routing.allocation.disk.watermark.low=5gb # 磁盘使用低水位线
+      - cluster.routing.allocation.disk.watermark.high=3gb # 磁盘使用高水位线
+      - cluster.routing.allocation.disk.watermark.flood_stage=2gb # 磁盘使用洪水阶段水位线
+      - TZ=${TIMEZONE} # 时区设置，从.env文件读取
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m" # 设置ES的JVM堆大小
+    mem_limit: ${MEM_LIMIT} # 内存使用限制，从.env文件读取
+    ulimits: # 设置容器的资源限制
+      memlock: # 内存锁定限制
+        soft: -1 # 软限制
+        hard: -1 # 硬限制
+    healthcheck: # 健康检查配置
+      test: ["CMD-SHELL", "curl http://localhost:9200"] # 检查ES是否可访问
+      interval: 10s # 检查间隔
+      timeout: 10s # 超时时间
+      retries: 120 # 重试次数
+    restart: on-failure # 重启策略，只在失败时重启
+    networks: # 连接的网络
+      - gsk_network
+
+  gsk_pg: # PostgreSQL数据库服务
+    container_name: gsk_pg # 容器名称
+    image: postgres:15-alpine # 使用官方的 PostgreSQL 15 镜像的轻量级版本 (alpine)
+    environment: # 环境变量
+      - POSTGRES_PASSWORD=pg123456 # 数据库密码
+      - POSTGRES_USER=postgres # 数据库用户名
+      - POSTGRES_DB=gsk # 数据库名称
+    volumes: # 数据卷挂载
+      - pg_data:/var/lib/postgresql/data # 将数据库数据持久化到名为pg_data的数据卷
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql # 在初始化时执行init.sql脚本
+    restart: unless-stopped # 重启策略
+    networks: # 连接的网络
+      - gsk_network
+
+  redis: # Redis缓存服务
+    container_name: gsk_redis # 容器名称
+    image: redis:7-alpine # 使用的Redis镜像
+    volumes: # 数据卷挂载
+      - redis_data:/data # 将Redis数据持久化到名为redis_data的数据卷
+    restart: unless-stopped # 重启策略
+    networks: # 连接的网络
+      - gsk_network
+
+volumes: # 定义全局的数据卷
+  gsk_esdata01: # Elasticsearch数据卷
+    driver: local # 使用本地驱动
+  pg_data: # PostgreSQL数据卷
+    driver: local # 使用本地驱动
+  redis_data: # Redis数据卷
+    driver: local # 使用本地驱动
+
+networks: # 定义全局的网络
+  gsk_network: # 自定义网络名称
+    driver: bridge # 使用桥接模式驱动

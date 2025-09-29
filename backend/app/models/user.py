@@ -1,0 +1,27 @@
+from sqlalchemy import Column, Integer, String
+from models.base import Base
+
+class User(Base):
+    """
+    SQLAlchemy ORM 模型，用于映射数据库中的 `users` 表。
+
+    该表存储了应用中的用户信息，包括登录凭证和唯一标识。
+    """
+    __tablename__ = 'users'
+
+    # id: 用户的主键ID。
+    # - Integer: 数据类型为整数。
+    # - primary_key=True: 将此列设置为主键。SQLAlchemy默认会为整数主键开启自动增长。
+    id = Column(Integer, primary_key=True)
+
+    # username: 用户的登录名。
+    # - String(50): 数据类型为字符串，最大长度为50。
+    # - unique=True: 在表中此列的值必须是唯一的，用于防止用户名重复。
+    # - nullable=False: 此列不允许为空。
+    username = Column(String(50), unique=True, nullable=False)
+
+    # password_hash: 存储用户密码的哈希值。
+    # - String(100): 数据类型为字符串，长度设为100以容纳哈希算法生成的字符串。
+    # - nullable=False: 密码哈希值不能为空。
+    #   重要：出于安全考虑，永远不要直接存储明文密码，只存储其哈希值。
+    password_hash = Column(String(100), nullable=False)
