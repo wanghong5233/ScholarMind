@@ -1,15 +1,15 @@
 version: '3.8' # 指定docker-compose文件格式的版本
 services: # 定义一系列的服务（容器）
-  swxy_api: # 自定义的服务名称，这里是主应用程序API服务
+  scholarmind_api: # 自定义的服务名称，这里是主应用程序API服务
     build: # 定义构建镜像的配置
       context: ./app # 指定Dockerfile所在的目录路径
       dockerfile: Dockerfile # 指定Dockerfile的文件名
-    hostname: swxy_api # 设置容器的主机名，在容器内部可见
-    container_name: swxy_api # 设置容器的名称，在Docker守护进程中可见
+    hostname: scholarmind_api # 设置容器的主机名，在容器内部可见
+    container_name: scholarmind_api # 设置容器的名称，在Docker守护进程中可见
     environment: # 设置容器内的环境变量
       - HF_ENDPOINT=https://hf-mirror.com # Hugging Face镜像地址，用于加速模型下载
-      - DATABASE_URL=postgresql://postgres:pg123456@gsk_pg:5432/gsk # 数据库连接字符串
-      - ES_HOST=http://es01:9200 # Elasticsearch服务的地址
+      - DATABASE_URL=postgresql://postgres:pg123456@scholarmind_db:5432/gsk # 数据库连接字符串
+      - ES_HOST=http://scholarmind_vector:9200 # Elasticsearch服务的地址
       - ROOT_PATH=http://localhost:8000 # FastAPI应用的根路径，用于URL生成
       - REDIS_HOST=redis # Redis服务的地址
       - REDIS_PORT=6379 # Redis服务的端口
@@ -26,17 +26,17 @@ services: # 定义一系列的服务（容器）
     command: ["uvicorn", "app_main:app", "--host", "0.0.0.0", "--port", "8000"] # 容器启动时执行的命令
     restart: unless-stopped # 定义容器的重启策略，除非手动停止，否则容器会自动重启
     depends_on: # 定义服务间的依赖关系，确保依赖的服务先启动
-      - gsk_pg # 依赖PostgreSQL数据库服务
-      - es01 # 依赖Elasticsearch服务
+      - scholarmind_db # 依赖PostgreSQL数据库服务
+      - scholarmind_vector # 依赖Elasticsearch服务
       - redis # 依赖Redis服务
     networks: # 指定服务连接的网络
-      - gsk_network # 连接到名为gsk_network的自定义网络
+      - scholarmind_net # 连接到名为scholarmind_net的自定义网络
 
-  es01: # Elasticsearch服务
-    container_name: gsk-es-01 # 容器名称
+  scholarmind_vector: # Elasticsearch服务
+    container_name: scholarmind-es-01 # 容器名称
     image: docker.elastic.co/elasticsearch/elasticsearch:8.11.3 # 使用的Elasticsearch镜像
     volumes: # 数据卷挂载
-      - gsk_esdata01:/usr/share/elasticsearch/data # 将ES数据持久化到名为gsk_esdata01的数据卷
+      - sm_esdata01:/usr/share/elasticsearch/data # 将ES数据持久化到名为sm_esdata01的数据卷
     env_file: .env # 从.env文件加载环境变量
     environment: # 环境变量设置
       - node.name=es01 # ES节点名称
@@ -63,10 +63,10 @@ services: # 定义一系列的服务（容器）
       retries: 120 # 重试次数
     restart: on-failure # 重启策略，只在失败时重启
     networks: # 连接的网络
-      - gsk_network
+      - scholarmind_net
 
-  gsk_pg: # PostgreSQL数据库服务
-    container_name: gsk_pg # 容器名称
+  scholarmind_db: # PostgreSQL数据库服务
+    container_name: scholarmind_db # 容器名称
     image: postgres:15-alpine # 使用官方的 PostgreSQL 15 镜像的轻量级版本 (alpine)
     environment: # 环境变量
       - POSTGRES_PASSWORD=pg123456 # 数据库密码
@@ -77,19 +77,19 @@ services: # 定义一系列的服务（容器）
       - ./init.sql:/docker-entrypoint-initdb.d/init.sql # 在初始化时执行init.sql脚本
     restart: unless-stopped # 重启策略
     networks: # 连接的网络
-      - gsk_network
+      - scholarmind_net
 
   redis: # Redis缓存服务
-    container_name: gsk_redis # 容器名称
+    container_name: scholarmind_redis # 容器名称
     image: redis:7-alpine # 使用的Redis镜像
     volumes: # 数据卷挂载
       - redis_data:/data # 将Redis数据持久化到名为redis_data的数据卷
     restart: unless-stopped # 重启策略
     networks: # 连接的网络
-      - gsk_network
+      - scholarmind_net
 
 volumes: # 定义全局的数据卷
-  gsk_esdata01: # Elasticsearch数据卷
+  sm_esdata01: # Elasticsearch数据卷
     driver: local # 使用本地驱动
   pg_data: # PostgreSQL数据卷
     driver: local # 使用本地驱动
@@ -97,5 +97,5 @@ volumes: # 定义全局的数据卷
     driver: local # 使用本地驱动
 
 networks: # 定义全局的网络
-  gsk_network: # 自定义网络名称
+  scholarmind_net: # 自定义网络名称
     driver: bridge # 使用桥接模式驱动
