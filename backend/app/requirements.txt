@@ -4,7 +4,8 @@ uvicorn==0.31.0
 gunicorn==21.0.0
 python-multipart==0.0.11
 requests==2.32.3
-dotenv==0.9.9
+# dotenv==0.9.9  <- Replaced by pydantic-settings
+pydantic-settings==2.10.1
 httpx==0.28.1
 xgboost
 beartype
@@ -33,7 +34,7 @@ elasticsearch
 elasticsearch-dsl
 xxhash
 tika
-openai
+openai>=1.0.0
 jieba
 llama-index-core
 llama-index-postprocessor-dashscope-rerank-custom
@@ -48,3 +49,6 @@ redis==5.0.1
 aioredis==2.0.1
 alembic==1.13.1
 sqlalchemy==1.4.53
+loguru==0.7.3
+sentence-transformers==5.0.0
+torch==2.5.1

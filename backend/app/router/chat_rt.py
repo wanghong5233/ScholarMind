@@ -8,8 +8,6 @@ from typing import List, Optional
 from service.core.file_parse import execute_insert_process
 from service.core.api.utils.file_utils import get_project_base_directory
 from fastapi_jwt import JwtAuthorizationCredentials
-from service.core.retrieval import retrieve_content
-from service.core.chat import get_chat_completion
 from service.auth import access_security
 from utils import logger
 from database.knowledgebase_operations import insert_knowledgebase, verify_user_knowledgebase
@@ -21,6 +19,8 @@ from service.quick_parse_service import quick_parse_service
 from service.document_upload_service import DocumentUploadService
 from schemas.document_upload import DocumentUploadResponse, SessionDocumentsResponse, SessionDocumentSummary
 import os
+from service.rag_service import RAGService
+from dependencies import get_rag_service
 
 # 加载 .env 文件
 load_dotenv()
@@ -203,7 +203,7 @@ async def get_parsed_content(
         )
 
 ##################################
-# 基于ragflow知识库对话
+# 基于RAG知识库对话 (已重构)
 ##################################
 
 @router.post("/chat_on_docs")
@@ -211,62 +211,38 @@ async def chat_on_docs(
     session_id: str = Query(...),
     request: ChatRequest = Body(..., description="User message"),
     credentials: JwtAuthorizationCredentials = Security(access_security),
+    rag_service: RAGService = Depends(get_rag_service)
 ):
     """
-    执行一次完整的RAG（检索增强生成）问答流程。
+    【已重构】执行一次完整的RAG（检索增强生成）问答流程。
 
-    这是应用的核心功能接口。它接收用户的问题，首先从与该用户关联的
-    知识库中检索最相关的信息片段，然后将问题和这些信息片段一同发送给
-    大语言模型（LLM）以生成最终答案。
-
-    Args:
-        session_id (str): 作为查询参数传入的当前会话ID。
-        request (ChatRequest): 请求体，包含用户发送的 `message`。
-        credentials (JwtAuthorizationCredentials): 依赖注入，用于用户认证。
-
-    Returns:
-        StreamingResponse: 一个事件流（event-stream）响应。LLM生成的答案会
-            被实时地、一小块一小块地推送给客户端，实现打字机效果。
-
-    Raises:
-        HTTPException (401): 用户认证失败。
-        HTTPException (500): 在检索或与LLM通信过程中发生内部错误。
+    此接口通过依赖注入获取 RAGService 实例，将所有复杂的业务逻辑
+    （向量生成、检索、重排、Prompt构造、LLM调用）都委托给服务层处理。
+    API层本身只负责请求校验、认证和流式响应的封装。
     """
     try:
         user_id = str(credentials.subject.get("user_id"))
         if not user_id:
             raise HTTPException(status_code=401, detail="Invalid authentication credentials")
         
-        logger.info(f"开始处理用户 {user_id} 的请求")
-        logger.info(f"问题内容: {request.message}")
+        logger.info(f"User '{user_id}' in session '{session_id}' started a new chat request.")
+        logger.info(f"Question: {request.message}")
         
-        question = request.message
-        
-        # 尝试从知识库检索内容，如果没有知识库也不报错
-        references = []
-        try:
-            logger.info("开始检索相关内容...")
-            references = retrieve_content(user_id, question)
-            logger.info(f"检索到 {len(references)} 条相关内容")
-        except Exception as e:
-            logger.info(f"用户 {user_id} 没有知识库或检索失败: {str(e)}，将不使用知识库内容")
-            references = []
-
-        logger.info("开始生成回答...")
-        # 返回流式响应
-        return StreamingResponse(
-            get_chat_completion(session_id, question, references, user_id),
-            media_type="text/event-stream"
+        # 核心逻辑：直接调用 RAGService 的流式问答方法
+        # user_id 可以用作 index_name，实现多租户数据隔离
+        response_generator = rag_service.ask_stream(
+            query=request.message,
+            index_name=f"user_{user_id}" # 示例：按用户ID隔离知识库
         )
+        
+        return StreamingResponse(response_generator, media_type="text/event-stream")
     
-    except HTTPException as e:
-        logger.error(f"HTTP错误: {str(e)}")
-        raise e
     except Exception as e:
-        logger.exception(f"发生未知错误: {str(e)}")
+        logger.exception(f"An unexpected error occurred in chat_on_docs for user {user_id}: {e}")
+        # 统一的异常处理中间件会捕获这个错误并返回 500
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
+            detail=f"An internal error occurred: {str(e)}"
         )
 
 @router.post("/upload_files")
