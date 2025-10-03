@@ -140,3 +140,9 @@ async def get_sts_token(request: STSTokenRequest):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Internal server error: {str(e)}"
         )
+
+# 用于测试热更新的接口
+@router.get("/test-hot-reload")
+async def test_hot_reload():
+    """一个简单的测试接口，用于验证Docker卷挂载实现的代码热更新功能。"""
+    return {"message": "热更新成功！ 第3版！"}
