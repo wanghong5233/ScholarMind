@@ -1,47 +1,36 @@
-from sqlalchemy import Column, Integer, String, TIMESTAMP
+from sqlalchemy import Column, Integer, String, ForeignKey, TIMESTAMP, Text
+from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from models.base import Base
 
-# 注释掉原来不一致的 KnowledgeBase 类定义
-# class KnowledgeBase(Base):
-#     __tablename__ = "knowledgebase"
-#     id = Column(Integer, primary_key=True, index=True)
-#     user_id = Column(String, index=True)
-#     file_name = Column(String)
-#     created_at = Column(DateTime(timezone=True), server_default=func.now())
-#     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
-
-# 新的正确定义，与项目中实际使用的表结构一致
 class KnowledgeBase(Base):
     """
-    SQLAlchemy ORM 模型，用于映射数据库中的 `knowledgebases` 表。
-
-    该表记录了用户成功上传并索引到知识库中的文件元数据。
-    它代表了可用于RAG检索的文档集合。
+    知识库模型，用于表示用户创建的独立知识库。
     """
-    __tablename__ = 'knowledgebases'
+    __tablename__ = 'knowledge_bases'
+
+    id = Column(Integer, primary_key=True, autoincrement=True, comment="知识库唯一ID")
+    user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, comment="关联的用户ID")
+    name = Column(String(255), nullable=False, comment="知识库名称")
+    description = Column(Text, nullable=True, comment="知识库描述信息")
     
-    # id: 记录的唯一主键。
-    # - Integer: 数据类型为整数。
-    # - primary_key=True: 设为主键。
-    # - autoincrement=True: 由数据库自动生成和递增。
-    id = Column(Integer, primary_key=True, autoincrement=True)
+    created_at = Column(TIMESTAMP, nullable=False, server_default=func.now(), comment="创建时间")
+    updated_at = Column(TIMESTAMP, nullable=False, server_default=func.now(), onupdate=func.now(), comment="最后更新时间")
+
+    # 建立与User模型的关系
+    # back_populates指定了在User模型中，哪个关系属性可以反向访问到这个KnowledgeBase模型
+    user = relationship("User", back_populates="knowledge_bases")
     
-    # user_id: 该知识库文件所属用户的ID。
-    # - String(255): 数据类型为字符串，长度255。
-    # - nullable=False: 必须关联到一个用户。
-    user_id = Column(String(255), nullable=False)
-    
-    # file_name: 知识库中的文件名。
-    # - String(255): 数据类型为字符串，长度255。
-    # - nullable=False: 文件名不能为空。
-    file_name = Column(String(255), nullable=False)
-    
-    # created_at: 文件记录的创建时间戳。
-    # - TIMESTAMP: 数据类型为时间戳。
-    # - nullable=False: 不能为空。
-    # - server_default='CURRENT_TIMESTAMP': 插入时数据库自动填充为当前时间。
-    created_at = Column(TIMESTAMP, nullable=False, server_default='CURRENT_TIMESTAMP')
-    
-    # updated_at: 文件记录的最后更新时间戳。
-    updated_at = Column(TIMESTAMP, nullable=False, server_default='CURRENT_TIMESTAMP') 
+    # 建立与Document模型的关系
+    # a. cascade="all, delete-orphan": 级联操作。
+    #    - all: 对KnowledgeBase的所有操作（如保存、删除）都会级联到其关联的Documents。
+    #    - delete-orphan: 当一个Document从一个KnowledgeBase的documents列表中被移除时，这个Document记录将从数据库中被删除。
+    # b. back_populates="knowledge_base": 指定了在Document模型中，可以通过knowledge_base属性反向访问这个KnowledgeBase实例。
+    # c. lazy="selectin": 加载策略。
+    #    - 当加载一个KnowledgeBase对象时，SQLAlchemy会发出第二条SQL查询，
+    #      一次性加载该知识库关联的所有Document对象。这比默认的"select"（需要时逐个加载）或"joined"（在初始查询中用JOIN加载）更高效，
+    #      避免了N+1查询问题。
+    documents = relationship("Document", cascade="all, delete-orphan", back_populates="knowledge_base", lazy="selectin")
+
+    def __repr__(self):
+        return f"<KnowledgeBase(id={self.id}, name='{self.name}', user_id={self.user_id})>" 

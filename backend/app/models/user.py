@@ -1,4 +1,5 @@
 from sqlalchemy import Column, Integer, String
+from sqlalchemy.orm import relationship
 from models.base import Base
 
 class User(Base):
@@ -25,3 +26,8 @@ class User(Base):
     # - nullable=False: 密码哈希值不能为空。
     #   重要：出于安全考虑，永远不要直接存储明文密码，只存储其哈希值。
     password_hash = Column(String(100), nullable=False)
+
+    # 建立与KnowledgeBase模型的一对多关系
+    # a. back_populates="user": 指定了在KnowledgeBase模型中，可以通过user属性反向访问这个User实例。
+    # b. cascade="all, delete-orphan": 级联操作，确保当删除一个User时，其拥有的所有KnowledgeBase也会被一并删除。
+    knowledge_bases = relationship("KnowledgeBase", back_populates="user", cascade="all, delete-orphan")
