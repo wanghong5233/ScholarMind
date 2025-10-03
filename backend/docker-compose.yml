@@ -21,9 +21,9 @@ services: # 定义一系列的服务（容器）
     ports: # 定义端口映射，格式为 "宿主机端口:容器端口"
       - "8000:8000"  # 将宿主机的8000端口映射到容器的8000端口
     volumes: # 定义数据卷挂载，用于数据持久化或代码同步
-      - ./app:/app/app # 将本地的./app目录挂载到容器的/app/app目录，实现代码热更新
+      - ./app:/app # 将本地的./app目录完整地挂载到容器的/app目录，实现代码热更新
       - D:/Anaconda/envs/llm-dev/nltk_data:/usr/local/nltk_data # 挂载本地NLTK数据目录到容器中
-    command: ["uvicorn", "app_main:app", "--host", "0.0.0.0", "--port", "8000"] # 容器启动时执行的命令
+    command: ["uvicorn", "app_main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"] # 容器启动时执行的命令，并开启热重载
     restart: unless-stopped # 定义容器的重启策略，除非手动停止，否则容器会自动重启
     depends_on: # 定义服务间的依赖关系，确保依赖的服务先启动
       - scholarmind_db # 依赖PostgreSQL数据库服务

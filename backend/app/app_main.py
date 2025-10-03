@@ -81,9 +81,11 @@ app.add_middleware(
     allow_headers=["*"],  # 允许所有头
 )
 
-app.include_router(chat_rt.router)
-app.include_router(user_rt.router)
-app.include_router(history_rt.router)
+# 包含各个模块的路由，并为它们设置统一的前缀和标签
+# 这有助于API文档的组织和URL的结构化
+app.include_router(chat_rt.router, prefix="/chat", tags=["Chat"])
+app.include_router(user_rt.router, prefix="/user", tags=["User"])
+app.include_router(history_rt.router, prefix="/history", tags=["History"])
 
 if __name__=='__main__':
     import uvicorn
