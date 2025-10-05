@@ -12,6 +12,7 @@ help:
 	@echo "  restart   - 重启所有服务"
 	@echo "  build     - 仅构建或重新构建服务的镜像"
 	@echo "  logs      - 实时查看所有服务的日志输出"
+	@echo "  logs-api  - (推荐) 仅实时查看后端API服务的日志"
 	@echo "  ps        - 查看当前服务的容器状态"
 	@echo ""
 	@echo "调试命令:"
@@ -28,7 +29,7 @@ help:
 # -d: 在后台 (detached mode) 运行
 .PHONY: up
 up:
-	docker compose up
+	docker compose up -d
 
 # (推荐) 停止并删除所有容器、网络及数据卷，实现彻底清理
 # -v: 删除与容器关联的匿名数据卷
@@ -57,6 +58,11 @@ build:
 .PHONY: logs
 logs:
 	docker compose logs -f
+
+# (推荐) 仅实时查看后端API服务的日志
+.PHONY: logs-api
+logs-api:
+	docker compose logs -f scholarmind_api
 
 # 查看服务容器状态
 .PHONY: ps

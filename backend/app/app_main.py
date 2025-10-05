@@ -4,6 +4,8 @@ from fastapi.responses import JSONResponse
 from router import chat_rt
 from router import user_rt
 from router import history_rt
+from router import knowledgebase_rt
+# from router import document_upload_rt
 import os
 import time
 import uuid
@@ -34,8 +36,8 @@ async def dispatch(request: Request, call_next):
         # 在响应头中添加 request_id，方便前端调试
         response.headers["X-Request-ID"] = request_id
     except Exception as e:
-        log.error(f"Request failed with exception: {e}", exc_info=True)
-        # 重新抛出异常，以便 FastAPI 的异常处理机制能捕获它
+        # Pass exception object directly to loguru to handle safely
+        log.error("Request failed with an unhandled exception:", exception=e)
         raise e
     finally:
         process_time = (time.time() - start_time) * 1000
@@ -60,15 +62,15 @@ async def api_exception_handler(request: Request, exc: APIException):
 # 注册全局未捕获异常处理器
 @app.exception_handler(Exception)
 async def generic_exception_handler(request: Request, exc: Exception):
-    # 对于所有未预料到的错误，返回一个通用的500错误
-    # 使用 exc_info=True 来记录完整的堆栈跟踪
-    log.error(f"Unhandled exception caught: {exc}", exc_info=True)
-    
-    generic_error = APIException() # 使用默认的 500 错误
-    
+    # 使用安全的方式记录异常，避免字符串格式化引发 KeyError
+    log.error("Unhandled exception caught:", exception=exc)
     return JSONResponse(
-        status_code=generic_error.status_code,
-        content=generic_error.to_dict(),
+        status_code=500,
+        content={
+            "code": 50000,
+            "message": "Internal Server Error",
+            "data": None
+        }
     )
 
 
@@ -83,9 +85,11 @@ app.add_middleware(
 
 # 包含各个模块的路由，并为它们设置统一的前缀和标签
 # 这有助于API文档的组织和URL的结构化
-app.include_router(chat_rt.router, prefix="/chat", tags=["Chat"])
-app.include_router(user_rt.router, prefix="/user", tags=["User"])
-app.include_router(history_rt.router, prefix="/history", tags=["History"])
+app.include_router(chat_rt.router, prefix="/api/chat", tags=["Chat"])
+app.include_router(user_rt.router, prefix="/api/users", tags=["Users"])
+app.include_router(history_rt.router, prefix="/api/history", tags=["History"])
+# app.include_router(document_upload_rt.router, prefix="/api/document-upload", tags=["Document Upload"])
+app.include_router(knowledgebase_rt.router, prefix="/api/knowledgebases", tags=["Knowledge Bases"])
 
 if __name__=='__main__':
     import uvicorn

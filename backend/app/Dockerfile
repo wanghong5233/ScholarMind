@@ -30,11 +30,13 @@ RUN pip install --upgrade pip setuptools wheel
 WORKDIR /app
 
 # 拷贝依赖文件并安装
-COPY requirements.txt /app/
+# 注意：因为构建上下文改为了 backend/ 目录，所以源路径需要加上 app/ 前缀
+COPY app/requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 拷贝代码
-COPY . /app
+# 将 app/ 目录下的所有内容拷贝到容器的 /app 目录
+COPY app/ /app
 
 # 修改文件权限
 RUN chmod -R 755 /app

@@ -14,7 +14,7 @@ venv/
 docker-compose.yml
 Dockerfile
 *.md
-alembic.ini
-alembic/
+# alembic.ini
+# alembic/
 *test*
 run_migration.py

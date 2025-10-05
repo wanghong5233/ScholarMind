@@ -7,7 +7,7 @@ class KnowledgeBase(Base):
     """
     知识库模型，用于表示用户创建的独立知识库。
     """
-    __tablename__ = 'knowledge_bases'
+    __tablename__ = 'knowledgebases'
 
     id = Column(Integer, primary_key=True, autoincrement=True, comment="知识库唯一ID")
     user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, comment="关联的用户ID")
