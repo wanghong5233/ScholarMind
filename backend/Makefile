@@ -28,7 +28,7 @@ help:
 # -d: 在后台 (detached mode) 运行
 .PHONY: up
 up:
-	docker compose up -d --build
+	docker compose up
 
 # (推荐) 停止并删除所有容器、网络及数据卷，实现彻底清理
 # -v: 删除与容器关联的匿名数据卷

@@ -1,6 +1,8 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import datetime
 from typing import Optional, List
+
+from models.document import DocumentIngestionSource
 
 class DocumentBase(BaseModel):
     """
@@ -11,13 +13,18 @@ class DocumentBase(BaseModel):
     abstract: Optional[str] = None
     publication_year: Optional[int] = None
     journal_or_conference: Optional[str] = None
-    keywords: Optional[List[str]] = None
+    keywords: Optional[str] = None
     citation_count: Optional[int] = None
-    fields_of_study: Optional[List[str]] = None
+    fields_of_study: Optional[str] = None
     doi: Optional[str] = None
     semantic_scholar_id: Optional[str] = None
     source_url: Optional[str] = None
     local_pdf_path: Optional[str] = None
+    file_hash: Optional[str] = None
+    ingestion_source: DocumentIngestionSource
+
+    class Config:
+        from_attributes = True
 
 class DocumentCreate(DocumentBase):
     """
@@ -57,3 +64,7 @@ class DocumentInDB(DocumentBase):
 
     class Config:
         from_attributes = True
+
+# 尽管当前 DocumentInDB 没有向前引用，但添加 rebuild 是一个好习惯
+# 它可以确保未来如果添加了对 KnowledgeBaseInDB 的引用，也能正确解析
+DocumentInDB.model_rebuild()

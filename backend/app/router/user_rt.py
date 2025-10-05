@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from exceptions.auth import  AuthError
-from service.auth import authenticate, register_user
+from service.auth import authenticate, register_user, get_current_user
+from models.user import User as UserModel
 from pydantic import BaseModel
 import httpx
 import asyncio
@@ -146,3 +147,27 @@ async def get_sts_token(request: STSTokenRequest):
 async def test_hot_reload():
     """一个简单的测试接口，用于验证Docker卷挂载实现的代码热更新功能。"""
     return {"message": "热更新成功！ 第3版！"}
+
+# Pydantic模型，用于API响应
+class User(BaseModel):
+    id: int
+    username: str
+
+    class Config:
+        orm_mode = True
+
+# 获取当前用户的接口
+@router.get("/users/me", response_model=User)
+async def read_users_me(current_user: UserModel = Depends(get_current_user)):
+    """
+    获取当前认证用户的个人信息。
+
+    通过依赖注入的 `get_current_user` 函数来验证JWT，并返回
+    当前用户的详细信息。
+
+    - **依赖**: `get_current_user`，处理token验证并提供用户信息。
+    - **成功响应**: 返回当前用户的 `User` 模型数据。
+    - **失败响应**:
+        - 401 Unauthorized: 如果token无效或已过期。
+    """
+    return current_user

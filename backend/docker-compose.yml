@@ -1,4 +1,3 @@
-version: '3.8' # 指定docker-compose文件格式的版本
 services: # 定义一系列的服务（容器）
   scholarmind_api: # 自定义的服务名称，这里是主应用程序API服务
     build: # 定义构建镜像的配置

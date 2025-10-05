@@ -1,9 +1,14 @@
 from sqlalchemy import (
-    Column, Integer, String, Text, ForeignKey, TIMESTAMP, JSON, Index
+    Column, Integer, String, Text, ForeignKey, TIMESTAMP, JSON, Index, DateTime, func, UniqueConstraint
 )
 from sqlalchemy.orm import relationship
-from sqlalchemy.sql import func
+import enum
+
 from models.base import Base
+
+class DocumentIngestionSource(enum.Enum):
+    ONLINE_IMPORT = "online_import"
+    LOCAL_UPLOAD = "local_upload"
 
 class Document(Base):
     """
@@ -33,7 +38,9 @@ class Document(Base):
     # 文件相关信息
     source_url = Column(Text, nullable=True, comment="文献来源URL")
     local_pdf_path = Column(String(1024), nullable=True, comment="本地PDF文件存储路径")
-    
+    file_hash = Column(String(255), nullable=True, comment="本地文件的SHA256哈希值")
+    ingestion_source = Column(String(50), nullable=False, default=DocumentIngestionSource.LOCAL_UPLOAD.value, comment="文档来源")
+
     # 时间戳
     created_at = Column(TIMESTAMP, nullable=False, server_default=func.now(), comment="创建时间")
     updated_at = Column(TIMESTAMP, nullable=False, server_default=func.now(), onupdate=func.now(), comment="最后更新时间")
@@ -46,6 +53,8 @@ class Document(Base):
         Index('uq_kb_semantic_id', 'knowledge_base_id', 'semantic_scholar_id', unique=True),
         # 在同一个知识库内，doi 也应该是唯一的
         Index('uq_kb_doi', 'knowledge_base_id', 'doi', unique=True),
+        # 在同一个知识库内，file_hash 也应该是唯一的
+        Index('uq_kb_file_hash', 'knowledge_base_id', 'file_hash', unique=True),
     )
 
     def __repr__(self):

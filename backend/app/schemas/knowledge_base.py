@@ -2,11 +2,9 @@ from pydantic import BaseModel
 from datetime import datetime
 from typing import Optional, List
 
-# 预先声明 DocumentInDB，以解决循环引用的问题
-# 当 KnowledgeBaseInDB 引用 DocumentInDB 时，DocumentInDB 可能还未被完全定义
-# 这种向前声明的方式可以让 Pydantic 稍后在解析类型时再找到它
-class DocumentInDB:
-    pass
+# 移除临时的、不完整的类声明
+# class DocumentInDB:
+#     pass
 
 class KnowledgeBaseBase(BaseModel):
     """
