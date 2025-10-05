@@ -9,6 +9,7 @@ from datetime import timedelta
 import os
 import logging
 from fastapi import Depends
+from fastapi_jwt import JwtAuthorizationCredentials
 
 # JWT配置
 JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY', 'default_secret_key') + 'happy'
@@ -123,16 +124,18 @@ def register_user(username: str, password: str):
         db.close()
         logger.info("数据库连接已关闭")
 
-def get_current_user(subject: dict = Depends(access_security)):
+def get_current_user(subject: "JwtAuthorizationCredentials" = Depends(access_security)):
     """
     FastAPI 依赖项，用于获取当前认证的用户。
     它会验证JWT，并从数据库中检索用户信息。
     """
     db = next(get_db())
     try:
-        user_id = subject.get("user_id")
+        # subject 对象本身不是字典，我们需要访问它的 'subject' 属性来获取 payload
+        payload = subject.subject
+        user_id = payload.get("user_id")
         if user_id is None:
-            raise AuthError("无效的Token")
+            raise AuthError("无效的Token, user_id 不存在")
         
         user = db.query(User).filter(User.id == user_id).first()
         if not user:

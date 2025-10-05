@@ -28,9 +28,17 @@ class APIException(Exception):
             "data": self.data
         }
 
+class ResourceNotFoundException(APIException):
+    def __init__(self, message: str = "Resource Not Found", data: Any = None):
+        super().__init__(status_code=404, code=40400, message=message, data=data)
+
+class PermissionDeniedException(APIException):
+    def __init__(self, message: str = "Permission Denied", data: Any = None):
+        super().__init__(status_code=403, code=40300, message=message, data=data)
+
 class ModelNotFoundError(APIException):
     """
-    当请求的模型文件或资源无法找到时抛出。
+    当无法在配置的模型路径中找到指定的模型文件时引发。
     """
     def __init__(self, model_name: str, message: Optional[str] = None):
         super().__init__(

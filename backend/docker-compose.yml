@@ -1,13 +1,13 @@
 services: # 定义一系列的服务（容器）
   scholarmind_api: # 自定义的服务名称，这里是主应用程序API服务
     build: # 定义构建镜像的配置
-      context: ./app # 指定Dockerfile所在的目录路径
-      dockerfile: Dockerfile # 指定Dockerfile的文件名
+      context: . # 构建上下文改为当前目录 (backend/)
+      dockerfile: ./app/Dockerfile # Dockerfile的路径也相应调整
     hostname: scholarmind_api # 设置容器的主机名，在容器内部可见
     container_name: scholarmind_api # 设置容器的名称，在Docker守护进程中可见
     environment: # 设置容器内的环境变量
       - HF_ENDPOINT=https://hf-mirror.com # Hugging Face镜像地址，用于加速模型下载
-      - DATABASE_URL=postgresql://postgres:pg123456@scholarmind_db:5432/gsk # 数据库连接字符串
+      - DATABASE_URL=postgresql://postgres:pg123456@scholarmind_db:5432/scholarmind # 数据库连接字符串
       - ES_HOST=http://scholarmind_vector:9200 # Elasticsearch服务的地址
       - ROOT_PATH=http://localhost:8000 # FastAPI应用的根路径，用于URL生成
       - REDIS_HOST=redis # Redis服务的地址
@@ -20,7 +20,7 @@ services: # 定义一系列的服务（容器）
     ports: # 定义端口映射，格式为 "宿主机端口:容器端口"
       - "8000:8000"  # 将宿主机的8000端口映射到容器的8000端口
     volumes: # 定义数据卷挂载，用于数据持久化或代码同步
-      - ./app:/app # 将本地的./app目录完整地挂载到容器的/app目录，实现代码热更新
+      - ./app:/app # 挂载本地的 app 目录，实现代码热更新
       - D:/Anaconda/envs/llm-dev/nltk_data:/usr/local/nltk_data # 挂载本地NLTK数据目录到容器中
     command: ["uvicorn", "app_main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"] # 容器启动时执行的命令，并开启热重载
     restart: unless-stopped # 定义容器的重启策略，除非手动停止，否则容器会自动重启
@@ -67,13 +67,15 @@ services: # 定义一系列的服务（容器）
   scholarmind_db: # PostgreSQL数据库服务
     container_name: scholarmind_db # 容器名称
     image: postgres:15-alpine # 使用官方的 PostgreSQL 15 镜像的轻量级版本 (alpine)
+    ports:
+      - "5432:5432"
     environment: # 环境变量
       - POSTGRES_PASSWORD=pg123456 # 数据库密码
       - POSTGRES_USER=postgres # 数据库用户名
-      - POSTGRES_DB=gsk # 数据库名称
+      - POSTGRES_DB=scholarmind # 数据库名称
     volumes: # 数据卷挂载
       - pg_data:/var/lib/postgresql/data # 将数据库数据持久化到名为pg_data的数据卷
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql # 在初始化时执行init.sql脚本
+      # - ./init.sql:/docker-entrypoint-initdb.d/init.sql # 在初始化时执行init.sql脚本
     restart: unless-stopped # 重启策略
     networks: # 连接的网络
       - scholarmind_net

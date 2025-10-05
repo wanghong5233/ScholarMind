@@ -17,7 +17,7 @@ class Document(Base):
     __tablename__ = 'documents'
 
     id = Column(Integer, primary_key=True, autoincrement=True, comment="文档唯一ID")
-    knowledge_base_id = Column(Integer, ForeignKey('knowledge_bases.id', ondelete='CASCADE'), nullable=False, comment="关联的知识库ID")
+    knowledge_base_id = Column(Integer, ForeignKey('knowledgebases.id', ondelete='CASCADE'), nullable=False, comment="关联的知识库ID")
     
     # 核心元数据
     title = Column(Text, nullable=False, comment="论文标题")
