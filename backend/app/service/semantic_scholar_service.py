@@ -25,6 +25,10 @@ class SemanticScholarService:
         "publicationDate",
         "tldr",
         "externalIds",
+        # 以便后续下载 PDF
+        "isOpenAccess",
+        "openAccessPdf",
+        "url",
     ]
 
     def __init__(
@@ -92,6 +96,10 @@ class SemanticScholarService:
         transformed: List[DocumentCreate] = []
         for paper in results:
             external_ids = paper.get("externalIds", {}) or {}
+            open_access_pdf = (paper.get("openAccessPdf") or {})
+            pdf_url = open_access_pdf.get("url") or None
+            # 兜底：若无 openAccessPdf.url，保留页面 URL 以便前端跳转
+            page_url = paper.get("url")
             transformed.append(
                 DocumentCreate(
                     title=paper.get("title") or "N/A",
@@ -105,7 +113,7 @@ class SemanticScholarService:
                     fields_of_study=None,
                     doi=external_ids.get("DOI"),
                     semantic_scholar_id=paper.get("paperId"),
-                    source_url=None,  # 可在扩展 fields 时使用 openAccessPdf.url 等
+                    source_url=pdf_url or page_url,
                     local_pdf_path=None,
                     file_hash=None,
                     ingestion_source=DocumentIngestionSource.ONLINE_IMPORT,

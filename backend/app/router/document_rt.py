@@ -18,6 +18,10 @@ class OnlineSearchRequest(BaseModel):
     limit: int = 100
     year: str = ""
 
+# DTO for add-online request body
+class AddOnlineDocumentsRequest(BaseModel):
+    documents: List[DocumentCreate]
+
 @router.post(
     "/ingest/search-online",
     response_model=List[DocumentCreate],
@@ -42,6 +46,43 @@ def search_online(
         return papers
     except APIException as e:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@router.post(
+    "/ingest/add-online",
+    response_model=List[DocumentInDB],
+    summary="添加在线检索的论文到知识库",
+    description="接收前端勾选确认的论文元数据，执行持久化并去重后返回新增文档"
+)
+def add_online_documents(
+    kb_id: int,
+    payload: AddOnlineDocumentsRequest = Body(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    try:
+        created = ingestion_service.add_online_documents(
+            db=db,
+            user_id=current_user.id,
+            kb_id=kb_id,
+            documents=payload.documents,
+        )
+        # 下载 PDF（尽力而为），并更新本地路径/哈希
+        ingestion_service.download_pdfs_and_update(
+            db=db,
+            user_id=current_user.id,
+            kb_id=kb_id,
+            documents=created,
+        )
+        return created
+    except APIException as e:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
+    except PermissionDeniedException as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+    except ResourceNotFoundException as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
 
