@@ -1,10 +1,13 @@
-from fastapi import FastAPI, Request
+import logging.config
+from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from core.config import settings  # <--- 关键改动：在顶部显式导入配置
 from router import chat_rt
 from router import user_rt
 from router import history_rt
 from router import knowledgebase_rt
+from router import document_rt
 # from router import document_upload_rt
 import os
 import time
@@ -12,8 +15,8 @@ import uuid
 from utils.get_logger import log, request_id_var
 from exceptions.base import APIException
 
-# 从环境变量获取 root_path
-root_path = os.getenv("ROOT_PATH", "")
+# 从配置获取 root_path
+root_path = settings.__dict__.get("ROOT_PATH", "")
 
 app = FastAPI(root_path=root_path)
 
@@ -90,6 +93,8 @@ app.include_router(user_rt.router, prefix="/api/users", tags=["Users"])
 app.include_router(history_rt.router, prefix="/api/history", tags=["History"])
 # app.include_router(document_upload_rt.router, prefix="/api/document-upload", tags=["Document Upload"])
 app.include_router(knowledgebase_rt.router, prefix="/api/knowledgebases", tags=["Knowledge Bases"])
+app.include_router(document_rt.router, prefix="/api/knowledgebases/{kb_id}/documents", tags=["Documents"])
+
 
 if __name__=='__main__':
     import uvicorn

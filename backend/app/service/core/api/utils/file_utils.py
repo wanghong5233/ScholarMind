@@ -1,10 +1,11 @@
 import os
 from typing import Optional
+from core.config import settings
 
 # 全局变量，用于缓存项目核心服务(core)的根目录路径。
 # 优先从环境变量 RAG_PROJECT_BASE 或 RAG_DEPLOY_BASE 读取，
 # 这对于在不同部署环境中配置项目路径非常有用。
-PROJECT_BASE: Optional[str] = os.getenv("RAG_PROJECT_BASE") or os.getenv("RAG_DEPLOY_BASE")
+PROJECT_BASE: Optional[str] = settings.RAG_PROJECT_BASE or settings.RAG_DEPLOY_BASE
 
 
 def get_project_base_directory(*args: str) -> str:

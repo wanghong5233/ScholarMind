@@ -4,7 +4,7 @@ from service.core.abstractions.embedder import BaseEmbedder
 from service.core.abstractions.reranker import BaseReranker
 from service.core.abstractions.llm import BaseLLM
 from service.core.abstractions.vector_store import BaseVectorStore
-from service.core.config import settings
+from core.config import settings
 from utils.get_logger import log
 
 class RAGService:

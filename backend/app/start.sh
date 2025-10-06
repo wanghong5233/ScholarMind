@@ -30,34 +30,8 @@ else:
 
 # 检查并运行数据库迁移
 echo "检查数据库迁移状态..."
-python << END
-import os
-from alembic.config import Config
-from alembic import command
-from sqlalchemy import create_engine, text
-
-try:
-    alembic_cfg = Config('alembic.ini')
-    # 检查是否存在alembic_version表
-    engine = create_engine(os.environ['DATABASE_URL'])
-    with engine.connect() as conn:
-        result = conn.execute(text("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'alembic_version')"))
-        table_exists = result.scalar()
-        
-        if not table_exists:
-            print('首次部署，标记baseline...')
-            command.stamp(alembic_cfg, '980b32f130df')
-            print('Baseline标记完成')
-        
-        print('运行数据库迁移...')
-        command.upgrade(alembic_cfg, 'head')
-        print('数据库迁移完成!')
-        
-except Exception as e:
-    print(f'迁移过程出错: {e}')
-    # 不退出，继续启动应用（向下兼容）
-    print('警告: 迁移失败，但应用将继续启动')
-END
+# 简单地运行 upgrade head 即可，Alembic 会自动处理首次创建和后续升级
+alembic upgrade head
 
 echo "启动应用服务..."
 exec "$@" 

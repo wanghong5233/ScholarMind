@@ -16,6 +16,7 @@ RUN apt-get update --fix-missing || apt-get update && \
     build-essential \
     python3-dev \
     make \
+    curl \
     libgl1 \
     libgl1-mesa-glx \
     libglu1-mesa \

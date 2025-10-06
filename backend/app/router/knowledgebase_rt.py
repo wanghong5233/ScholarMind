@@ -76,3 +76,4 @@ def delete_knowledge_base(
         return knowledgebase_service.delete_kb(db=db, kb_id=kb_id, user_id=current_user.id)
     except (ResourceNotFoundException, PermissionDeniedException) as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
+

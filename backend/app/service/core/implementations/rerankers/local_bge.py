@@ -2,7 +2,7 @@ from typing import List
 from sentence_transformers.cross_encoder import CrossEncoder
 from schemas.rag import Chunk
 from service.core.abstractions.reranker import BaseReranker
-from service.core.config import settings
+from core.config import settings
 from utils.get_logger import log
 
 class LocalBgeReranker(BaseReranker):

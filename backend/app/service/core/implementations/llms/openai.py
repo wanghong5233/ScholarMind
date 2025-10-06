@@ -2,7 +2,7 @@ from typing import List, AsyncGenerator
 from openai import AsyncOpenAI
 from schemas.rag import Chunk
 from service.core.abstractions.llm import BaseLLM
-from service.core.config import settings
+from core.config import settings
 from utils.get_logger import log
 
 class OpenAiLlm(BaseLLM):

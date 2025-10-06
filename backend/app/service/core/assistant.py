@@ -1,6 +1,7 @@
 import requests
 import json
 import os
+from core.config import settings
 
 
 def create_chat_assistant(address, api_key, name, avatar=None, dataset_ids=None, llm=None, prompt=None):
@@ -60,7 +61,7 @@ def create_chat_assistant(address, api_key, name, avatar=None, dataset_ids=None,
 
 # 示例调用
 if __name__ == "__main__":
-    address = os.getenv("RAGFLOW_BASE_URL")
+    address = settings.RAGFLOW_BASE_URL
     api_key = "ragflow-Q4MTM2OTllZjJiMzExZWY5ODBhMDI0Mm"
     name = "new_chat_3"
     dataset_ids = ["b0707cbae6c511ef875d0242ac130006"]

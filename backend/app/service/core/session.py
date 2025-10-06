@@ -1,6 +1,7 @@
 import requests
 import json
 import os
+from core.config import settings
 
 def create_chat_session(address, api_key, chat_id, name, user_id=None):
     """
@@ -36,7 +37,7 @@ def create_chat_session(address, api_key, chat_id, name, user_id=None):
 
 # 示例调用
 if __name__ == "__main__":
-    address = os.getenv("RAGFLOW_BASE_URL")
+    address = settings.RAGFLOW_BASE_URL
     api_key = "ragflow-Q4MTM2OTllZjJiMzExZWY5ODBhMDI0Mm"
     chat_id = "c4269168f2b411ef99fc0242ac130005"
     session_name = "new session 01"
