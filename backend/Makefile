@@ -36,7 +36,7 @@ up:
 # --remove-orphans: 删除不再在 compose 文件中定义的服务容器
 .PHONY: down
 down:
-	docker compose down -v --remove-orphans
+	docker compose down --remove-orphans
 
 # 停止服务 (不删除容器)
 .PHONY: stop

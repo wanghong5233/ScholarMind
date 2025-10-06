@@ -27,11 +27,9 @@ from service.core.rag.utils import singleton
 from service.core.api.utils.file_utils import get_project_base_directory
 from service.core.rag.utils.doc_store_conn import MatchExpr, OrderByExpr, MatchTextExpr, MatchDenseExpr, FusionExpr
 from service.core.rag.nlp import is_english
-from dotenv import load_dotenv
+from core.config import settings
 
-load_dotenv()
-
-ES_HOST = os.getenv("ES_HOST", "http://localhost:9200")
+ES_HOST = settings.ES_HOST
 ATTEMPT_TIME = 2
 PAGERANK_FLD = "pagerank_fea"
 TAG_FLD = "tag_feas"

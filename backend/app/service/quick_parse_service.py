@@ -11,6 +11,7 @@ from io import BytesIO
 from fastapi import HTTPException
 from utils import logger
 from typing import Tuple
+from core.config import settings
 
 
 class QuickParseService:
@@ -25,10 +26,9 @@ class QuickParseService:
     """
     
     def __init__(self):
-        # Redis 连接配置
-        self.redis_host = os.getenv('REDIS_HOST', 'redis')
-        self.redis_port = int(os.getenv('REDIS_PORT', 6379))
-        self.redis_db = int(os.getenv('REDIS_DB', 0))
+        self.redis_host = settings.REDIS_HOST
+        self.redis_port = settings.REDIS_PORT
+        self.redis_db = settings.REDIS_DB
         
         # 创建 Redis 客户端
         self.redis_client = redis.Redis(

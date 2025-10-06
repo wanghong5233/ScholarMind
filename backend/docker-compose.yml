@@ -6,13 +6,14 @@ services: # 定义一系列的服务（容器）
     hostname: scholarmind_api # 设置容器的主机名，在容器内部可见
     container_name: scholarmind_api # 设置容器的名称，在Docker守护进程中可见
     environment: # 设置容器内的环境变量
-      - HF_ENDPOINT=https://hf-mirror.com # Hugging Face镜像地址，用于加速模型下载
-      - DATABASE_URL=postgresql://postgres:pg123456@scholarmind_db:5432/scholarmind # 数据库连接字符串
-      - ES_HOST=http://scholarmind_vector:9200 # Elasticsearch服务的地址
-      - ROOT_PATH=http://localhost:8000 # FastAPI应用的根路径，用于URL生成
-      - REDIS_HOST=redis # Redis服务的地址
-      - REDIS_PORT=6379 # Redis服务的端口
-      - REDIS_DB=0 # 使用的Redis数据库编号
+      HF_ENDPOINT: https://hf-mirror.com
+      DATABASE_URL: postgresql://postgres:pg123456@scholarmind_db:5432/scholarmind
+      ES_HOST: http://scholarmind_vector:9200
+      ROOT_PATH: http://localhost:8000
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 0
+      SEMANTIC_SCHOLAR_API_KEY: ${SEMANTIC_SCHOLAR_API_KEY:-}
     extra_hosts: # 添加额外的主机名到IP地址的映射，类似于/etc/hosts文件
       - "host.docker.internal:host-gateway" # 允许容器连接到宿主机的特殊地址
     env_file: # 从文件加载环境变量

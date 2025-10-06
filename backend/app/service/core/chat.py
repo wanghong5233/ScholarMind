@@ -5,17 +5,19 @@ from database.db_models import Session as SessionModel, Message as MessageModel
 from database.db_session import get_db
 from utils import logger
 import redis
-import os
 from sqlalchemy import text
 from fastapi import HTTPException
+from core.config import settings
 
 
 def get_redis_client():
     """获取 Redis 客户端"""
-    redis_host = os.getenv('REDIS_HOST', 'redis')
-    redis_port = int(os.getenv('REDIS_PORT', 6379))
-    redis_db = int(os.getenv('REDIS_DB', 0))
-    return redis.Redis(host=redis_host, port=redis_port, db=redis_db, decode_responses=True)
+    return redis.Redis(
+        host=settings.REDIS_HOST,
+        port=settings.REDIS_PORT,
+        db=settings.REDIS_DB,
+        decode_responses=True,
+    )
 
 def get_quick_parse_content(session_id: str) -> str:
     """从 Redis 获取快速解析的文档内容"""

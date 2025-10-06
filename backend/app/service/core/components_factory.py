@@ -1,4 +1,4 @@
-from service.core.config import settings
+from core.config import settings
 from service.core.abstractions.embedder import BaseEmbedder
 from service.core.abstractions.reranker import BaseReranker
 from service.core.abstractions.llm import BaseLLM

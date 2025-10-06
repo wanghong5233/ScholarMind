@@ -2,7 +2,7 @@ from typing import List
 from openai import AsyncOpenAI
 from schemas.rag import Document, Chunk
 from service.core.abstractions.embedder import BaseEmbedder
-from service.core.config import settings
+from core.config import settings
 from utils.get_logger import log
 from exceptions.base import APIException
 

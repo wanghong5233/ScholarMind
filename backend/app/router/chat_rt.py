@@ -3,7 +3,6 @@ import uuid
 from schemas.chat import SessionResponse, ChatRequest
 from fastapi.responses import StreamingResponse
 import os
-from dotenv import load_dotenv
 from typing import List, Optional
 from service.core.file_parse import execute_insert_process
 from service.core.api.utils.file_utils import get_project_base_directory
@@ -21,13 +20,11 @@ from schemas.document_upload import DocumentUploadResponse, SessionDocumentsResp
 import os
 from service.rag_service import RAGService
 from dependencies import get_rag_service
-
-# 加载 .env 文件
-load_dotenv()
+from core.config import settings # 导入统一的配置
 
 # 配置日志
-logger.info(f"ES_HOST: {os.getenv('ES_HOST')}")
-logger.info(f"ELASTICSEARCH_URL: {os.getenv('ELASTICSEARCH_URL')}")
+logger.info(f"ES_HOST: {settings.ES_HOST}") # 从 settings 读取
+logger.info(f"ELASTICSEARCH_URL: {settings.ELASTICSEARCH_URL}") # 从 settings 读取
 
 router = APIRouter()
 

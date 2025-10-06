@@ -3,7 +3,7 @@ from elasticsearch import AsyncElasticsearch, NotFoundError
 from elasticsearch.helpers import async_bulk
 from schemas.rag import Chunk
 from service.core.abstractions.vector_store import BaseVectorStore
-from service.core.config import settings
+from core.config import settings
 from utils.get_logger import log
 from exceptions.base import VectorStoreError
 

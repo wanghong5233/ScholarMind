@@ -1,7 +1,7 @@
 from typing import List, AsyncGenerator, Dict
 from schemas.rag import Chunk
 from service.core.abstractions.llm import BaseLLM, ToolCallResult
-from service.core.config import settings
+from core.config import settings
 from utils.get_logger import log
 
 class LocalLlm(BaseLLM):
