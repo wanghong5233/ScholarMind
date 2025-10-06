@@ -14,6 +14,7 @@ services: # 定义一系列的服务（容器）
       REDIS_PORT: 6379
       REDIS_DB: 0
       SEMANTIC_SCHOLAR_API_KEY: ${SEMANTIC_SCHOLAR_API_KEY:-}
+      RAG_PROJECT_BASE: /app/service/core
     extra_hosts: # 添加额外的主机名到IP地址的映射，类似于/etc/hosts文件
       - "host.docker.internal:host-gateway" # 允许容器连接到宿主机的特殊地址
     env_file: # 从文件加载环境变量
@@ -23,6 +24,7 @@ services: # 定义一系列的服务（容器）
     volumes: # 定义数据卷挂载，用于数据持久化或代码同步
       - ./app:/app # 挂载本地的 app 目录，实现代码热更新
       - D:/Anaconda/envs/llm-dev/nltk_data:/usr/local/nltk_data # 挂载本地NLTK数据目录到容器中
+      - ./storage_root:/app/service/core/storage
     command: ["uvicorn", "app_main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"] # 容器启动时执行的命令，并开启热重载
     restart: unless-stopped # 定义容器的重启策略，除非手动停止，否则容器会自动重启
     depends_on: # 定义服务间的依赖关系，确保依赖的服务先启动
