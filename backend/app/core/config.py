@@ -83,6 +83,9 @@ class Settings(BaseSettings):
     RAG_DEPLOY_BASE: Optional[str] = None
     LOG_LEVEL: str = "INFO"
 
+    # Upload limits
+    MAX_UPLOAD_SIZE_MB: int = 200
+
     class Config:
         env_file_encoding = "utf-8"
         env_file = ".env"

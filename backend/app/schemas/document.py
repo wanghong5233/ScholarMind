@@ -13,9 +13,9 @@ class DocumentBase(BaseModel):
     abstract: Optional[str] = None
     publication_year: Optional[int] = None
     journal_or_conference: Optional[str] = None
-    keywords: Optional[str] = None
+    keywords: Optional[List[str]] = None
     citation_count: Optional[int] = None
-    fields_of_study: Optional[str] = None
+    fields_of_study: Optional[List[str]] = None
     doi: Optional[str] = None
     semantic_scholar_id: Optional[str] = None
     source_url: Optional[str] = None
@@ -32,7 +32,7 @@ class DocumentCreate(DocumentBase):
     它只定义了API请求体中应该包含的字段。
     knowledge_base_id 将从URL路径参数中获取，而不是在请求体中。
     """
-    pass
+    highLight: bool | None = None
 
 class DocumentUpdate(BaseModel):
     """

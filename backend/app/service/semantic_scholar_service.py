@@ -5,6 +5,7 @@ import httpx
 from schemas.document import DocumentCreate
 from utils.get_logger import logger
 from models.document import DocumentIngestionSource
+from service.core.api.utils.ccf_whitelist import is_high_quality_venue
 
 
 class SemanticScholarService:
@@ -100,25 +101,25 @@ class SemanticScholarService:
             pdf_url = open_access_pdf.get("url") or None
             # 兜底：若无 openAccessPdf.url，保留页面 URL 以便前端跳转
             page_url = paper.get("url")
-            transformed.append(
-                DocumentCreate(
-                    title=paper.get("title") or "N/A",
-                    authors=[a.get("name") for a in (paper.get("authors") or []) if a.get("name")],
-                    abstract=paper.get("abstract"),
-                    publication_year=paper.get("year"),
-                    journal_or_conference=paper.get("venue"),
-                    # 关键词/学科领域（当前接口不返回稳定字段，置为 None，后续可扩展）
-                    keywords=None,
-                    citation_count=None,
-                    fields_of_study=None,
-                    doi=external_ids.get("DOI"),
-                    semantic_scholar_id=paper.get("paperId"),
-                    source_url=pdf_url or page_url,
-                    local_pdf_path=None,
-                    file_hash=None,
-                    ingestion_source=DocumentIngestionSource.ONLINE_IMPORT,
-                )
-            )
+            venue = paper.get("venue")
+            high_light = is_high_quality_venue(venue)
+            transformed.append(DocumentCreate(
+                title=paper.get("title") or "N/A",
+                authors=[a.get("name") for a in (paper.get("authors") or []) if a.get("name")],
+                abstract=paper.get("abstract"),
+                publication_year=paper.get("year"),
+                journal_or_conference=venue,
+                keywords=None,
+                citation_count=None,
+                fields_of_study=None,
+                doi=external_ids.get("DOI"),
+                semantic_scholar_id=paper.get("paperId"),
+                source_url=pdf_url or page_url,
+                local_pdf_path=None,
+                file_hash=None,
+                ingestion_source=DocumentIngestionSource.ONLINE_IMPORT,
+                highLight=high_light,
+            ))
         return transformed
 
 

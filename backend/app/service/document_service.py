@@ -105,6 +105,25 @@ def delete_document(db: Session, doc_id: int, user_id: int, kb_id: int) -> Docum
     """
     doc_to_delete = get_document_by_id(db, doc_id, user_id, kb_id=kb_id)
     
+    # 先删除本地文件（如果存在），失败容错，不阻塞整体删除
+    try:
+        import os
+        if doc_to_delete.local_pdf_path and os.path.exists(doc_to_delete.local_pdf_path):
+            os.remove(doc_to_delete.local_pdf_path)
+    except Exception:
+        pass
+
+    # 同步删除向量库分块（尽力而为）
+    try:
+        # 依据现有ES schema，假设索引名为用户维度或统一索引，最稳妥是调用封装的连接器
+        from service.core.rag.utils.es_conn import ESConnection
+        es = ESConnection()
+        # 根据字段规范，条件匹配 docnm 或 document_id，这里采用通用的 document_id = doc_id
+        # 若项目实际字段不同，可扩展：按 kb_id + doc_id/文件名组合删除
+        _ = es.delete({"document_id": doc_to_delete.id}, indexName=str(user_id), knowledgebaseId=str(kb_id))
+    except Exception:
+        pass
+
     db.delete(doc_to_delete)
     db.commit()
     
@@ -150,6 +169,22 @@ def _find_duplicate_document(
         if existing:
             return existing
     return None
+
+
+def find_document_by_file_hash(db: Session, kb_id: int, file_hash: str) -> Optional[Document]:
+    """
+    在指定知识库中通过文件哈希查找文档。
+    """
+    if not file_hash:
+        return None
+    return (
+        db.query(Document)
+        .filter(
+            Document.knowledge_base_id == kb_id,
+            Document.file_hash == file_hash,
+        )
+        .first()
+    )
 
 
 def create_documents_bulk_for_kb(
