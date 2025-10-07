@@ -8,6 +8,7 @@ from router import user_rt
 from router import history_rt
 from router import knowledgebase_rt
 from router import document_rt
+from router import job_rt
 # from router import document_upload_rt
 import os
 import time
@@ -94,6 +95,7 @@ app.include_router(history_rt.router, prefix="/api/history", tags=["History"])
 # app.include_router(document_upload_rt.router, prefix="/api/document-upload", tags=["Document Upload"])
 app.include_router(knowledgebase_rt.router, prefix="/api/knowledgebases", tags=["Knowledge Bases"])
 app.include_router(document_rt.router, prefix="/api/knowledgebases/{kb_id}/documents", tags=["Documents"])
+app.include_router(job_rt.router, prefix="/api/jobs", tags=["Jobs"])
 
 
 if __name__=='__main__':

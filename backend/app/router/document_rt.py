@@ -1,14 +1,20 @@
 from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status, Body
+from fastapi import APIRouter, Depends, HTTPException, status, Body, BackgroundTasks
 from sqlalchemy.orm import Session
 from models.user import User
 from schemas.document import DocumentInDB, DocumentUpdate, DocumentCreate
 from service.auth import get_current_user
 from service import document_service
 from service.ingestion_service import ingestion_service
+from service.job_service import job_service
+from models.job import JobType, JobStatus
+from schemas.job import JobInDB
 from utils.database import get_db
 from exceptions.base import ResourceNotFoundException, PermissionDeniedException, APIException
 from pydantic import BaseModel
+from typing import List as _List
+from fastapi import UploadFile, File
+from service.core.api.utils.file_storage import FileStorageUtil
 
 router = APIRouter()
 
@@ -21,6 +27,67 @@ class OnlineSearchRequest(BaseModel):
 # DTO for add-online request body
 class AddOnlineDocumentsRequest(BaseModel):
     documents: List[DocumentCreate]
+@router.post(
+    "/upload",
+    response_model=JobInDB,
+    summary="本地上传文档（异步）",
+    description="接收多文件上传，创建后台任务进行去重、持久化与落盘。"
+)
+def upload_documents(
+    kb_id: int,
+    background_tasks: BackgroundTasks,
+    files: _List[UploadFile] = File(None),
+    file_single: UploadFile | None = File(None, alias="file"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # 兼容多种前端字段：files（多）或 file（单）
+    up_files: _List[UploadFile] = []
+    if file_single is not None:
+        up_files.append(file_single)
+    if files:
+        up_files.extend(files)
+    if not up_files:
+        raise HTTPException(status_code=400, detail="No files provided")
+    # 基础安全校验：仅允许常见学术格式
+    allowed_exts = {".pdf", ".docx", ".txt"}
+    invalid = [f.filename for f in up_files if f and f.filename and (not any(f.filename.lower().endswith(ext) for ext in allowed_exts))]
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Unsupported file types: {', '.join(invalid)}")
+
+    # 先将文件保存为临时文件并计算哈希，限制最大体积，避免传递 UploadFile
+    metas = []
+    errors = []
+    for f in up_files:
+        try:
+            metas.append(FileStorageUtil.save_upload_temp(f, kb_id))
+        except ValueError as ve:
+            errors.append({"filename": f.filename, "error": str(ve)})
+        except Exception as e:
+            errors.append({"filename": f.filename, "error": "save failed"})
+    if metas and errors:
+        # 部分失败也创建任务，但将失败项写入 payload.resultDetails，任务最终可能为 partial
+        pass
+    if not metas and errors:
+        # 全部失败
+        raise HTTPException(status_code=413, detail={"message": "All files rejected", "errors": errors})
+
+    job = job_service.create_job(
+        db,
+        user_id=current_user.id,
+        kb_id=kb_id,
+        type=JobType.UPLOAD_LOCAL.value,
+        payload={"count": len(metas), "precheckErrors": errors},
+    )
+
+    background_tasks.add_task(
+        ingestion_service.run_upload_local_job,
+        job_id=job.id,
+        user_id=current_user.id,
+        kb_id=kb_id,
+        files=metas,
+    )
+    return job
 
 @router.post(
     "/ingest/search-online",
@@ -52,39 +119,46 @@ def search_online(
 
 @router.post(
     "/ingest/add-online",
-    response_model=List[DocumentInDB],
-    summary="添加在线检索的论文到知识库",
-    description="接收前端勾选确认的论文元数据，执行持久化并去重后返回新增文档"
+    response_model=JobInDB,
+    summary="异步添加在线检索的论文到知识库",
+    description="创建后台任务：持久化并去重所选论文，并尝试下载PDF。返回Job以便轮询进度。"
 )
 def add_online_documents(
     kb_id: int,
+    background_tasks: BackgroundTasks,
     payload: AddOnlineDocumentsRequest = Body(...),
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
-    try:
-        created = ingestion_service.add_online_documents(
-            db=db,
-            user_id=current_user.id,
-            kb_id=kb_id,
-            documents=payload.documents,
-        )
-        # 下载 PDF（尽力而为），并更新本地路径/哈希
-        ingestion_service.download_pdfs_and_update(
-            db=db,
-            user_id=current_user.id,
-            kb_id=kb_id,
-            documents=created,
-        )
-        return created
-    except APIException as e:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(e))
-    except PermissionDeniedException as e:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
-    except ResourceNotFoundException as e:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+    # 创建 Job
+    # 将文档转换为 JSON 可序列化的字典（Enum -> str）
+    docs_payload = []
+    for d in payload.documents:
+        data = d.model_dump()
+        src = data.get("ingestion_source")
+        if hasattr(src, "value"):
+            data["ingestion_source"] = src.value
+        docs_payload.append(data)
+
+    job = job_service.create_job(
+        db,
+        user_id=current_user.id,
+        kb_id=kb_id,
+        type=JobType.INGEST_ONLINE.value,
+        payload={"documents": docs_payload},
+    )
+
+    # 异步执行任务（后台）
+    background_tasks.add_task(
+        ingestion_service.run_ingest_online_job,
+        job_id=job.id,
+        user_id=current_user.id,
+        kb_id=kb_id,
+        documents_payload=docs_payload,
+    )
+
+    # 立即返回 Job（pending），客户端可轮询 `/api/jobs/{id}`
+    return job
 
 
 @router.get(
