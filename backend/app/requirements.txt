@@ -52,3 +52,4 @@ sqlalchemy==1.4.53
 loguru==0.7.3
 sentence-transformers==5.0.0
 torch==2.5.1
+pymupdf==1.24.10

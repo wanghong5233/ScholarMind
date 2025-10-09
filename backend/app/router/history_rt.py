@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, Security
+from fastapi import APIRouter, Depends, Security
 from sqlalchemy.orm import Session
 from utils.database import get_db
 from models.knowledgebase import KnowledgeBase  
@@ -8,7 +8,7 @@ from service.auth import access_security
 from typing import List
 from sqlalchemy import text ,select 
 from urllib.parse import unquote
-from service.document_operations import delete_document
+from fastapi import status
 
 router = APIRouter()
 
@@ -78,35 +78,15 @@ async def delete_document_endpoint(
     db: Session = Depends(get_db)
 ):
     """
-    删除指定名称的文档。
-
-    此接口会根据用户认证信息和提供的文件名，删除对应的知识库文档记录
-    以及相关的存储文件。
-
-    - **路径参数**: `file_name` (str) - 需要被删除的文件名，注意需要进行URL编码。
-    - **认证**: 需要提供有效的Bearer Token。
-    - **返回**: 成功或失败的消息。
+    【已废弃】删除指定名称的文档。
+    
+    此接口已被新的、基于文档ID的删除接口取代，不再维护。
+    调用此接口将直接返回 410 Gone 状态。
     """
-    try:
-        # URL 解码文件名
-        decoded_file_name = unquote(file_name)
-        
-        user_id = str(credentials.subject.get("user_id"))
-        if not user_id:
-            raise HTTPException(status_code=401, detail="Invalid authentication credentials")
-
-        # 调用 service 层的删除方法
-        result = delete_document(user_id, decoded_file_name, db)
-        
-        if result["status"] == "error":
-            raise HTTPException(status_code=404, detail=result["message"])
-            
-        return {"message": result["message"]}
-
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="This API is deprecated. Please use DELETE /api/knowledgebases/{kb_id}/documents/{doc_id} instead."
+    )
 
 @router.get("/get_messages")
 async def get_messages_by_session_id(

@@ -6,6 +6,7 @@ from schemas.document import DocumentCreate
 from utils.get_logger import logger
 from models.document import DocumentIngestionSource
 from service.core.api.utils.ccf_whitelist import is_high_quality_venue
+from urllib.parse import quote
 
 
 class SemanticScholarService:
@@ -18,6 +19,7 @@ class SemanticScholarService:
     """
 
     DEFAULT_PAPER_FIELDS = [
+        "paperId",
         "title",
         "year",
         "abstract",
@@ -26,6 +28,8 @@ class SemanticScholarService:
         "publicationDate",
         "tldr",
         "externalIds",
+        "fieldsOfStudy",
+        "citationCount",
         # 以便后续下载 PDF
         "isOpenAccess",
         "openAccessPdf",
@@ -93,6 +97,45 @@ class SemanticScholarService:
             return []
         return self._transform_results(data["data"]) 
 
+    def get_paper_by_doi(self, doi: str) -> Optional[Dict[str, Any]]:
+        """
+        通过 DOI 精确获取论文（优先于模糊搜索）。
+        """
+        if not doi:
+            return None
+        # 对 DOI 进行 URL 编码以避免路径中的 '/'' 导致 400
+        encoded = quote(doi, safe="")
+        endpoint = f"/paper/DOI:{encoded}"
+        params = {"fields": ",".join(self.DEFAULT_PAPER_FIELDS)}
+        try:
+            data = self._make_request(endpoint, params)
+            if not data or not data.get("title"):
+                return None
+            return data
+        except Exception as e:
+            logger.error(f"Semantic Scholar get_paper_by_doi failed: {e}")
+            # 降级重试：使用精简字段再试一次，规避字段不兼容导致的 400
+            try:
+                minimal_fields = [
+                    "paperId",
+                    "title",
+                    "year",
+                    "authors.name",
+                    "venue",
+                    "externalIds",
+                    "url",
+                    "citationCount",
+                    "fieldsOfStudy",
+                ]
+                params_min = {"fields": ",".join(minimal_fields)}
+                data = self._make_request(endpoint, params_min)
+                if not data or not data.get("title"):
+                    return None
+                return data
+            except Exception as e2:
+                logger.error(f"Semantic Scholar get_paper_by_doi minimal retry failed: {e2}")
+                return None
+
     def _transform_results(self, results: List[Dict[str, Any]]) -> List[DocumentCreate]:
         transformed: List[DocumentCreate] = []
         for paper in results:
@@ -103,15 +146,16 @@ class SemanticScholarService:
             page_url = paper.get("url")
             venue = paper.get("venue")
             high_light = is_high_quality_venue(venue)
+            kws = paper.get("keywords")  # 不再用 fieldsOfStudy 充当关键词
             transformed.append(DocumentCreate(
                 title=paper.get("title") or "N/A",
                 authors=[a.get("name") for a in (paper.get("authors") or []) if a.get("name")],
                 abstract=paper.get("abstract"),
                 publication_year=paper.get("year"),
                 journal_or_conference=venue,
-                keywords=None,
-                citation_count=None,
-                fields_of_study=None,
+                keywords=kws,
+                citation_count=paper.get("citationCount"),
+                fields_of_study=paper.get("fieldsOfStudy"),
                 doi=external_ids.get("DOI"),
                 semantic_scholar_id=paper.get("paperId"),
                 source_url=pdf_url or page_url,

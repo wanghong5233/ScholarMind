@@ -1,0 +1,98 @@
+from __future__ import annotations
+
+from typing import Any, Dict, List
+import os
+from service.core.ingestion.interfaces import ParsedBlock, DocumentParser
+
+
+class LightweightDocumentParser(DocumentParser):
+    """
+    轻量解析器：
+    - 对 .txt 直接读取为单块
+    - 对 .pdf/.docx 返回空块（占位）
+    """
+
+    def parse(self, *, file_path: str) -> List[ParsedBlock]:
+        _, ext = os.path.splitext(file_path.lower())
+        if ext == ".txt":
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+            return [ParsedBlock(text=content, metadata={"page": 1})]
+        if ext == ".pdf":
+            # 兜底：使用 PyMuPDF 提取前若干页纯文本
+            try:
+                import fitz  # 让缺包直接抛错以便定位
+                with fitz.open(file_path) as doc:
+                    pages_text = []
+                    for i in range(min(10, len(doc))):
+                        try:
+                            pages_text.append(doc[i].get_text("text") or "")
+                        except Exception:
+                            pages_text.append("")
+                    full_text = "\n".join(pages_text).strip()
+                if full_text:
+                    return [ParsedBlock(text=full_text, metadata={"page": 1, "note": "lightweight_pymupdf"})]
+            except Exception:
+                pass
+        return [ParsedBlock(text="", metadata={"note": "pending_real_parser"})]
+
+
+class DeepdocDocumentParser(DocumentParser):
+    """
+    基于 deepdoc 的真实解析器：
+    - PDF/DOCX 使用 deepdoc pipeline 提取段落；返回 ParsedBlock 列表
+    - TXT 走轻量路径
+    失败时回退到轻量解析，保证稳健
+    """
+
+    def parse(self, *, file_path: str) -> List[ParsedBlock]:
+        _, ext = os.path.splitext(file_path.lower())
+        if ext == ".txt":
+            return LightweightDocumentParser().parse(file_path=file_path)
+        try:
+            from service.core.rag.app.naive import Pdf as DeepPdf, Docx as DeepDocx
+            if ext == ".pdf":
+                parser = DeepPdf()
+                sections, _ = parser(file_path)
+            elif ext == ".docx":
+                parser = DeepDocx()
+                sections, _ = parser(file_path)
+            else:
+                # 其它格式暂不支持
+                return [ParsedBlock(text="", metadata={"note": f"unsupported_ext:{ext}"})]
+
+            blocks: List[ParsedBlock] = []
+            for item in sections or []:
+                # item 形如 (text, tag)
+                if not isinstance(item, (list, tuple)) or len(item) < 1:
+                    continue
+                text = item[0] or ""
+                tag = item[1] if len(item) > 1 else ""
+                if text.strip():
+                    blocks.append(ParsedBlock(text=text, metadata={"tag": tag}))
+            # 若 deepdoc 解析为空或文本全空，针对 PDF 做 PyMuPDF 兜底提取纯文本
+            if not blocks or all(not (b.text or "").strip() for b in blocks):
+                if ext == ".pdf":
+                    try:
+                        import fitz  # 让缺包直接抛错以便定位
+                        with fitz.open(file_path) as doc:
+                            pages_text = []
+                            # 提取前 10 页，避免超大文件一次性加载
+                            for i in range(min(10, len(doc))):
+                                try:
+                                    pages_text.append(doc[i].get_text("text") or "")
+                                except Exception:
+                                    pages_text.append("")
+                            full_text = "\n".join(pages_text).strip()
+                        if full_text:
+                            return [ParsedBlock(text=full_text, metadata={"page": 1, "note": "fallback_pymupdf"})]
+                    except Exception:
+                        # 回退失败则继续返回 deepdoc 空占位，便于日志观察
+                        pass
+                return [ParsedBlock(text="", metadata={"note": "deepdoc_empty_output"})]
+            return blocks
+        except Exception:
+            # 回退轻量解析
+            return LightweightDocumentParser().parse(file_path=file_path)
+
+

@@ -15,6 +15,11 @@ from pydantic import BaseModel
 from typing import List as _List
 from fastapi import UploadFile, File
 from service.core.api.utils.file_storage import FileStorageUtil
+from service.job_runner_service import execute_job
+from service.job_handler.online_ingestion_handler import OnlineIngestionHandler
+from service.job_handler.local_upload_handler import LocalUploadHandler
+from service import knowledgebase_service
+
 
 router = APIRouter()
 
@@ -41,6 +46,12 @@ def upload_documents(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    # 守卫调用：在执行任何操作之前，先验证知识库是否存在且用户有权访问
+    try:
+        knowledgebase_service.get_kb_by_id(db=db, kb_id=kb_id, user_id=current_user.id)
+    except (ResourceNotFoundException, PermissionDeniedException) as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+
     # 兼容多种前端字段：files（多）或 file（单）
     up_files: _List[UploadFile] = []
     if file_single is not None:
@@ -77,15 +88,13 @@ def upload_documents(
         user_id=current_user.id,
         kb_id=kb_id,
         type=JobType.UPLOAD_LOCAL.value,
-        payload={"count": len(metas), "precheckErrors": errors},
+        payload={"files": metas, "precheckErrors": errors},
     )
 
     background_tasks.add_task(
-        ingestion_service.run_upload_local_job,
+        execute_job,
         job_id=job.id,
-        user_id=current_user.id,
-        kb_id=kb_id,
-        files=metas,
+        handler_cls=LocalUploadHandler,
     )
     return job
 
@@ -101,6 +110,12 @@ def search_online(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    # 守卫调用：在执行任何操作之前，先验证知识库是否存在且用户有权访问
+    try:
+        knowledgebase_service.get_kb_by_id(db=db, kb_id=kb_id, user_id=current_user.id)
+    except (ResourceNotFoundException, PermissionDeniedException) as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+
     try:
         papers = ingestion_service.search_online_papers(
             query=request.query,
@@ -130,7 +145,12 @@ def add_online_documents(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # 创建 Job
+    # 守卫调用：在执行任何操作之前，先验证知识库是否存在且用户有权访问
+    try:
+        knowledgebase_service.get_kb_by_id(db=db, kb_id=kb_id, user_id=current_user.id)
+    except (ResourceNotFoundException, PermissionDeniedException) as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+
     # 将文档转换为 JSON 可序列化的字典（Enum -> str）
     docs_payload = []
     for d in payload.documents:
@@ -150,13 +170,10 @@ def add_online_documents(
 
     # 异步执行任务（后台）
     background_tasks.add_task(
-        ingestion_service.run_ingest_online_job,
+        execute_job,
         job_id=job.id,
-        user_id=current_user.id,
-        kb_id=kb_id,
-        documents_payload=docs_payload,
+        handler_cls=OnlineIngestionHandler,
     )
-
     # 立即返回 Job（pending），客户端可轮询 `/api/jobs/{id}`
     return job
 

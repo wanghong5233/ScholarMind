@@ -29,7 +29,8 @@ from service.core.rag.utils.doc_store_conn import MatchExpr, OrderByExpr, MatchT
 from service.core.rag.nlp import is_english
 from core.config import settings
 
-ES_HOST = settings.ES_HOST
+# 统一使用 settings.ES_URL（可包含认证信息）
+ES_URL = settings.ES_URL
 ATTEMPT_TIME = 2
 PAGERANK_FLD = "pagerank_fea"
 TAG_FLD = "tag_feas"
@@ -57,18 +58,29 @@ class ESConnection():
            该定义规定了索引中每个字段的数据类型和属性。
         """
         self.info = {}
-        logger.info(f"Connecting to Elasticsearch at {ES_HOST}")
+        logger.info(f"Connecting to Elasticsearch at {ES_URL}")
         self.es = Elasticsearch(
-            [ES_HOST],  # Elasticsearch URL
-            basic_auth=("elastic", "infini_rag_flow"),  # 用户名和密码
-            verify_certs=False,  # 禁用 SSL 证书验证
-            timeout=600
+            [ES_URL],  # 完整URL，包含认证信息
+            verify_certs=False,
+            timeout=600,
         )
         logger.info("Elasticsearch connection established")
 
         fp_mapping = os.path.join(get_project_base_directory(), "conf", "mapping.json")
         self.mapping = json.load(open(fp_mapping, "r"))
 
+    def create_index_if_not_exists(self, index_name: str):
+        """
+        如果索引不存在，则创建它。
+        """
+        try:
+            if not self.es.indices.exists(index=index_name):
+                self.es.indices.create(index=index_name, body=self.mapping)
+                logger.info(f"Created index '{index_name}' with mapping.")
+        except Exception as e:
+            logger.error(f"Failed to create index '{index_name}': {e}")
+            # Even if it fails (e.g., race condition), we can proceed,
+            # as the insert operation might still succeed if another process created it.
 
     """
     Helper functions for search result
@@ -227,6 +239,9 @@ class ESConnection():
             list[str]: 一个错误信息列表。如果所有文档都成功插入，则返回空列表。
                        如果存在错误，列表中的每个元素都是一个格式为 "文档ID:错误详情" 的字符串。
         """
+        # 插入前确保索引存在
+        self.create_index_if_not_exists(indexName)
+        
         # Refers to https://www.elastic.co/guide/en/elasticsearch/reference/current/docs-bulk.html
         operations = []
         for d in documents:
@@ -493,8 +508,8 @@ class ESConnection():
                     query["query"]["bool"]["must"].append({"term": {field: value}})
             
             # 打印调试信息
-            print(f"ES 删除查询: {json.dumps(query, ensure_ascii=False, indent=2)}")
-            print(f"索引名: {indexName}")
+            logger.info(f"ES delete query: {json.dumps(query, ensure_ascii=False, indent=2)}")
+            logger.info(f"ES delete index name: {indexName}")
             
             # 执行删除
             response = self.es.delete_by_query(
@@ -503,11 +518,10 @@ class ESConnection():
                 refresh=True
             )
             
-            print(f"ES 删除响应: {response}")
+            logger.info(f"ES delete response: {response}")
             
             return response["deleted"]
             
         except Exception as e:
-            logger.error(f"Failed to delete documents: {str(e)}")
-            print(f"ES 删除失败: {str(e)}")
+            logger.error(f"Failed to delete documents from ES: {str(e)}")
             return 0
