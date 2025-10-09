@@ -4,7 +4,6 @@ from schemas.chat import SessionResponse, ChatRequest
 from fastapi.responses import StreamingResponse
 import os
 from typing import List, Optional
-from service.core.file_parse import execute_insert_process
 from service.core.api.utils.file_utils import get_project_base_directory
 from fastapi_jwt import JwtAuthorizationCredentials
 from service.auth import access_security
@@ -20,7 +19,7 @@ from schemas.document_upload import DocumentUploadResponse, SessionDocumentsResp
 import os
 from service.rag_service import RAGService
 from dependencies import get_rag_service
-from core.config import settings # 导入统一的配置
+from core.config import settings
 
 # 配置日志
 logger.info(f"ES_HOST: {settings.ES_HOST}") # 从 settings 读取
@@ -250,173 +249,15 @@ async def upload_files(
     db: Session = Depends(get_db)
 ):
     """
-    上传一个或多个文件，以构建或扩充用户的个人知识库。
-
-    这是一个重量级操作。接口会接收文件，进行严格的校验，然后将其
-    保存并触发一个后台处理流程，该流程会对文件进行深度解析、文本分块、
-    向量化，并最终将结果索引到向量数据库（如Elasticsearch）和关系型
-    数据库中，使其可用于RAG检索。
-
-    Args:
-        session_id (Optional[str]): 关联的会话ID（可选）。如果未提供，
-            将使用用户ID作为默认的知识库归属标识。
-        files (List[UploadFile]): 一个包含一个或多个待上传文件的列表。
-        credentials (JwtAuthorizationCredentials): 依赖注入，用于用户认证。
-        db (Session): 依赖注入，提供数据库会话以进行文件名查重等操作。
-
-    Returns:
-        dict: 一个处理报告，详细说明了哪些文件成功上传，哪些失败，以及失败原因。
-
-    Raises:
-        HTTPException:
-            - 400: 上传的文件已存在、文件内容为空或格式损坏、所有文件均处理失败等。
-            - 401: 用户认证失败。
-            - 500: 服务器在处理文件时发生未预料的内部错误。
-    """
-    try:
-        user_id = str(credentials.subject.get("user_id"))
-        if not user_id:
-            raise HTTPException(status_code=401, detail="Invalid authentication credentials")
-
-        # 如果没有 session_id，使用 user_id 作为 session_id
-        if session_id is None:
-            session_id = user_id
-
-        # 确保 storage/file 文件夹存在
-        storage_dir = os.path.join(get_project_base_directory(), "storage/file")
-        if not os.path.exists(storage_dir):
-            os.makedirs(storage_dir)
-        
-        # 根据 session_id 创建子文件夹
-        session_dir = os.path.join(storage_dir, session_id)
-        if not os.path.exists(session_dir):
-            os.makedirs(session_dir)
-        
-        # 检查文件名是否重复
-        existing_files = []
-        for file in files:
-            file_name = file.filename
-            # 查询数据库中是否已存在该文件名
-            stmt = select(KnowledgeBase).where(
-                KnowledgeBase.user_id == user_id,
-                KnowledgeBase.file_name == file_name
-            )
-            existing_file = db.execute(stmt).scalar_one_or_none()
-            if existing_file:
-                existing_files.append(file_name)
-        
-        if existing_files:
-            raise HTTPException(
-                status_code=400,
-                detail=f"以下文件已存在，请勿重复上传: {', '.join(existing_files)}"
-            )
-
-        # 处理文件上传
-        successful_files = []
-        failed_files = []
-        
-        for file in files:
-            file_name = file.filename
-            file_path = os.path.join(session_dir, file_name)
-            
-            try:
-                # 读取文件内容
-                file_content = await file.read()
-                
-                # 验证文件内容不为空
-                if not file_content:
-                    failed_files.append(f"{file_name}: 文件内容为空")
-                    continue
-                
-                # 对于 Excel 文件，进行额外验证
-                if file_name.lower().endswith(('.xlsx', '.xls')):
-                    # 检查文件头，xlsx 文件应该是 ZIP 格式
-                    if file_name.lower().endswith('.xlsx'):
-                        # XLSX 文件应该以 PK 开头（ZIP 文件头）
-                        if not file_content.startswith(b'PK'):
-                            failed_files.append(f"{file_name}: 不是有效的 XLSX 文件格式，可能是 XLS 文件")
-                            continue
-                    elif file_name.lower().endswith('.xls'):
-                        # XLS 文件有特定的文件头
-                        if not (file_content.startswith(b'\xd0\xcf\x11\xe0') or 
-                               file_content.startswith(b'\x09\x08')):
-                            failed_files.append(f"{file_name}: 不是有效的 XLS 文件格式")
-                            continue
-                
-                # 保存文件到本地
-                with open(file_path, "wb") as buffer:
-                    buffer.write(file_content)
-                
-                # 验证文件大小
-                if os.path.getsize(file_path) != len(file_content):
-                    failed_files.append(f"{file_name}: 文件保存失败，大小不匹配")
-                    # 修正：清理因写入不完整而残留在磁盘上的文件
-                    if os.path.exists(file_path):
-                        os.remove(file_path)
-                    continue
-                
-                # 保存文件 URL 和 Base64 编码的文件流
-                file_url = f"{storage_dir}/{session_id}/{file_name}"
-                logger.info(f"Processing file: {file_url}")
-
-                # 尝试解析和插入文档
-                try:
-                    execute_insert_process(file_url, file_name, session_id)
-                    logger.info(f"数据插入es成功: {file_name}")
-                    
-                    insert_knowledgebase(user_id, file_name)
-                    logger.info(f"数据插入pg成功: {file_name}")
-                    
-                    successful_files.append(file_name)
-                    
-                except Exception as parse_error:
-                    logger.error(f"文件解析失败 {file_name}: {str(parse_error)}")
-                    failed_files.append(f"{file_name}: 文件解析失败 - {str(parse_error)}")
-                    # 删除已保存的文件
-                    if os.path.exists(file_path):
-                        os.remove(file_path)
-                    continue
-                        
-            except Exception as e:
-                logger.error(f"处理文件失败 {file_name}: {str(e)}")
-                failed_files.append(f"{file_name}: 处理失败 - {str(e)}")
-                continue
-
-        # 构建返回结果
-        if successful_files and not failed_files:
-            return {
-                "status": "success",
-                "message": "所有文件解析成功",
-                "successful_files": successful_files,
-                "total_files": len(files)
-            }
-        elif successful_files and failed_files:
-            return {
-                "status": "partial_success",
-                "message": f"部分文件解析成功，{len(successful_files)} 个成功，{len(failed_files)} 个失败",
-                "successful_files": successful_files,
-                "failed_files": failed_files,
-                "total_files": len(files)
-            }
-        else:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "status": "failed",
-                    "message": "所有文件解析失败",
-                    "failed_files": failed_files,
-                    "total_files": len(files)
-                }
-            )
+    【已废弃】上传文件到旧的知识库流程。
     
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        logger.exception(e)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=str(e)
-        )
+    此接口已被新的、基于知识库ID的上传接口 `/api/knowledgebases/{kb_id}/documents/upload` 取代。
+    调用此接口将直接返回 410 Gone 状态。
+    """
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="This API is deprecated. Please use POST /api/knowledgebases/{kb_id}/documents/upload instead."
+    )
 
 ##################################
 # 查询会话文档上传信息接口

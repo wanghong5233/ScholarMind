@@ -4,6 +4,9 @@ from models.knowledgebase import KnowledgeBase
 from models.user import User
 from schemas.knowledge_base import KnowledgeBaseCreate, KnowledgeBaseUpdate
 from exceptions.base import ResourceNotFoundException, PermissionDeniedException
+from service import document_service
+from utils.get_logger import logger
+
 
 def create_kb_for_user(db: Session, kb_create: KnowledgeBaseCreate, user_id: int) -> KnowledgeBase:
     """
@@ -85,18 +88,31 @@ def update_kb(db: Session, kb_id: int, kb_update: KnowledgeBaseUpdate, user_id: 
 def delete_kb(db: Session, kb_id: int, user_id: int) -> KnowledgeBase:
     """
     删除一个知识库，并校验所有权。
-    由于我们在模型中设置了级联删除，相关的文档也会被自动删除。
-
-    Args:
-        db (Session): 数据库会话。
-        kb_id (int): 要删除的知识库ID。
-        user_id (int): 当前请求用户的ID。
-
-    Returns:
-        KnowledgeBase: 被删除的知识库对象。
+    此操作会级联删除所有关联的文档、本地文件和向量索引。
     """
-    kb = get_kb_by_id(db, kb_id, user_id) # 复用带有权限检查的查询函数
+    kb = get_kb_by_id(db, kb_id, user_id)
 
+    # Note: We must operate on a copy of the list, as the original list
+    # will be modified during the loop due to SQLAlchemy session changes.
+    documents_to_delete = list(kb.documents)
+    
+    logger.info(f"开始删除知识库 '{kb.name}' (ID: {kb.id})，将级联删除 {len(documents_to_delete)} 个文档。")
+
+    # Sequentially call document_service to delete each document and its associated resources
+    for doc in documents_to_delete:
+        try:
+            # delete_document handles its own transaction and removal of file/ES data
+            document_service.delete_document(db=db, doc_id=doc.id, kb_id=kb_id, user_id=user_id)
+        except Exception as e:
+            # Log the error but continue trying to delete other documents
+            logger.error(f"删除文档ID {doc.id} (知识库ID: {kb_id}) 时出错: {e}")
+            
+    # Finally, delete the knowledge base itself
+    # Associated document records should have been cleared by delete_document.
+    # The database's cascade delete serves as a final fallback.
+    logger.info(f"所有关联文档处理完毕，正在删除知识库 '{kb.name}' (ID: {kb.id}) 本身。")
     db.delete(kb)
     db.commit()
+    logger.info(f"知识库 '{kb.name}' (ID: {kb.id}) 已成功删除。")
+    
     return kb

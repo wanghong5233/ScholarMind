@@ -3,6 +3,7 @@ import re
 import hashlib
 import time
 from typing import Optional, Tuple, Dict
+from urllib.parse import urljoin, urlparse
 from uuid import uuid4
 from fastapi import UploadFile
 from core.config import settings
@@ -58,6 +59,37 @@ class FileStorageUtil:
         size = 0
         max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
         with open(temp_path, "wb") as f:
+            # 读取首块做简易 MIME 嗅探
+            first_chunk = file.file.read(8192)
+            if first_chunk:
+                size += len(first_chunk)
+                hasher.update(first_chunk)
+                f.write(first_chunk)
+                # 简易嗅探：PDF/DOCX
+                sniff = first_chunk[:8]
+                if ext.lower() == ".pdf":
+                    if not sniff.startswith(b"%PDF-"):
+                        try:
+                            f.close()
+                        except Exception:
+                            pass
+                        try:
+                            os.remove(temp_path)
+                        except Exception:
+                            pass
+                        raise ValueError("Uploaded file is not a valid PDF (magic header mismatch)")
+                if ext.lower() == ".docx":
+                    if not sniff.startswith(b"PK"):
+                        try:
+                            f.close()
+                        except Exception:
+                            pass
+                        try:
+                            os.remove(temp_path)
+                        except Exception:
+                            pass
+                        raise ValueError("Uploaded file is not a valid DOCX (zip signature missing)")
+            # 继续写入剩余内容
             while True:
                 chunk = file.file.read(1024 * 1024)
                 if not chunk:
@@ -117,6 +149,27 @@ class FileStorageUtil:
         return final_path
 
     @staticmethod
+    def clean_tmp_dir(kb_id: int, max_age_seconds: int = 24 * 3600) -> None:
+        """
+        清理超时的临时文件，避免堆积。非强约束，尽力而为。
+        """
+        tmp_dir = os.path.join(FileStorageUtil.get_kb_storage_dir(kb_id), "tmp")
+        if not os.path.isdir(tmp_dir):
+            return
+        now = int(os.path.getmtime(tmp_dir)) if os.path.exists(tmp_dir) else 0
+        try:
+            for name in os.listdir(tmp_dir):
+                p = os.path.join(tmp_dir, name)
+                try:
+                    mtime = os.path.getmtime(p)
+                    if now - mtime > max_age_seconds:
+                        os.remove(p)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    @staticmethod
     def download_pdf(
         url: str,
         kb_id: int,
@@ -141,10 +194,16 @@ class FileStorageUtil:
         last_exc: Optional[Exception] = None
         for attempt in range(retries + 1):
             try:
-                with httpx.stream("GET", url, timeout=timeout) as resp:
+                # 下载前尝试解析网页源为 PDF 直链
+                try:
+                    url_to_fetch = FileStorageUtil.resolve_pdf_url(url, timeout=timeout)
+                except Exception:
+                    url_to_fetch = url
+
+                with httpx.stream("GET", url_to_fetch, timeout=timeout) as resp:
                     resp.raise_for_status()
                     content_type = resp.headers.get("content-type", "").lower()
-                    if "application/pdf" not in content_type and not url.lower().endswith(".pdf"):
+                    if "application/pdf" not in content_type and not str(resp.url).lower().endswith(".pdf"):
                         raise ValueError(f"URL does not seem to be a PDF: content-type={content_type}")
 
                     hasher = hashlib.sha256()
@@ -161,6 +220,63 @@ class FileStorageUtil:
                     time.sleep(backoff ** attempt)
                 else:
                     raise last_exc
+
+    @staticmethod
+    def resolve_pdf_url(url: str, timeout: int = 15) -> str:
+        """
+        将网页源 URL 解析为 PDF 直链（尽力而为）：
+        - 若已是 PDF（content-type 或后缀），直接返回
+        - 若是 HTML，扫描页面中的 .pdf 链接或 meta refresh 重定向
+        - 常见站点通过简单规则即可奏效（如 arXiv、机构仓储）
+        解析失败则返回原始 URL
+        """
+        try:
+            with httpx.Client(follow_redirects=True, timeout=timeout) as client:
+                r = client.get(url)
+                ct = (r.headers.get("content-type") or "").lower()
+                if "application/pdf" in ct or str(r.url).lower().endswith(".pdf"):
+                    return str(r.url)
+
+                text = r.text or ""
+
+                # 1) 直接查找 .pdf 的 href 链接
+                for m in re.findall(r"href=[\"']([^\"']+\.pdf)(?:[\"']|$)", text, flags=re.IGNORECASE):
+                    candidate = urljoin(str(r.url), m)
+                    try:
+                        h = client.head(candidate)
+                        cth = (h.headers.get("content-type") or "").lower()
+                        if "application/pdf" in cth or candidate.lower().endswith(".pdf"):
+                            return candidate
+                    except Exception:
+                        try:
+                            g = client.get(candidate)
+                            cth = (g.headers.get("content-type") or "").lower()
+                            if "application/pdf" in cth or candidate.lower().endswith(".pdf"):
+                                return candidate
+                        except Exception:
+                            continue
+
+                # 2) 处理 meta refresh 重定向
+                m = re.search(r"<meta[^>]+http-equiv=\"refresh\"[^>]+content=\"\d+;\s*url=([^\"]+)\"", text, flags=re.IGNORECASE)
+                if m:
+                    candidate = urljoin(str(r.url), m.group(1))
+                    try:
+                        g = client.get(candidate)
+                        cth = (g.headers.get("content-type") or "").lower()
+                        if "application/pdf" in cth or str(g.url).lower().endswith(".pdf"):
+                            return str(g.url)
+                    except Exception:
+                        pass
+
+                # 3) 常见站点：arXiv 等
+                parsed = urlparse(str(r.url))
+                if "arxiv.org" in parsed.netloc and "/pdf/" not in parsed.path:
+                    m2 = re.search(r"href=[\"'](/pdf/[^\"']+\.pdf)[\"']", text, flags=re.IGNORECASE)
+                    if m2:
+                        return urljoin(str(r.url), m2.group(1))
+        except Exception:
+            pass
+        return url
 
 
 
