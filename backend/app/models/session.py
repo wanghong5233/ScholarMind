@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, TIMESTAMP
+from sqlalchemy import Column, String, TIMESTAMP, Integer, ForeignKey, Text
 from sqlalchemy.sql import func
 from models.base import Base
 
@@ -20,17 +20,17 @@ class Session(Base):
     # - nullable=False: 会话名称不能为空。
     session_name = Column(String(255), nullable=False)
     
-    # user_id: 该会话所属用户的ID。
-    # - String(255): 数据类型为字符串，长度255。
-    # - nullable=False: 必须关联到一个用户。
+    # user_id: 该会话所属用户的ID（暂保留为字符串以兼容现有数据）。
     user_id = Column(String(255), nullable=False)
+
+    # knowledge_base_id: 该会话绑定的知识库ID（可为空，向后兼容）。
+    knowledge_base_id = Column(Integer, ForeignKey('knowledgebases.id', ondelete='SET NULL'), nullable=True)
     
     # created_at: 会话记录的创建时间戳。
-    # - TIMESTAMP: 数据类型为时间戳。
-    # - nullable=False: 不能为空。
-    # - server_default=func.now(): 当插入新记录时，由数据库自动填充为当前时间。
     created_at = Column(TIMESTAMP, nullable=False, server_default=func.now())
     
     # updated_at: 会话记录的最后更新时间戳。
-    #   通常用于跟踪会话的活跃度。
-    updated_at = Column(TIMESTAMP, nullable=False, server_default=func.now()) 
+    updated_at = Column(TIMESTAMP, nullable=False, server_default=func.now(), onupdate=func.now()) 
+
+    # 会话级默认参数（JSON 字符串），用于保存检索/生成等默认设置
+    defaults_json = Column(Text, nullable=True)

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 import os
 from service.core.ingestion.interfaces import ParsedBlock, DocumentParser
+from utils.get_logger import log
 
 
 class LightweightDocumentParser(DocumentParser):
@@ -51,9 +52,12 @@ class DeepdocDocumentParser(DocumentParser):
             return LightweightDocumentParser().parse(file_path=file_path)
         try:
             from service.core.rag.app.naive import Pdf as DeepPdf, Docx as DeepDocx
+            # deepdoc 解析器需要一个可调用的 callback；若不给会触发 'NoneType' is not callable
+            def _noop_cb(*args, **kwargs):
+                return None
             if ext == ".pdf":
                 parser = DeepPdf()
-                sections, _ = parser(file_path)
+                sections, _ = parser(file_path, callback=_noop_cb)
             elif ext == ".docx":
                 parser = DeepDocx()
                 sections, _ = parser(file_path)
@@ -85,14 +89,26 @@ class DeepdocDocumentParser(DocumentParser):
                                     pages_text.append("")
                             full_text = "\n".join(pages_text).strip()
                         if full_text:
+                            try:
+                                log.warning(f"Deepdoc parse returned empty. Falling back to PyMuPDF. file={file_path}")
+                            except Exception:
+                                pass
                             return [ParsedBlock(text=full_text, metadata={"page": 1, "note": "fallback_pymupdf"})]
                     except Exception:
                         # 回退失败则继续返回 deepdoc 空占位，便于日志观察
                         pass
+                try:
+                    log.warning(f"Deepdoc parse returned empty output with no viable fallback. file={file_path}")
+                except Exception:
+                    pass
                 return [ParsedBlock(text="", metadata={"note": "deepdoc_empty_output"})]
             return blocks
-        except Exception:
+        except Exception as e:
             # 回退轻量解析
+            try:
+                log.warning(f"Deepdoc parse raised exception. Falling back to lightweight parser. file={file_path} err={e}")
+            except Exception:
+                pass
             return LightweightDocumentParser().parse(file_path=file_path)
 
 

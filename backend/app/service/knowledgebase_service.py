@@ -6,6 +6,7 @@ from schemas.knowledge_base import KnowledgeBaseCreate, KnowledgeBaseUpdate
 from exceptions.base import ResourceNotFoundException, PermissionDeniedException
 from service import document_service
 from utils.get_logger import logger
+from datetime import datetime, timedelta
 
 
 def create_kb_for_user(db: Session, kb_create: KnowledgeBaseCreate, user_id: int) -> KnowledgeBase:
@@ -52,28 +53,35 @@ def get_kb_by_id(db: Session, kb_id: int, user_id: int) -> Optional[KnowledgeBas
 def list_kbs_by_user_id(db: Session, user_id: int) -> List[KnowledgeBase]:
     """
     获取指定用户的所有知识库列表。
-
-    Args:
-        db (Session): 数据库会话。
-        user_id (int): 用户的ID。
-
-    Returns:
-        List[KnowledgeBase]: 该用户的知识库ORM对象列表。
     """
     return db.query(KnowledgeBase).filter(KnowledgeBase.user_id == user_id).all()
+
+def list_ephemeral_kbs_older_than(db: Session, user_id: int, older_than_hours: int) -> List[KnowledgeBase]:
+    cutoff = datetime.utcnow() - timedelta(hours=older_than_hours)
+    return (
+        db.query(KnowledgeBase)
+        .filter(
+            KnowledgeBase.user_id == user_id,
+            KnowledgeBase.is_ephemeral == True,  # noqa: E712
+            KnowledgeBase.created_at < cutoff,
+        )
+        .all()
+    )
+
+def cleanup_ephemeral_kbs(db: Session, user_id: int, older_than_hours: int) -> int:
+    victims = list_ephemeral_kbs_older_than(db, user_id, older_than_hours)
+    count = 0
+    for kb in victims:
+        try:
+            delete_kb(db, kb_id=kb.id, user_id=user_id)
+            count += 1
+        except Exception as e:
+            logger.error(f"清理临时知识库 {kb.id} 失败: {e}")
+    return count
 
 def update_kb(db: Session, kb_id: int, kb_update: KnowledgeBaseUpdate, user_id: int) -> Optional[KnowledgeBase]:
     """
     更新一个知识库的名称或描述，并校验所有权。
-
-    Args:
-        db (Session): 数据库会话。
-        kb_id (int): 要更新的知识库ID。
-        kb_update (KnowledgeBaseUpdate): 包含更新信息的Pydantic模型。
-        user_id (int): 当前请求用户的ID。
-
-    Returns:
-        Optional[KnowledgeBase]: 更新后的知识库ORM对象。
     """
     kb = get_kb_by_id(db, kb_id, user_id)  # 复用带有权限检查的查询函数
     
@@ -108,8 +116,6 @@ def delete_kb(db: Session, kb_id: int, user_id: int) -> KnowledgeBase:
             logger.error(f"删除文档ID {doc.id} (知识库ID: {kb_id}) 时出错: {e}")
             
     # Finally, delete the knowledge base itself
-    # Associated document records should have been cleared by delete_document.
-    # The database's cascade delete serves as a final fallback.
     logger.info(f"所有关联文档处理完毕，正在删除知识库 '{kb.name}' (ID: {kb.id}) 本身。")
     db.delete(kb)
     db.commit()

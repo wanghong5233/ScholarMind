@@ -37,6 +37,12 @@ class FileStorageUtil:
         return base
 
     @staticmethod
+    def get_session_tmp_dir(user_id: int | str, session_id: str) -> str:
+        base = get_project_base_directory("storage", "file", "tmp_session", str(user_id), session_id)
+        os.makedirs(base, exist_ok=True)
+        return base
+
+    @staticmethod
     def sanitize_filename(name: str) -> str:
         return _sanitize_filename(name)
 
@@ -122,6 +128,100 @@ class FileStorageUtil:
             "extension": ext.lower(),
             "size": str(size),
         }
+
+    @staticmethod
+    def save_upload_temp_session(file: UploadFile, user_id: int | str, session_id: str) -> Dict[str, str]:
+        """
+        保存上传文件到会话级临时目录 tmp_session/{user}/{session}/，并计算 sha256。
+        返回字段与 save_upload_temp 保持一致，便于 Job 重用。
+        """
+        storage_dir = FileStorageUtil.get_session_tmp_dir(user_id, session_id)
+        original_name = file.filename or "uploaded"
+        _, ext = os.path.splitext(original_name)
+        temp_name = f"tmp_{uuid4().hex}{ext}"
+        temp_path = os.path.join(storage_dir, temp_name)
+
+        hasher = hashlib.sha256()
+        size = 0
+        max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+        with open(temp_path, "wb") as f:
+            first_chunk = file.file.read(8192)
+            if first_chunk:
+                size += len(first_chunk)
+                hasher.update(first_chunk)
+                f.write(first_chunk)
+                sniff = first_chunk[:8]
+                if ext.lower() == ".pdf" and not sniff.startswith(b"%PDF-"):
+                    try:
+                        f.close()
+                    except Exception:
+                        pass
+                    try:
+                        os.remove(temp_path)
+                    except Exception:
+                        pass
+                    raise ValueError("Uploaded file is not a valid PDF (magic header mismatch)")
+                if ext.lower() == ".docx" and not sniff.startswith(b"PK"):
+                    try:
+                        f.close()
+                    except Exception:
+                        pass
+                    try:
+                        os.remove(temp_path)
+                    except Exception:
+                        pass
+                    raise ValueError("Uploaded file is not a valid DOCX (zip signature missing)")
+            while True:
+                chunk = file.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > max_bytes:
+                    try:
+                        f.close()
+                    except Exception:
+                        pass
+                    try:
+                        os.remove(temp_path)
+                    except Exception:
+                        pass
+                    raise ValueError(f"Uploaded file exceeds limit: {settings.MAX_UPLOAD_SIZE_MB} MB")
+                hasher.update(chunk)
+                f.write(chunk)
+
+        try:
+            file.file.seek(0)
+        except Exception:
+            pass
+
+        return {
+            "temp_path": temp_path,
+            "sha256": hasher.hexdigest(),
+            "original_name": original_name,
+            "extension": ext.lower(),
+            "size": str(size),
+        }
+
+    @staticmethod
+    def remove_session_tmp_dir(user_id: int | str, session_id: str) -> None:
+        """删除会话级临时目录，忽略错误。"""
+        try:
+            d = FileStorageUtil.get_session_tmp_dir(user_id, session_id)
+            if os.path.isdir(d):
+                # 安全起见，逐文件删除
+                for name in os.listdir(d):
+                    p = os.path.join(d, name)
+                    try:
+                        if os.path.isfile(p):
+                            os.remove(p)
+                    except Exception:
+                        continue
+                try:
+                    os.rmdir(d)
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     @staticmethod
     def move_temp_to_final(temp_path: str, kb_id: int, doc_id: int, original_name: str) -> str:

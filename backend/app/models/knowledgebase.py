@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, TIMESTAMP, Text
+from sqlalchemy import Column, Integer, String, ForeignKey, TIMESTAMP, Text, Boolean
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from models.base import Base
@@ -16,6 +16,9 @@ class KnowledgeBase(Base):
     
     created_at = Column(TIMESTAMP, nullable=False, server_default=func.now(), comment="创建时间")
     updated_at = Column(TIMESTAMP, nullable=False, server_default=func.now(), onupdate=func.now(), comment="最后更新时间")
+
+    # 是否为临时知识库（会话内短期使用）
+    is_ephemeral = Column(Boolean, nullable=False, server_default='false')
 
     # 建立与User模型的关系
     # back_populates指定了在User模型中，哪个关系属性可以反向访问到这个KnowledgeBase模型

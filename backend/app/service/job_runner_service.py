@@ -65,7 +65,7 @@ def execute_job(job_id: int, handler_cls: Type[BaseJobHandler]):
                 user_id=job.user_id,
                 kb_id=job.knowledge_base_id,
                 type=JobType.PARSE_INDEX.value,
-                payload={"fromJobId": job.id, "docs": result.doc_ids_to_parse},
+                payload={"fromJobId": job.id, "docs": result.doc_ids_to_parse, "sessionId": (job.payload or {}).get("sessionId")},
             )
             try:
                 log.info(f"JobRunner: schedule ParseIndexHandler parse_job_id={parse_job.id} docs={result.doc_ids_to_parse}")

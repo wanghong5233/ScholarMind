@@ -65,9 +65,20 @@ class Settings(BaseSettings):
     SM_RERANKER_TYPE: Literal["local", "dashscope"] = "local"
     SM_LLM_TYPE: Literal["local", "dashscope", "openai"] = "local"
 
+    # RAG 策略与特性开关（T2.2）
+    SM_RETRIEVAL_STRATEGY: Literal["basic", "multi_query", "hyde"] = "basic"  # 检索策略
+    SM_RERANKER_STRATEGY: Literal["none", "supervised", "rl"] = "none"       # 重排策略
+    SM_ENABLE_CITATIONS: bool = True                                             # 是否返回引用
+    SM_STREAMING_ENABLED: bool = True                                            # SSE 流式开关
+    SM_DEFAULT_LANGUAGE: Literal["zh", "en"] = "zh"                           # 默认语言
+    SM_MULTI_QUERY_NUM: int = 4                                                  # Multi-Query 子查询数
+    SM_HYDE_ENABLED: bool = False                                                # 便捷开关（与 strategy=hyde 二选一）
+
     # RAG 超参数
     SM_RAG_TOPK: int = 5
     SM_RETRIEVE_PAGE_SIZE: int = 5
+    SM_MAX_TOKENS: int = 1024
+    SM_TEMPERATURE: float = 0.3
 
     # 本地模型路径与设备
     LOCAL_EMBEDDER_PATH: str = "/models/bge-large-zh-v1.5"
@@ -82,6 +93,10 @@ class Settings(BaseSettings):
     RAG_PROJECT_BASE: Optional[str] = None
     RAG_DEPLOY_BASE: Optional[str] = None
     LOG_LEVEL: str = "INFO"
+
+    # Quotas (development defaults; production should tune)
+    DAILY_UPLOAD_MB: int = 1024  # per-user daily upload quota
+    DAILY_ASK_COUNT: int = 5000  # per-user daily ask count
 
     # Upload limits
     MAX_UPLOAD_SIZE_MB: int = 200
