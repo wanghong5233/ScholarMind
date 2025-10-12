@@ -417,6 +417,10 @@ class ESConnection():
             orders = list()
             for field, order in orderBy.fields:
                 order = "asc" if order == 0 else "desc"
+                # _score 是 ES 的内置排序字段，不支持 unmapped_type 等扩展参数
+                if field == "_score":
+                    orders.append({field: {"order": order}})
+                    continue
                 if field in ["page_num_int", "top_int"]:
                     order_info = {"order": order, "unmapped_type": "float",
                                   "mode": "avg", "numeric_type": "double"}

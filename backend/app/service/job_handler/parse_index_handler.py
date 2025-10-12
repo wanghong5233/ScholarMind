@@ -22,24 +22,44 @@ class ParseIndexHandler(BaseJobHandler):
         indexer = ESIndexer()
         metadata_extractor = DefaultMetadataExtractor()
 
+        session_index = None
+        try:
+            sess_id = (payload or {}).get("sessionId")
+            if sess_id:
+                session_index = f"sm_sess_{sess_id}"
+        except Exception:
+            session_index = None
+
         for doc_id in doc_ids:
             try:
                 doc = document_service.get_document_by_id(db, doc_id, user_id, kb_id)
                 if not doc.local_pdf_path or not os.path.exists(doc.local_pdf_path):
                     raise Exception("local file not found")
 
-                blocks = parser.parse(file_path=doc.local_pdf_path)
+                try:
+                    blocks = parser.parse(file_path=doc.local_pdf_path)
+                except Exception as e:
+                    log.error(f"ParseIndex: parse failed doc_id={doc_id} path={doc.local_pdf_path}: {e}")
+                    raise
                 try:
                     log.info(f"ParseIndex: parsed blocks count doc_id={doc_id} count={len(blocks)}")
                 except Exception:
                     pass
                 doc = metadata_extractor.extract_and_enrich(db=db, document=doc, blocks=blocks)
-                chunks = chunker.chunk(blocks=blocks)
+                try:
+                    chunks = chunker.chunk(blocks=blocks)
+                except Exception as e:
+                    log.error(f"ParseIndex: chunk failed doc_id={doc_id}: {e}")
+                    raise
                 try:
                     log.info(f"ParseIndex: chunked count doc_id={doc_id} count={len(chunks)}")
                 except Exception:
                     pass
-                records = embedder.embed(chunks=chunks)
+                try:
+                    records = embedder.embed(chunks=chunks)
+                except Exception as e:
+                    log.error(f"ParseIndex: embed failed doc_id={doc_id}: {e}")
+                    raise
                 try:
                     log.info(f"ParseIndex: embedded records count doc_id={doc_id} count={len(records)}")
                 except Exception:
@@ -57,7 +77,11 @@ class ParseIndexHandler(BaseJobHandler):
                     if doc.doi:
                         md.setdefault("doi", doc.doi)
                 
-                indexer.index(records=records, kb_id=kb_id, document_id=doc_id)
+                try:
+                    indexer.index(records=records, kb_id=kb_id, document_id=doc_id, session_index=session_index)
+                except Exception as e:
+                    log.error(f"ParseIndex: index failed doc_id={doc_id}: {e}")
+                    raise
                 result.details.append({"doc_id": doc_id, "status": "ok", "chunks": len(records)})
                 result.succeeded += 1
             except Exception as e:

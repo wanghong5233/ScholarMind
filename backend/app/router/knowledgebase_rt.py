@@ -1,13 +1,26 @@
 from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Body, BackgroundTasks
 from sqlalchemy.orm import Session
-
-from schemas.knowledge_base import KnowledgeBaseCreate, KnowledgeBaseUpdate, KnowledgeBaseInDB
-from service import knowledgebase_service
-from utils.database import get_db
 from models.user import User
+from schemas.document import DocumentInDB, DocumentUpdate, DocumentCreate
+from schemas.knowledge_base import KnowledgeBaseInDB, KnowledgeBaseCreate, KnowledgeBaseUpdate
 from service.auth import get_current_user
-from exceptions.base import ResourceNotFoundException, PermissionDeniedException
+from service import document_service
+from service.ingestion_service import ingestion_service
+from service.job_service import job_service
+from models.job import JobType, JobStatus
+from schemas.job import JobInDB
+from utils.database import get_db
+from exceptions.base import ResourceNotFoundException, PermissionDeniedException, APIException
+from pydantic import BaseModel
+from typing import List as _List
+from fastapi import UploadFile, File
+from service.core.api.utils.file_storage import FileStorageUtil
+from service.job_runner_service import execute_job
+from service.job_handler.online_ingestion_handler import OnlineIngestionHandler
+from service.job_handler.local_upload_handler import LocalUploadHandler
+from service import knowledgebase_service
+
 
 router = APIRouter()
 
@@ -76,4 +89,23 @@ def delete_knowledge_base(
         return knowledgebase_service.delete_kb(db=db, kb_id=kb_id, user_id=current_user.id)
     except (ResourceNotFoundException, PermissionDeniedException) as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
+
+
+class CleanupRequest(BaseModel):
+    olderThanHours: int = 24
+
+@router.post(
+    "/cleanup-ephemeral",
+    summary="清理过期的临时知识库",
+    description="按时间阈值（小时）清理当前用户的临时知识库及其文档/向量等资源。",
+)
+def cleanup_ephemeral_kbs(
+    payload: CleanupRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    if payload.olderThanHours <= 0 or payload.olderThanHours > 24 * 365:
+        raise HTTPException(status_code=400, detail="olderThanHours 范围不合法")
+    cleaned = knowledgebase_service.cleanup_ephemeral_kbs(db, current_user.id, payload.olderThanHours)
+    return {"cleaned": cleaned}
 

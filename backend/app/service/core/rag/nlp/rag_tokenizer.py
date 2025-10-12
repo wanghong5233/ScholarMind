@@ -261,7 +261,23 @@ class RagTokenizer:
         return self.score_(res[::-1])
 
     def english_normalize_(self, tks):
-        return [self.stemmer.stem(self.lemmatizer.lemmatize(t)) if re.match(r"[a-zA-Z_-]+$", t) else t for t in tks]
+        safe = []
+        for t in tks:
+            if not re.match(r"[a-zA-Z_-]+$", t):
+                safe.append(t)
+                continue
+            # 词形还原可能依赖 wordnet 数据，缺失时退回原词
+            try:
+                lemma = self.lemmatizer.lemmatize(t)
+            except Exception:
+                lemma = t
+            # PorterStemmer 不依赖外部数据，稳定
+            try:
+                stem = self.stemmer.stem(lemma)
+            except Exception:
+                stem = lemma
+            safe.append(stem)
+        return safe
 
     def tokenize(self, line):
         line = re.sub(r"\W+", " ", line)
@@ -269,7 +285,13 @@ class RagTokenizer:
         line = self._tradi2simp(line)
         zh_num = len([1 for c in line if is_chinese(c)])
         if zh_num == 0:
-            return " ".join([self.stemmer.stem(self.lemmatizer.lemmatize(t)) for t in word_tokenize(line)])
+            # 优先使用 NLTK 的分词；若缺少 punkt 等资源则退回正则分词
+            try:
+                tokens = word_tokenize(line)
+            except Exception:
+                # 简单英文/数字切分回退
+                tokens = re.findall(r"[A-Za-z]+|[0-9]+|[\-_'./]+", line)
+            return " ".join(self.english_normalize_(tokens))
 
         arr = re.split(self.SPLIT_CHAR, line)
         res = []

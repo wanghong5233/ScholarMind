@@ -19,6 +19,8 @@ from service.job_runner_service import execute_job
 from service.job_handler.online_ingestion_handler import OnlineIngestionHandler
 from service.job_handler.local_upload_handler import LocalUploadHandler
 from service import knowledgebase_service
+from core.config import settings
+from utils.quota import quota
 
 
 router = APIRouter()
@@ -82,6 +84,25 @@ def upload_documents(
     if not metas and errors:
         # 全部失败
         raise HTTPException(status_code=413, detail={"message": "All files rejected", "errors": errors})
+
+    # 配额检查：按用户每日上传字节额度
+    try:
+        total_bytes = sum(int(m.get("size", "0")) for m in metas)
+    except Exception:
+        total_bytes = 0
+    day_key = f"upload:bytes:day:{current_user.id}:{int(__import__('time').time())//86400}"
+    if not quota.consume_bytes(day_key, amount=total_bytes, limit=settings.DAILY_UPLOAD_MB * 1024 * 1024, window_seconds=86400):
+        # 清理已保存的临时文件
+        for m in metas:
+            p = m.get("temp_path")
+            try:
+                if p:
+                    import os
+                    if os.path.isfile(p):
+                        os.remove(p)
+            except Exception:
+                continue
+        raise HTTPException(status_code=429, detail="Daily upload quota exceeded")
 
     job = job_service.create_job(
         db,

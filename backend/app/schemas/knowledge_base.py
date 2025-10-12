@@ -16,9 +16,9 @@ class KnowledgeBaseBase(BaseModel):
 class KnowledgeBaseCreate(KnowledgeBaseBase):
     """
     用于创建新知识库的 Pydantic 模型。
-    在基础模型之上，没有额外字段，因为创建时只需要 name 和可选的 description。
+    在基础模型之上，允许可选的 is_ephemeral 标记。
     """
-    pass
+    is_ephemeral: Optional[bool] = False
 
 class KnowledgeBaseUpdate(KnowledgeBaseBase):
     """
@@ -37,6 +37,7 @@ class KnowledgeBaseInDBBase(KnowledgeBaseBase):
     user_id: int
     created_at: datetime
     updated_at: datetime
+    is_ephemeral: bool = False
 
     class Config:
         # orm_mode = True 在 Pydantic V2 中已废弃，改用 from_attributes = True
