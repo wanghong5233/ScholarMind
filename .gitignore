@@ -206,10 +206,36 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# my
+# Project-specific ignore rules
+# Personal development notes and planning documents
 二次开发计划.md
 开发笔记.md
 行动纲领.md
 note_original.md
+简历材料.md
+
+# Cursor editor files
 .cursor/
+
+# Local runtime data and storage
 storage_root/
+
+# Test files (sample documents for development)
+backend/test_*.pdf
+backend/test_*.docx
+backend/test_*.txt
+backend/RAG文档处理与分块流程图.pdf
+
+# Backup and original files
+backend/README_original.md
+
+# Large model files (optional: uncomment if you don't want to track ONNX models)
+# backend/app/service/core/rag/**/*.onnx
+
+# Temporary hash directories
+backend/app/service/core/9b5ad71b2ce5302211f9c61530b329a4922fc6a4
+
+# Frontend environment files
+frontend/.env
+frontend/.env.local
+frontend/.env.production

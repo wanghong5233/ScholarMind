@@ -1,0 +1,15 @@
+<svg width="40" height="40" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background circle -->
+  <circle cx="20" cy="20" r="18" fill="#4F46E5" stroke="#6366F1" stroke-width="2"/>
+  
+  <!-- Brain icon (simplified) -->
+  <path d="M15 14C15 12.3431 16.3431 11 18 11C18.7403 11 19.4119 11.2624 19.9371 11.7029C20.2871 10.6922 21.2517 10 22.5 10C24.1569 10 25.5 11.3431 25.5 13C25.5 13.1652 25.4882 13.3276 25.4654 13.4866C26.4115 13.8444 27 14.7562 27 15.8C27 17.2359 25.8359 18.4 24.4 18.4C24.1791 18.4 23.9646 18.3737 23.7599 18.3242C23.5935 19.3393 22.7125 20.1 21.6 20.1C20.9258 20.1 20.3258 19.7951 19.9371 19.2971C19.4119 19.7376 18.7403 20 18 20C16.3431 20 15 18.6569 15 17C15 16.2597 15.2624 15.5881 15.7029 15.0629C15.2624 14.5377 15 13.866 15 13.1252" fill="white"/>
+  
+  <!-- Book pages -->
+  <path d="M12 22H28V28C28 28.5523 27.5523 29 27 29H13C12.4477 29 12 28.5523 12 28V22Z" fill="white"/>
+  <path d="M14 24H26M14 26H26" stroke="#4F46E5" stroke-width="1.5" stroke-linecap="round"/>
+  
+  <!-- "S" letter accent -->
+  <text x="20" y="36" font-family="Arial, sans-serif" font-size="8" font-weight="bold" fill="white" text-anchor="middle">SM</text>
+</svg>
+

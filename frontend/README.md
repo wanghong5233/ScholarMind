@@ -1,50 +1,61 @@
-# React + TypeScript + Vite
+# ScholarMind - Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+> React + TypeScript + Vite powered frontend for ScholarMind.
 
-Currently, two official plugins are available:
+## 🚀 Quick Start
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react/README.md) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+### Prerequisites
 
-## Expanding the ESLint configuration
+- Node.js 18+ and npm/pnpm
+- Backend API running at `http://localhost:8000` (see `../backend/README.md`)
 
-If you are developing a production application, we recommend updating the configuration to enable type aware lint rules:
+### Development
 
-- Configure the top-level `parserOptions` property like this:
+```bash
+# Install dependencies
+npm install
 
-```js
-export default tseslint.config({
-  languageOptions: {
-    // other options...
-    parserOptions: {
-      project: ['./tsconfig.node.json', './tsconfig.app.json'],
-      tsconfigRootDir: import.meta.dirname,
-    },
-  },
-})
+# Start development server
+npm run dev
 ```
 
-- Replace `tseslint.configs.recommended` to `tseslint.configs.recommendedTypeChecked` or `tseslint.configs.strictTypeChecked`
-- Optionally add `...tseslint.configs.stylisticTypeChecked`
-- Install [eslint-plugin-react](https://github.com/jsx-eslint/eslint-plugin-react) and update the config:
+The app will be available at `http://localhost:5173`.
 
-```js
-// eslint.config.js
-import react from 'eslint-plugin-react'
+## 🛠️ Tech Stack
 
-export default tseslint.config({
-  // Set the react version
-  settings: { react: { version: '18.3' } },
-  plugins: {
-    // Add the react plugin
-    react,
-  },
-  rules: {
-    // other rules...
-    // Enable its recommended rules
-    ...react.configs.recommended.rules,
-    ...react.configs['jsx-runtime'].rules,
-  },
-})
+- **Framework**: React 18 with TypeScript
+- **Build Tool**: Vite
+- **UI Library**: Ant Design
+- **State Management**: Valtio
+- **Routing**: React Router v6
+- **HTTP Client**: Axios
+- **Code Style**: ESLint + Prettier
+
+## 📦 Build for Production
+
+```bash
+npm run build
 ```
+
+The production-ready bundle will be in the `dist/` directory.
+
+## 🔧 Project Structure
+
+```
+src/
+├── api/           # API client and request utilities
+├── components/    # Reusable UI components
+├── pages/         # Page-level components
+├── router/        # Routing configuration
+├── store/         # State management (Valtio)
+├── utils/         # Helper functions
+└── assets/        # Static resources
+```
+
+## 🎨 Features
+
+- **Session-based Chat**: Multi-turn conversation with streaming responses
+- **Document Management**: Upload, parse, and manage academic papers
+- **Knowledge Base**: Organize documents into collections
+- **Citation Visualization**: Track and navigate paper citations
+- **Cross-Paper Comparison**: Side-by-side analysis (backend feature integration)

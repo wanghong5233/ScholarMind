@@ -1,6 +1,6 @@
 import iconNewchat from '@/assets/layout/newchat.svg'
 import iconRepository from '@/assets/layout/repository.svg'
-import logo from '@/assets/logo.png'
+import logo from '@/assets/logo.svg'
 import { deviceState } from '@/store/device'
 import { useNavigate } from 'react-router-dom'
 import { useSnapshot } from 'valtio'
