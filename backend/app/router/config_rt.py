@@ -33,6 +33,11 @@ def get_feature_flags():
         "retrievePageSize": settings.SM_RETRIEVE_PAGE_SIZE,
         "maxTokens": settings.SM_MAX_TOKENS,
         "temperature": settings.SM_TEMPERATURE,
+        # history controls
+        "historyMaxTokens": settings.SM_HISTORY_MAX_TOKENS,
+        "historyHeadroom": settings.SM_HISTORY_HEADROOM,
+        "historyRecentTurns": settings.HISTORY_RECENT_TURNS,
+        "enableRollingSummary": settings.ENABLE_ROLLING_SUMMARY,
     }
 
 

@@ -2,7 +2,7 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status, Body, BackgroundTasks
 from sqlalchemy.orm import Session
 from models.user import User
-from schemas.document import DocumentInDB, DocumentUpdate, DocumentCreate
+from schemas.document import DocumentInDB, DocumentUpdate, DocumentCreate, CriticalQuestionsResponse
 from service.auth import get_current_user
 from service import document_service
 from service.ingestion_service import ingestion_service
@@ -21,6 +21,10 @@ from service.job_handler.local_upload_handler import LocalUploadHandler
 from service import knowledgebase_service
 from core.config import settings
 from utils.quota import quota
+from service.core.rag.service import RAGService
+from utils.rate_limiter import rate_limiter
+from utils.ask_logger import AskEventLogger
+from service import document_service
 
 
 router = APIRouter()
@@ -266,3 +270,89 @@ def delete_document(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+
+
+@router.get(
+    "/{doc_id}/critical_questions",
+    response_model=CriticalQuestionsResponse,
+    summary="批判性问题生成",
+    description="基于指定文档进行聚焦检索，生成若干高价值批判性问题（不调用 LLM 生成答案，仅输出问题）。"
+)
+def generate_critical_questions(
+    kb_id: int,
+    doc_id: int,
+    top_n: int = 6,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # 权限校验：KB 与 文档归属
+    try:
+        knowledgebase_service.get_kb_by_id(db=db, kb_id=kb_id, user_id=current_user.id)
+    except (ResourceNotFoundException, PermissionDeniedException) as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    try:
+        document_service.get_document_by_id(db=db, doc_id=doc_id, user_id=current_user.id, kb_id=kb_id)
+    except (ResourceNotFoundException, PermissionDeniedException) as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
+
+    # 频控与配额
+    bucket = f"criticalq:{current_user.id}:{kb_id}:{doc_id}"
+    if not rate_limiter.check_and_consume(bucket, limit=60, window_seconds=60):
+        raise HTTPException(status_code=429, detail="Too Many Requests")
+    day_key = f"criticalq:day:{current_user.id}:{int(__import__('time').time())//86400}"
+    if not quota.consume_count(day_key, settings.DAILY_ASK_COUNT, window_seconds=86400):
+        raise HTTPException(status_code=429, detail="Daily quota exceeded")
+
+    # 构造 meta-prompt：聚焦在文档的主要贡献、方法、实验、局限与未来工作
+    dims = [
+        "核心问题与动机",
+        "关键方法与假设",
+        "实验设计与数据",
+        "主要结论与局限",
+        "与相关工作比较",
+        "潜在扩展与开放问题",
+    ]
+    n = max(1, min(int(top_n), len(dims)))
+    question_intro = (
+        "请基于以下论文内容，面向深入阅读提出" + str(n) + "个批判性问题，要求具体、可操作，避免泛泛而谈。"
+    )
+    # 使用检索聚焦该文档
+    rag = RAGService()
+    query = "; ".join(dims[:n])
+    chunks = rag.retrieve(query=query, kb_id=kb_id, top_k=max(8, n*4), focus_doc_ids=[doc_id], index_override=None)
+    # 生成问题列表
+    prompt = (
+        question_intro + "\n请按序号给出：1) 问题描述 2) 指向性提示（可引用 [文档ID:页码]）。"
+    )
+    content = rag.generate(question=prompt, chunks=chunks, stream=False, history=[], compress_history=False)
+    # 将生成文本切分为问题列表（鲁棒：按行或按数字序号分割）
+    text = (content or "").strip()
+    lines = [x.strip(" -•\t").strip() for x in text.splitlines() if x.strip()]
+    # 简单规整：若为长段落，则按 '1.' '2.' 等编号分割
+    if len(lines) <= 2:
+        import re as _re
+        parts = _re.split(r"(?:^|\n)\s*(?:\d+\.|\d+、|\(\d+\))\s*", text)
+        lines = [p.strip() for p in parts if p and p.strip()]
+    questions = lines[:n]
+    citations = rag.build_citations(chunks)
+    debug = {"doc_id": doc_id, "dims": dims[:n], "retrieval": rag.get_last_retrieval_debug() or {}}
+    # 观测日志
+    try:
+        AskEventLogger().log_event({
+            "user_id": str(current_user.id),
+            "session_id": None,
+            "kb_id": int(kb_id),
+            "question": prompt[:512],
+            "top_k": len(chunks),
+            "strategy": getattr(settings, "SM_RETRIEVAL_STRATEGY", "basic"),
+            "hits": len(chunks),
+            "retrieval": rag.get_last_retrieval_debug() or {},
+            "citations": citations,
+            "usage": rag.get_last_usage() or {},
+            "answer_chars": len(content or ""),
+            "variant": "critical_questions",
+        })
+    except Exception:
+        pass
+
+    return CriticalQuestionsResponse(questions=questions, citations=citations, debug=debug)

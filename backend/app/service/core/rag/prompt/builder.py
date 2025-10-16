@@ -30,15 +30,21 @@ class PromptBuilder:
         chunks: List[Dict[str, Any]],
         style: Optional[str] = None,
         extra_system: Optional[str] = None,
+        history_summary: Optional[str] = None,
     ) -> List[PromptSection]:
         system = self._build_system(extra_system)
         context = self._build_context(chunks)
         instr = self._build_instruction(question, style)
-        sections = [
-            PromptSection(role="system", content=system),
-            PromptSection(role="system", content=context),
-            PromptSection(role="user", content=instr),
-        ]
+        sections: List[PromptSection] = [PromptSection(role="system", content=system)]
+        if history_summary:
+            hs_text = (
+                f"先阅读对话历史的要点摘要：\n{history_summary}\n"
+                if self.language == "zh"
+                else f"Read the summarized dialogue history first:\n{history_summary}\n"
+            )
+            sections.append(PromptSection(role="system", content=hs_text))
+        sections.append(PromptSection(role="system", content=context))
+        sections.append(PromptSection(role="user", content=instr))
         return sections
 
     # --- internals ---

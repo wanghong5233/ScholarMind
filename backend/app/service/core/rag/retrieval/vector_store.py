@@ -124,14 +124,16 @@ class ESVectoreStore(VectorStore):
         seen_keys: set[str] = set()
         deduped: List[RetrievedChunk] = []
         for c in raw_chunks:
-            doc_id = str((c.metadata or {}).get("document_id", ""))
-            page = str((c.metadata or {}).get("page", ""))
-            off_s = str((c.metadata or {}).get("offset_start", ""))
-            off_e = str((c.metadata or {}).get("offset_end", ""))
-            key = f"{doc_id}-{page}-{off_s}-{off_e}"
-            # 若缺 offset 信息，退化为文本首64字符做粗去重
-            if key == "---":
-                key = (doc_id + ":" + (c.text or "")[:64].strip().lower())
+            md = c.metadata or {}
+            doc_id = str(md.get("document_id") or "")
+            page = str(md.get("page") or "")
+            off_s = md.get("offset_start")
+            off_e = md.get("offset_end")
+            if off_s is None or off_e is None or str(off_s) == "" or str(off_e) == "":
+                # 退化：使用 (doc_id,page,文本前缀) 作为 key，增强稳定性
+                key = f"{doc_id}:{page}:{(c.text or '')[:64].strip().lower()}"
+            else:
+                key = f"{doc_id}-{page}-{off_s}-{off_e}"
             if key in seen_keys:
                 continue
             seen_keys.add(key)

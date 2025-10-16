@@ -1,5 +1,6 @@
 from typing import Optional, Literal
 from pydantic import BaseModel, Field
+from typing import List, Dict, Any
 
 
 class SessionDefaults(BaseModel):
@@ -32,3 +33,20 @@ class SessionDetail(BaseModel):
     sessionId: str
     kbId: Optional[int] = None
     sessionName: str
+
+
+# --- Compare API ---
+class CompareRequest(BaseModel):
+    """跨论文对比请求。
+    - docIds: 需要对比的文档 ID 列表（同一会话/知识库下）。
+    - dimensions: 对比维度（如 ["Methodology", "Results", "Limitations"]）。
+    """
+    docIds: List[int] = Field(..., min_items=2, description="待对比的 document_id 列表（至少2篇）")
+    dimensions: List[str] = Field(..., min_items=1, description="对比维度列表")
+
+
+class CompareResponse(BaseModel):
+    answer: str = Field(..., description="Markdown 表格形式的对比结果")
+    citations: List[Dict[str, Any]] = Field(default_factory=list)
+    usage: Dict[str, Any] = Field(default_factory=dict)
+    debug: Dict[str, Any] = Field(default_factory=dict)

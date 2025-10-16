@@ -39,18 +39,45 @@ class SimpleAPIEmbedder(Embedder):
     def embed(self, *, chunks: Iterable[ParsedBlock]) -> List[Dict[str, object]]:
         logger = logging.getLogger("ingestion.embedder")
         chunk_list = list(chunks)
-        texts = [c.text or "" for c in chunk_list]
-        if not texts:
+        if not chunk_list:
             logger.info("SimpleAPIEmbedder: no texts to embed (0 chunks)")
             return []
-        try:
-            embeddings = generate_embedding(texts) or []
-        except Exception as e:
-            logger.error(f"SimpleAPIEmbedder: generate_embedding failed: {e}")
-            embeddings = []
-        logger.info(f"SimpleAPIEmbedder: chunks={len(chunk_list)} embeddings_len={len(embeddings)}")
+        # 先读取预嵌入，缺失的再批量请求
+        pre_vecs: List[List[float] | None] = []
+        missing_indices: List[int] = []
+        for i, c in enumerate(chunk_list):
+            md = c.metadata or {}
+            v = md.get("pre_embedding") if isinstance(md, dict) else None
+            if isinstance(v, list) and v and isinstance(v[0], (int, float)):
+                pre_vecs.append(v)
+            else:
+                pre_vecs.append(None)
+                missing_indices.append(i)
+
+        embeddings: List[List[float] | None] = [None] * len(chunk_list)
+        # 批量嵌入缺失部分
+        if missing_indices:
+            texts_missing = [(chunk_list[i].text or "") for i in missing_indices]
+            try:
+                gen = generate_embedding(texts_missing) or []
+            except Exception as e:
+                logger.error(f"SimpleAPIEmbedder: generate_embedding failed: {e}")
+                gen = []
+            for k, i in enumerate(missing_indices):
+                embeddings[i] = gen[k] if k < len(gen) else None
+
+        # 合并预嵌入
+        for i in range(len(chunk_list)):
+            if pre_vecs[i] is not None:
+                embeddings[i] = pre_vecs[i]
+
+        logger.info(f"SimpleAPIEmbedder: chunks={len(chunk_list)} embeddings_miss={len(missing_indices)}")
         # 兜底：若返回不足，填充空向量
-        dim = len(embeddings[0]) if embeddings and embeddings[0] is not None else 1024
+        dim = 1024
+        for v in embeddings:
+            if isinstance(v, list) and v:
+                dim = len(v)
+                break
         records: List[Dict[str, object]] = []
         for idx, c in enumerate(chunk_list):
             emb = embeddings[idx] if idx < len(embeddings) else None

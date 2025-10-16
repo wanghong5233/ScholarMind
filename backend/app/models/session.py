@@ -34,3 +34,5 @@ class Session(Base):
 
     # 会话级默认参数（JSON 字符串），用于保存检索/生成等默认设置
     defaults_json = Column(Text, nullable=True)
+    # 滚动摘要，保存多轮历史的压缩表示（可选）
+    rolling_summary = Column(Text, nullable=True)

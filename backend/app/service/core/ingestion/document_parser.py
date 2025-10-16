@@ -4,6 +4,7 @@ from typing import Any, Dict, List
 import os
 from service.core.ingestion.interfaces import ParsedBlock, DocumentParser
 from utils.get_logger import log
+from core.config import settings
 
 
 class LightweightDocumentParser(DocumentParser):
@@ -102,6 +103,28 @@ class DeepdocDocumentParser(DocumentParser):
                 except Exception:
                     pass
                 return [ParsedBlock(text="", metadata={"note": "deepdoc_empty_output"})]
+            # 可选：多模态产物接入为 Chunk（基于 deepdoc caption/table 简化生成）
+            try:
+                if getattr(settings, "SM_MULTIMODAL_PARSE_ENABLED", False):
+                    # 引入轻量 caption/table 转文本（如存在 deepdoc 的 caption/tag 信息）
+                    extra_blocks: List[ParsedBlock] = []
+                    for it in sections or []:
+                        if not isinstance(it, (list, tuple)) or len(it) < 2:
+                            continue
+                        text = it[0] or ""
+                        tag = it[1] or ""
+                        t = str(tag).lower()
+                        if not text.strip():
+                            continue
+                        if "figure" in t or "caption" in t:
+                            extra_blocks.append(ParsedBlock(text=text.strip(), metadata={"element_type": "figure_summary"}))
+                        elif "table" in t:
+                            # 简化：表格文本直接归并；后续可转 Markdown
+                            extra_blocks.append(ParsedBlock(text=text.strip(), metadata={"element_type": "table_struct"}))
+                    if extra_blocks:
+                        blocks.extend(extra_blocks)
+            except Exception:
+                pass
             return blocks
         except Exception as e:
             # 回退轻量解析
