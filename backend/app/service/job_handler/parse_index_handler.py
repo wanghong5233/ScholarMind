@@ -5,6 +5,7 @@ from service.job_handler.interfaces import BaseJobHandler, JobResult
 from utils.get_logger import log
 from service.core.ingestion.document_parser import DeepdocDocumentParser
 from service.core.ingestion.chunker import RecursiveCharacterChunker
+from core.config import settings
 from service.core.ingestion.embedder import SimpleAPIEmbedder
 from service.core.ingestion.indexer import ESIndexer
 from service.core.ingestion.metadata_extractor import DefaultMetadataExtractor

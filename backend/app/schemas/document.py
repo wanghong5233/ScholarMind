@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 
 from models.document import DocumentIngestionSource
 
@@ -68,3 +68,10 @@ class DocumentInDB(DocumentBase):
 # 尽管当前 DocumentInDB 没有向前引用，但添加 rebuild 是一个好习惯
 # 它可以确保未来如果添加了对 KnowledgeBaseInDB 的引用，也能正确解析
 DocumentInDB.model_rebuild()
+
+
+class CriticalQuestionsResponse(BaseModel):
+    """批判性问题生成响应。"""
+    questions: List[str]
+    citations: List[Dict[str, Any]] = []
+    debug: Dict[str, Any] = {}

@@ -43,3 +43,10 @@ class SessionService:
             return
         s.defaults_json = defaults_json
         self.db.commit()
+
+    def update_rolling_summary(self, *, session_id: str, rolling_summary: Optional[str]) -> None:
+        s = self.get_session_by_id(session_id=session_id)
+        if not s:
+            return
+        s.rolling_summary = rolling_summary
+        self.db.commit()

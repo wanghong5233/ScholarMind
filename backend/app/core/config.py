@@ -73,12 +73,21 @@ class Settings(BaseSettings):
     SM_DEFAULT_LANGUAGE: Literal["zh", "en"] = "zh"                           # 默认语言
     SM_MULTI_QUERY_NUM: int = 4                                                  # Multi-Query 子查询数
     SM_HYDE_ENABLED: bool = False                                                # 便捷开关（与 strategy=hyde 二选一）
+    # 索引增强开关（默认开启，便于灰度）
+    SM_SEMANTIC_CHUNKING_ENABLED: bool = True                                    # 语义感知分块
+    SM_MULTIMODAL_PARSE_ENABLED: bool = True                                     # 多模态（表格/图表Caption）抽取
 
     # RAG 超参数
     SM_RAG_TOPK: int = 5
     SM_RETRIEVE_PAGE_SIZE: int = 5
     SM_MAX_TOKENS: int = 1024
     SM_TEMPERATURE: float = 0.3
+    # history context controls
+    SM_HISTORY_MAX_TURNS: int = 8  # 兼容旧逻辑（优先使用 token 预算）
+    SM_HISTORY_MAX_TOKENS: int = 65536
+    SM_HISTORY_HEADROOM: int = 4096  # 预留给检索上下文/系统提示/答案空间
+    HISTORY_RECENT_TURNS: int = 4
+    ENABLE_ROLLING_SUMMARY: bool = True
 
     # 本地模型路径与设备
     LOCAL_EMBEDDER_PATH: str = "/models/bge-large-zh-v1.5"
