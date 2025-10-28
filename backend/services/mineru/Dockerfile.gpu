@@ -1,0 +1,63 @@
+# MinerU PDF 解析服务 Dockerfile (GPU 版本)
+# 使用 NVIDIA CUDA Runtime 基础镜像，确保 GPU 支持
+FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
+
+WORKDIR /app
+
+# 1. 配置国内镜像源（加速下载）
+RUN sed -i 's@http://.*archive.ubuntu.com@https://mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list && \
+    sed -i 's@http://.*security.ubuntu.com@https://mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list
+
+# 2. 安装系统依赖
+RUN apt-get update && apt-get install -y \
+    git \
+    wget \
+    curl \
+    python3 \
+    python3-pip \
+    libgl1 \
+    libglib2.0-0 \
+    libgomp1 \
+    libglib2.0-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# 3. 配置 pip 国内镜像源
+RUN pip3 config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple && \
+    pip3 config set global.extra-index-url "https://mirrors.cernet.edu.cn/pypi/web/simple https://pypi.mirrors.ustc.edu.cn/simple/"
+
+# 4. 升级 pip
+RUN pip3 install --upgrade pip setuptools wheel
+
+# 5. 安装 GPU 版本的 PyTorch（CUDA 11.8）
+# 注意：必须先安装 GPU 版 PyTorch，再安装 MinerU，否则会被覆盖为 CPU 版
+RUN pip3 install --no-cache-dir \
+    torch==2.2.2+cu118 \
+    torchvision==0.17.2+cu118 \
+    torchaudio==2.2.2+cu118 \
+    --index-url https://download.pytorch.org/whl/cu118
+
+# 6. 安装 MinerU（会检测到已有 GPU 版 torch，不会降级）
+RUN pip3 install --no-cache-dir "mineru[core]"
+
+# 7. MinerU 模型会在首次运行时自动下载
+# 设置环境变量使用 ModelScope 镜像源（国内用户推荐）
+ENV MINERU_MODEL_SOURCE=modelscope
+
+# 8. 安装 FastAPI 用于 HTTP 包装
+RUN pip3 install --no-cache-dir fastapi uvicorn python-multipart
+
+# 9. 复制 HTTP 服务代码
+COPY mineru_service.py /app/mineru_service.py
+
+# 10. 创建工作目录
+RUN mkdir -p /app/temp
+
+# 11. 设置环境变量
+ENV PYTHONUNBUFFERED=1
+
+# 12. 暴露端口
+EXPOSE 8001
+
+# 13. 启动服务
+CMD ["uvicorn", "mineru_service:app", "--host", "0.0.0.0", "--port", "8001"]
+

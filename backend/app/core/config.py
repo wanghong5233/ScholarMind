@@ -24,6 +24,8 @@ class Settings(BaseSettings):
 
     # Auth / Root path
     JWT_SECRET_KEY: Optional[str] = None
+    JWT_ACCESS_TOKEN_EXPIRE_DAYS: int = 30  # 生产环境：7天，开发环境可设为30天
+    JWT_ALGORITHM: str = "HS256"
     ROOT_PATH: str = ""
 
     # Elasticsearch
@@ -76,12 +78,50 @@ class Settings(BaseSettings):
     # 索引增强开关（默认开启，便于灰度）
     SM_SEMANTIC_CHUNKING_ENABLED: bool = True                                    # 语义感知分块
     SM_MULTIMODAL_PARSE_ENABLED: bool = True                                     # 多模态（表格/图表Caption）抽取
+    
+    # Chunking 参数（学术 RAG SOTA 配置 - 2024 最佳实践：800-2000 tokens）
+    SM_CHUNK_TARGET_CHARS: int = 3000  # 目标大小：~750 tokens（推荐甜蜜区）
+    SM_CHUNK_MIN_CHARS: int = 1800     # 最小大小：~450 tokens，避免碎片化
+    SM_CHUNK_MAX_CHARS: int = 5600     # 最大大小：~1400 tokens（控制上限）
+    SM_CHUNK_OVERLAP: int = 250        # 重叠：~60 tokens
+    SM_SEMANTIC_SIMILARITY_THRESHOLD: float = 0.65  # 稍收紧，避免过度合并
+    # 预合并/块级合并阈值（可灰度调参）
+    SM_PREMERGE_MAX_CHARS: int = 10000                # MinerU 预合并单块最大字符数（默认 10k）
+    SM_BLOCK_LEVEL_ALLOW_CROSS_PAGE: bool = False     # 是否允许块级跨页合并（默认不允许，保障可溯源）
+    SM_BLOCK_LEVEL_MAX_CHARS: int = 5600              # 与总体上限一致
+    SM_BLOCK_LEVEL_LEN_MERGE_BELOW: int = 4200        # ~1050 tokens，长度优先阈值
+    # 解析回退控制
+    SM_FORCE_PYMUPDF_FALLBACK: bool = False                                      # 强制对 PDF 启用 PyMuPDF 兜底/补强
+    # 解析器编排顺序（逗号分隔，按顺序尝试）。可选项：deepdoc, mineru, unstructured, pymupdf
+    # 默认保持与现有逻辑兼容，优先 deepdoc；后续可切换为 "mineru,unstructured,pymupdf"
+    SM_PARSER_ORDER: str = "mineru,unstructured,pymupdf"
+
+    # MinerU 集成配置
+    SM_MINERU_MODE: Literal["auto", "http", "cli"] = "auto"                    # 自动优先 HTTP，其次 CLI
+    SM_MINERU_ENDPOINT: Optional[str] = None                                      # HTTP 服务地址，例如 http://mineru:8000
+    SM_MINERU_HTTP_ROUTE: str = "/parse"                                         # 解析路由路径
+    SM_MINERU_HTTP_FILE_FIELD: str = "file"                                      # 上传字段名
+    SM_MINERU_TIMEOUT_SECS: int = 1200                                            # HTTP/CLI 超时（20分钟，应对复杂PDF）
+    SM_MINERU_MAX_PAGES: int = 30                                                 # 读取页数的上限（兜底路径）
+    # CLI 模式下的命令模板（MinerU 的官方命令是 mineru）
+    SM_MINERU_CLI_BIN: str = "mineru"
+    SM_MINERU_CLI_CMD: str = "{bin} -p \"{input}\" -o \"{output}\""
+
+    # Grobid 集成配置（Docker Compose 会自动设置为 http://grobid:8070）
+    SM_GROBID_ENDPOINT: Optional[str] = "http://grobid:8070"                     # Grobid 服务地址
+    SM_GROBID_TIMEOUT_SECS: int = 60                                              # Grobid 请求超时
+    SM_GROBID_ENABLED: bool = True                                                # 是否启用 Grobid 元数据增强
 
     # RAG 超参数
     SM_RAG_TOPK: int = 5
     SM_RETRIEVE_PAGE_SIZE: int = 5
     SM_MAX_TOKENS: int = 1024
     SM_TEMPERATURE: float = 0.3
+    
+    # 公式块上下文扩展（检索时自动附带前后文本块）
+    SM_EQUATION_CONTEXT_EXPANSION: bool = True  # 是否启用公式块上下文扩展
+    SM_EQUATION_EXPANSION_PREV: int = 1         # 向前扩展的块数
+    SM_EQUATION_EXPANSION_NEXT: int = 1         # 向后扩展的块数
     # history context controls
     SM_HISTORY_MAX_TURNS: int = 8  # 兼容旧逻辑（优先使用 token 预算）
     SM_HISTORY_MAX_TOKENS: int = 65536
@@ -103,12 +143,39 @@ class Settings(BaseSettings):
     RAG_DEPLOY_BASE: Optional[str] = None
     LOG_LEVEL: str = "INFO"
 
-    # Quotas (development defaults; production should tune)
-    DAILY_UPLOAD_MB: int = 1024  # per-user daily upload quota
-    DAILY_ASK_COUNT: int = 5000  # per-user daily ask count
+    # OCR 引擎（公式识别）
+    SM_OCR_ENABLED: bool = False
+    SM_OCR_ENGINE: Literal["deepseek", "paddleocr"] = "deepseek"
+    SM_OCR_ENDPOINT_DEEPSEEK: Optional[str] = None  # 例如 http://ocr:9000/latex
+    SM_OCR_ENDPOINT_PADDLE: Optional[str] = None    # 例如 http://paddleocr-vl:9000/latex
+    SM_OCR_TIMEOUT_SECS: int = 60
+    SM_OCR_TRIGGER_CONF_LT: float = 0.8             # MinerU 置信度低于该值触发
 
+    # 图像理解引擎（图表语义摘要）
+    SM_VISION_ENABLED: bool = False
+    SM_VISION_ENGINE: Literal["qwen2-vl"] = "qwen2-vl"
+    SM_VISION_ENDPOINT: Optional[str] = None        # 例如 http://qwen2-vl:8002/summarize
+    SM_VISION_TIMEOUT_SECS: int = 60
+    SM_VISION_MAX_TOKENS: int = 128
+    SM_VISION_MAX_PER_2PAGES: int = 1               # 每2页最多处理的图表数
+
+    # Deepdoc/XGBoost 模型定制（用于修复旧二进制模型不兼容问题）
+    DEEPDOC_XGB_MODEL_PATH: Optional[str] = "/app/service/core/rag/res/deepdoc/updown_concat_xgb.json"  # 指向 updown_concat_xgb.json/ubj 的绝对路径
+    DEEPDOC_XGB_REMOTE_REPO: Optional[str] = None  # 自定义HF仓库名（优先使用 JSON/UBJ 版本）
+
+    # Quotas (生产级配额，根据实际需求调整)
+    DAILY_UPLOAD_MB: int = 500  # 每用户每日上传配额（MB）- 生产环境建议 500MB
+    DAILY_ASK_COUNT: int = 1000  # 每用户每日提问配额 - 生产环境建议 1000 次
+    MAX_CONCURRENT_UPLOADS: int = 3  # 每用户最大并发上传数
+    
     # Upload limits
-    MAX_UPLOAD_SIZE_MB: int = 200
+    MAX_UPLOAD_SIZE_MB: int = 50  # 单文件最大 50MB（学术论文通常 < 20MB）
+    ALLOWED_FILE_EXTENSIONS: list = [".pdf", ".txt", ".md", ".docx"]  # 允许的文件类型
+    
+    # Rate limiting (生产环境必须启用)
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_PER_MINUTE: int = 60  # 每分钟最多 60 次请求
+    RATE_LIMIT_PER_HOUR: int = 1000  # 每小时最多 1000 次请求
 
     class Config:
         env_file_encoding = "utf-8"

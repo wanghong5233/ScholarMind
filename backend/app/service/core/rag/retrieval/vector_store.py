@@ -85,7 +85,8 @@ class ESVectoreStore(VectorStore):
         t0 = time.time()
         from service.core.rag.utils.doc_store_conn import OrderByExpr as _OrderBy
         res = self.es.search(
-            selectFields=["text", "kb_id", "document_id", "page", "offset_start", "offset_end"],
+            selectFields=["text", "kb_id", "document_id", "page", "offset_start", "offset_end", 
+                         "element_type", "prev_chunk_id", "next_chunk_id", "chunk_index"],
             highlightFields=["text"],
             condition=condition,
             matchExprs=match_exprs,
@@ -110,6 +111,10 @@ class ESVectoreStore(VectorStore):
                 "page": src.get("page"),
                 "offset_start": src.get("offset_start"),
                 "offset_end": src.get("offset_end"),
+                "element_type": src.get("element_type"),
+                "prev_chunk_id": src.get("prev_chunk_id"),
+                "next_chunk_id": src.get("next_chunk_id"),
+                "chunk_index": src.get("chunk_index"),
             }
             raw_chunks.append(
                 RetrievedChunk(
@@ -149,6 +154,15 @@ class ESVectoreStore(VectorStore):
         deduped.sort(key=sort_key)
         final_chunks = deduped[: query.top_k]
 
+        # 8) 公式块上下文扩展（Equation Context Expansion）
+        from core.config import settings
+        if getattr(settings, "SM_EQUATION_CONTEXT_EXPANSION", True):
+            final_chunks = self._expand_equation_context(
+                chunks=final_chunks,
+                index_name=index_name,
+                kb_id=query.kb_id,
+            )
+
         try:
             self.logger.info(
                 f"ESRetriever: q='{query.text[:64]}' kb={query.kb_id} index={index_name} top_k={query.top_k} raw={len(raw_chunks)} final={len(final_chunks)} took_ms={took_ms}"
@@ -156,3 +170,151 @@ class ESVectoreStore(VectorStore):
         except Exception:
             pass
         return final_chunks
+    
+    def _expand_equation_context(
+        self,
+        chunks: List[RetrievedChunk],
+        index_name: str,
+        kb_id: int,
+    ) -> List[RetrievedChunk]:
+        """
+        为公式块自动扩展上下文（前后各1个文本块）
+        
+        Args:
+            chunks: 原始检索结果
+            index_name: 索引名称
+            kb_id: 知识库 ID
+            
+        Returns:
+            扩展后的 chunks 列表（保持原始顺序，公式块后附加上下文）
+        """
+        from core.config import settings
+        
+        prev_count = getattr(settings, "SM_EQUATION_EXPANSION_PREV", 1)
+        next_count = getattr(settings, "SM_EQUATION_EXPANSION_NEXT", 1)
+        
+        expanded_chunks: List[RetrievedChunk] = []
+        seen_chunk_ids: set[str] = set()
+        
+        for chunk in chunks:
+            # 添加原始 chunk
+            expanded_chunks.append(chunk)
+            seen_chunk_ids.add(chunk.chunk_id)
+            
+            # 检查是否为公式块
+            element_type = chunk.metadata.get("element_type", "")
+            if element_type != "equation_latex":
+                continue
+            
+            # 获取相邻块 ID
+            prev_id = chunk.metadata.get("prev_chunk_id")
+            next_id = chunk.metadata.get("next_chunk_id")
+            
+            # 收集需要获取的相邻块 ID
+            context_ids = []
+            if prev_id and prev_count > 0:
+                context_ids.append(prev_id)
+            if next_id and next_count > 0:
+                context_ids.append(next_id)
+            
+            if not context_ids:
+                continue
+            
+            # 批量获取相邻块
+            try:
+                context_chunks = self._fetch_chunks_by_ids(
+                    chunk_ids=context_ids,
+                    index_name=index_name,
+                    kb_id=kb_id,
+                )
+                
+                # 按照 prev -> next 的顺序添加上下文
+                for ctx_chunk in context_chunks:
+                    if ctx_chunk.chunk_id in seen_chunk_ids:
+                        continue
+                    seen_chunk_ids.add(ctx_chunk.chunk_id)
+                    # 标记为上下文块（降低 score，避免干扰排序）
+                    ctx_chunk.score = chunk.score * 0.5
+                    ctx_chunk.metadata["is_context"] = True
+                    ctx_chunk.metadata["context_for_chunk_id"] = chunk.chunk_id
+                    expanded_chunks.append(ctx_chunk)
+                
+                try:
+                    self.logger.info(
+                        f"EquationContextExpansion: equation_chunk={chunk.chunk_id} added_context={len(context_chunks)}"
+                    )
+                except Exception:
+                    pass
+                    
+            except Exception as e:
+                try:
+                    self.logger.warning(f"Failed to expand context for equation chunk {chunk.chunk_id}: {e}")
+                except Exception:
+                    pass
+        
+        return expanded_chunks
+    
+    def _fetch_chunks_by_ids(
+        self,
+        chunk_ids: List[str],
+        index_name: str,
+        kb_id: int,
+    ) -> List[RetrievedChunk]:
+        """
+        根据 chunk ID 批量获取 chunks
+        
+        Args:
+            chunk_ids: chunk ID 列表
+            index_name: 索引名称
+            kb_id: 知识库 ID
+            
+        Returns:
+            RetrievedChunk 列表
+        """
+        if not chunk_ids:
+            return []
+        
+        try:
+            # 使用 Elasticsearch 的 mget (multi-get) API
+            body = {"ids": chunk_ids}
+            response = self.es.conn.mget(index=index_name, body=body)
+            
+            chunks: List[RetrievedChunk] = []
+            for doc in response.get("docs", []):
+                if not doc.get("found"):
+                    continue
+                
+                src = doc.get("_source", {})
+                # 验证 kb_id 匹配
+                if str(src.get("kb_id")) != str(kb_id):
+                    continue
+                
+                md = {
+                    "kb_id": src.get("kb_id"),
+                    "document_id": src.get("document_id"),
+                    "page": src.get("page"),
+                    "offset_start": src.get("offset_start"),
+                    "offset_end": src.get("offset_end"),
+                    "element_type": src.get("element_type"),
+                    "prev_chunk_id": src.get("prev_chunk_id"),
+                    "next_chunk_id": src.get("next_chunk_id"),
+                    "chunk_index": src.get("chunk_index"),
+                }
+                
+                chunks.append(
+                    RetrievedChunk(
+                        chunk_id=doc.get("_id", ""),
+                        text=src.get("text", ""),
+                        score=0.0,  # 上下文块的 score 将在调用方设置
+                        metadata=md,
+                    )
+                )
+            
+            return chunks
+            
+        except Exception as e:
+            try:
+                self.logger.error(f"Failed to fetch chunks by IDs: {e}")
+            except Exception:
+                pass
+            return []

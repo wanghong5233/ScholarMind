@@ -19,6 +19,55 @@
       "lat_lon": {
         "type": "geo_point",
         "store": "true"
+      },
+      "element_type": {
+        "type": "keyword",
+        "store": true
+      },
+      "parser_engine": {
+        "type": "keyword",
+        "store": true
+      },
+      "table_json": {
+        "type": "object",
+        "enabled": false,
+        "store": true
+      },
+      "equation_latex": {
+        "type": "text",
+        "index": false,
+        "store": true
+      },
+      "figure_caption": {
+        "type": "text",
+        "analyzer": "standard",
+        "store": true
+      },
+      "bbox": {
+        "type": "float",
+        "store": true
+      },
+      "confidence": {
+        "type": "float",
+        "store": true
+      },
+      "ocr_engine": {
+        "type": "keyword",
+        "store": true
+      },
+      "prev_chunk_id": {
+        "type": "keyword",
+        "store": true,
+        "index": false
+      },
+      "next_chunk_id": {
+        "type": "keyword",
+        "store": true,
+        "index": false
+      },
+      "chunk_index": {
+        "type": "integer",
+        "store": true
       }
     },
     "date_detection": "true",

@@ -6,6 +6,7 @@ from typing import List, Tuple, Optional
 
 from service.core.ingestion.interfaces import ParsedBlock, MetadataExtractor
 from service.semantic_scholar_service import semantic_scholar_service
+from service.core.ingestion.grobid_client import get_grobid_client
 
 
 # Pre-compiled regex for speed
@@ -73,7 +74,26 @@ class DefaultMetadataExtractor(MetadataExtractor):
 
         changed = False
 
-        # 1) 先用 Semantic Scholar（DOI 优先）：允许高置信覆盖标题，其余字段只填空
+        # 策略：Grobid先行提取DOI/摘要/关键词 → Semantic Scholar补强标题/作者/引用数
+        
+        # 0) Grobid 元数据抽取（优先，用于提取DOI和摘要/关键词）
+        grobid_metadata = None
+        if document.local_pdf_path:
+            try:
+                grobid_client = get_grobid_client()
+                if grobid_client.is_available():
+                    grobid_metadata = grobid_client.process_header_document(document.local_pdf_path)
+                    if grobid_metadata:
+                        # Grobid 结果优先填充（DOI用于后续查询，摘要/关键词保留）
+                        parsed_title = grobid_metadata.get("title") or parsed_title
+                        parsed_doi = grobid_metadata.get("doi") or parsed_doi
+                        parsed_abstract = grobid_metadata.get("abstract") or parsed_abstract  # Grobid摘要更完整
+                        parsed_keywords = grobid_metadata.get("keywords") or parsed_keywords  # Semantic Scholar基本没有
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).warning(f"Grobid extraction failed: {e}")
+
+        # 1) Semantic Scholar 补强（用Grobid的DOI查询，获取标准化标题和学术元数据）
         doi = document.doi or parsed_doi
         detail = None
         if doi:
@@ -86,6 +106,7 @@ class DefaultMetadataExtractor(MetadataExtractor):
             detail = papers[0].model_dump() if papers else None
 
         if detail:
+            # Semantic Scholar 允许覆盖标题（更标准化）和作者（更完整），但不覆盖摘要和关键词
             changed = self._merge_semantic_scholar_detail(document, detail, override_title=True) or changed
 
         # 2) 再用解析结果仅补空（不覆盖非空字段，不伪造）
@@ -101,6 +122,14 @@ class DefaultMetadataExtractor(MetadataExtractor):
         if parsed_keywords and not getattr(document, "keywords", None):
             document.keywords = parsed_keywords[:50]
             changed = True
+        
+        # 3) 补充 Grobid 特有字段（作者等）
+        if grobid_metadata:
+            if not getattr(document, "authors", None) and grobid_metadata.get("authors"):
+                authors = [a.get("name") for a in grobid_metadata["authors"] if a.get("name")]
+                if authors:
+                    document.authors = authors
+                    changed = True
 
         if changed:
             db.add(document)

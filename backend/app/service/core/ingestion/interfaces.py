@@ -14,6 +14,10 @@ class DocumentParser(Protocol):
     def parse(self, *, file_path: str) -> List[ParsedBlock]:
         ...
 
+    def name(self) -> str:
+        """返回解析器名称（用于日志与观测）。"""
+        return self.__class__.__name__
+
 
 class Chunker(Protocol):
     def chunk(self, *, blocks: Iterable[ParsedBlock]) -> List[ParsedBlock]:

@@ -42,7 +42,8 @@ class RAGFlowPdfParser:
             self.layouter = LayoutRecognizer("layout")
         self.tbl_det = TableStructureRecognizer()
 
-        self.updown_cnt_mdl = xgb.Booster()
+        self.updown_cnt_mdl = None
+        self._xgb_available = False
         # if not settings.LIGHTEN:
         #     try:
         #         import torch
@@ -51,18 +52,51 @@ class RAGFlowPdfParser:
         #     except Exception:
         #         logging.exception("RAGFlowPdfParser __init__")
         try:
-            model_dir = os.path.join(
-                get_project_base_directory(),
-                "rag/res/deepdoc")
-            self.updown_cnt_mdl.load_model(os.path.join(
-                model_dir, "updown_concat_xgb.model"))
-        except Exception:
-            model_dir = snapshot_download(
-                repo_id="InfiniFlow/text_concat_xgb_v1.0",
-                local_dir=os.path.join(get_project_base_directory(), "rag/res/deepdoc"),
-                local_dir_use_symlinks=False)
-            self.updown_cnt_mdl.load_model(os.path.join(
-                model_dir, "updown_concat_xgb.model"))
+            # 1) 优先使用配置的 JSON/UBJ 模型（推荐）
+            from core.config import settings
+            if getattr(settings, "DEEPDOC_XGB_MODEL_PATH", None):
+                cfg_path = settings.DEEPDOC_XGB_MODEL_PATH
+                self.updown_cnt_mdl = xgb.Booster()
+                self.updown_cnt_mdl.load_model(cfg_path)
+                self._xgb_available = True
+                logging.info(f"Deepdoc XGBoost model loaded from settings: {cfg_path}")
+            else:
+                # 2) 使用项目内置目录（可能是旧二进制）
+                model_dir = os.path.join(
+                    get_project_base_directory(),
+                    "rag/res/deepdoc")
+                mdl_path = os.path.join(model_dir, "updown_concat_xgb.model")
+                self.updown_cnt_mdl = xgb.Booster()
+                self.updown_cnt_mdl.load_model(mdl_path)
+                self._xgb_available = True
+                logging.info(f"Deepdoc XGBoost model loaded: {mdl_path}")
+        except Exception as e:
+            try:
+                # 3) 从远端仓库下载（可通过 settings 指定 JSON/UBJ 版本的 repo）
+                repo = getattr(settings, "DEEPDOC_XGB_REMOTE_REPO", None) or "InfiniFlow/text_concat_xgb_v1.0"
+                model_dir = snapshot_download(
+                    repo_id=repo,
+                    local_dir=os.path.join(get_project_base_directory(), "rag/res/deepdoc"),
+                    local_dir_use_symlinks=False)
+                # 优先 JSON/UBJ
+                cand = [
+                    os.path.join(model_dir, "updown_concat_xgb.json"),
+                    os.path.join(model_dir, "updown_concat_xgb.ubj"),
+                    os.path.join(model_dir, "updown_concat_xgb.model"),
+                ]
+                mdl_path = next((p for p in cand if os.path.exists(p)), cand[-1])
+                self.updown_cnt_mdl = xgb.Booster()
+                self.updown_cnt_mdl.load_model(mdl_path)
+                self._xgb_available = True
+                logging.info(f"Deepdoc XGBoost model downloaded and loaded: {mdl_path}")
+            except Exception as e2:
+                # 容错：新版本 xgboost 已移除旧二进制格式支持，启用启发式合并以保证流程不中断
+                self.updown_cnt_mdl = None
+                self._xgb_available = False
+                logging.warning(
+                    "Deepdoc XGBoost model unavailable; fall back to heuristic concatenation. "
+                    f"initial_error={e} fallback_error={e2}"
+                )
 
         self.page_from = 0
         """
@@ -651,8 +685,20 @@ class RAGFlowPdfParser:
                     # 文档结构：布局类型、表格关系、项目符号
                     # 语义连贯：分词效果、长度平衡、内容重复
                     # 上下文环境：行内文本数量、页面关系
-                    if self.updown_cnt_mdl.predict(
-                            xgb.DMatrix([fea]))[0] <= 0.5:
+                    # 优雅降级：若 xgboost 不可用，则采用启发式规则
+                    allow_concat = False
+                    try:
+                        if getattr(self, "_xgb_available", False) and self.updown_cnt_mdl is not None:
+                            allow_concat = self.updown_cnt_mdl.predict(xgb.DMatrix([fea]))[0] > 0.5
+                        else:
+                            # 启发式：相邻段落间距小且同布局类型，或存在连词/标点连接
+                            ly_same = up.get("layoutno") == down.get("layoutno")
+                            close_y = abs(self._y_dis(up, down)) < 20
+                            punct = bool(re.search(r"[,;，；、]$", up.get("text", "")))
+                            allow_concat = (ly_same and close_y) or punct
+                    except Exception:
+                        allow_concat = False
+                    if not allow_concat:
                         i += 1
                         continue
                     dfs(down, i + 1)

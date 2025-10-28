@@ -15,6 +15,9 @@ services: # 定义一系列的服务（容器）
       REDIS_DB: 0
       SEMANTIC_SCHOLAR_API_KEY: ${SEMANTIC_SCHOLAR_API_KEY:-}
       RAG_PROJECT_BASE: /app/service/core
+      SM_MINERU_MODE: http
+      SM_MINERU_ENDPOINT: http://mineru:8001
+      SM_GROBID_ENDPOINT: http://grobid:8070
     extra_hosts: # 添加额外的主机名到IP地址的映射，类似于/etc/hosts文件
       - "host.docker.internal:host-gateway" # 允许容器连接到宿主机的特殊地址
     env_file: # 从文件加载环境变量
@@ -31,6 +34,8 @@ services: # 定义一系列的服务（容器）
       - scholarmind_db # 依赖PostgreSQL数据库服务
       - scholarmind_vector # 依赖Elasticsearch服务
       - redis # 依赖Redis服务
+      - mineru # 依赖MinerU解析服务
+      - grobid # 依赖Grobid元数据服务
     networks: # 指定服务连接的网络
       - scholarmind_net # 连接到名为scholarmind_net的自定义网络
 
@@ -90,6 +95,76 @@ services: # 定义一系列的服务（容器）
       - redis_data:/data # 将Redis数据持久化到名为redis_data的数据卷
     restart: unless-stopped # 重启策略
     networks: # 连接的网络
+      - scholarmind_net
+
+  mineru: # MinerU PDF 解析服务（GPU 加速）
+    container_name: scholarmind_mineru
+    build:
+      context: ./services/mineru
+      dockerfile: Dockerfile.gpu  # 使用 GPU 版本的 Dockerfile
+    hostname: mineru
+    environment:
+      - PYTHONUNBUFFERED=1
+      - NVIDIA_VISIBLE_DEVICES=all  # 让容器看到所有 GPU
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}  # 默认使用第一块 GPU
+    ports:
+      - "8001:8001"  # 暴露端口供调试（可选）
+    # GPU 支持：使用 NVIDIA Container Toolkit
+    # 前提：宿主机已安装 NVIDIA 驱动 + NVIDIA Container Toolkit
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1  # 使用1个GPU，或设置为all使用所有GPU
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8001/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - scholarmind_net
+
+  grobid: # Grobid 学术元数据抽取服务
+    container_name: scholarmind_grobid
+    image: lfoppiano/grobid:0.8.0
+    hostname: grobid
+    ports:
+      - "9070:8070"  # Grobid 默认端口（宿主机 9070 映射到容器 8070，避免 Windows 保留端口）
+    environment:
+      - GROBID_OPTS=-Xmx4g
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 5 bash -c '</dev/tcp/localhost/8070' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s # Grobid 启动非常慢，给3分钟启动时间
+    restart: unless-stopped
+    networks:
+      - scholarmind_net
+
+  # 可选：DeepSeek-OCR 服务占位（默认不启用）
+  deepseek_ocr:
+    image: nginx:alpine
+    container_name: scholarmind_deepseek_ocr
+    profiles: ["extras"]
+    ports:
+      - "9001:9000"  # 模拟端口
+    command: ["sh", "-c", "printf 'HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\n\\r\\n{\"latex\":\"E=mc^2\"}\\r\\n' | nc -l -p 9000 -k"]
+    networks:
+      - scholarmind_net
+
+  # 可选：Qwen2-VL 服务占位（默认不启用）
+  qwen2_vl:
+    image: nginx:alpine
+    container_name: scholarmind_qwen2_vl
+    profiles: ["extras"]
+    ports:
+      - "8002:8002"
+    command: ["sh", "-c", "printf 'HTTP/1.1 200 OK\\r\\nContent-Type: application/json\\r\\n\\r\\n{\"summary\":\"bar chart shows ...\"}\\r\\n' | nc -l -p 8002 -k"]
+    networks:
       - scholarmind_net
 
 volumes: # 定义全局的数据卷

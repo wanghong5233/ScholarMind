@@ -29,6 +29,10 @@ def get_feature_flags():
         "defaultLanguage": settings.SM_DEFAULT_LANGUAGE,
         "multiQueryNum": settings.SM_MULTI_QUERY_NUM,
         "hydeEnabled": settings.SM_HYDE_ENABLED,
+        # 索引增强（关键验证开关）
+        "semanticChunkingEnabled": settings.SM_SEMANTIC_CHUNKING_ENABLED,
+        "multimodalParseEnabled": settings.SM_MULTIMODAL_PARSE_ENABLED,
+        "forcePymupdfFallback": settings.SM_FORCE_PYMUPDF_FALLBACK,
         "ragTopK": settings.SM_RAG_TOPK,
         "retrievePageSize": settings.SM_RETRIEVE_PAGE_SIZE,
         "maxTokens": settings.SM_MAX_TOKENS,

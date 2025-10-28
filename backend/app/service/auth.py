@@ -12,13 +12,18 @@ from fastapi import Depends
 from fastapi_jwt import JwtAuthorizationCredentials
 
 # JWT配置
-JWT_SECRET_KEY = os.environ.get('JWT_SECRET_KEY', 'default_secret_key') + 'happy'
+from core.config import settings
+
+# 生产级 JWT 配置
+JWT_SECRET_KEY = settings.JWT_SECRET_KEY or os.environ.get('JWT_SECRET_KEY', 'CHANGE_ME_IN_PRODUCTION_' + secrets.token_hex(32))
+if JWT_SECRET_KEY.startswith('CHANGE_ME'):
+    logging.warning("⚠️  使用默认 JWT_SECRET_KEY，生产环境请设置环境变量！")
 
 # 从请求头或cookie中读取访问令牌（优先从请求头读取）
 access_security = JwtAccessBearerCookie(
     secret_key=JWT_SECRET_KEY,
     auto_error=True,
-    access_expires_delta=timedelta(days=2)  # 访问令牌有效期为2天
+    access_expires_delta=timedelta(days=settings.JWT_ACCESS_TOKEN_EXPIRE_DAYS)  # 从配置读取过期时间
 )
 
 def create_token(user_id: int, user_name: str, salting: str = ""):
