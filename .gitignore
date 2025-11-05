@@ -242,3 +242,5 @@ backend/app/service/core/9b5ad71b2ce5302211f9c61530b329a4922fc6a4
 frontend/.env
 frontend/.env.local
 frontend/.env.production
+backend/app/logs/
+manual_rag_e2e_test_plan.md
