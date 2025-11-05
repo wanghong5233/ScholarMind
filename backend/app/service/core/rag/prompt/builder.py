@@ -70,20 +70,38 @@ class PromptBuilder:
         return base
 
     def _build_context(self, chunks: List[Dict[str, Any]]) -> str:
-        # Format: [doc_id:page] content
         buf: List[str] = ["[Context]"]
         total = 0
-        for c in chunks:
-            md = c.get("metadata", {})
+        for idx, c in enumerate(chunks, start=1):
+            md = c.get("metadata", {}) or {}
             doc_id = md.get("document_id", "?")
             page = md.get("page", "?")
+            section = md.get("section") or md.get("section_type")
+            element_type = md.get("element_type") or "text"
+            retrieval_source = md.get("retrieval_source") or "unknown"
+            fused = md.get("fused_score")
+
+            meta_parts: List[str] = [f"doc={doc_id}", f"page={page}"]
+            if section:
+                meta_parts.append(f"section={section}")
+            if element_type:
+                meta_parts.append(f"type={element_type}")
+            meta_parts.append(f"source={retrieval_source}")
+            if fused is not None:
+                try:
+                    meta_parts.append(f"fused={float(fused):.4f}")
+                except Exception:
+                    meta_parts.append(f"fused={fused}")
+
+            header = f"[{idx}] " + "; ".join(meta_parts)
             text = (c.get("text") or c.get("content") or "").strip()
-            line = f"[{doc_id}:{page}] {text}"
+            line = f"{header}\n{text}"
+
             if total + len(line) > self.max_context_chars:
                 break
             buf.append(line)
             total += len(line)
-        return "\n".join(buf)
+        return "\n\n".join(buf)
 
     def _build_instruction(self, question: str, style: Optional[str]) -> str:
         if self.language == "zh":

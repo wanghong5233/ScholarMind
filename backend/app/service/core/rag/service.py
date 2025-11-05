@@ -1,14 +1,20 @@
 from __future__ import annotations
 from typing import List, Dict, Any, Generator, Optional
 from dataclasses import dataclass
+import json
 import re
-from core.config import settings
-from service.core.rag.retrieval.vector_store import ESVectoreStore, RetrieveQuery
-from service.core.rag.prompt.builder import PromptBuilder
-from service.core.rag.llm.client import LLMClient
-from core.config import settings
+import math
 import logging
 import time
+from collections import defaultdict
+from pathlib import Path
+
+from elasticsearch import NotFoundError
+
+from core.config import settings
+from service.core.rag.retrieval.vector_store import ESVectoreStore, RetrieveQuery, RetrievedChunk
+from service.core.rag.prompt.builder import PromptBuilder
+from service.core.rag.llm.client import LLMClient
 
 
 @dataclass
@@ -31,6 +37,7 @@ class RAGService:
         self._last_retrieval_debug: Dict[str, Any] | None = None
         self._last_history_debug: Dict[str, Any] | None = None
         self._last_history_summary: str | None = None
+        self._last_variant_meta: Dict[str, Any] | None = None
 
     def retrieve(
         self,
@@ -41,175 +48,594 @@ class RAGService:
         focus_doc_ids: Optional[List[int]] = None,
         use_vector: bool = True,
         index_override: Optional[str] = None,
+        boost_doc_ids: Optional[List[int]] = None,
+        session_index: Optional[str] = None,
+        index_mode: str = "auto",
     ) -> List[Dict[str, Any]]:
-        # strategy-aware retrieval entry
-        strategy = getattr(settings, "SM_RETRIEVAL_STRATEGY", "basic")
-        if strategy == "multi_query":
-            return self._retrieve_multi_query(query=query, kb_id=kb_id, top_k=top_k, focus_doc_ids=focus_doc_ids, index_override=index_override)
-        # basic fallback
-        rq = RetrieveQuery(
-            text=query,
+        # 统一使用多阶段检索流程
+        return self._retrieve_multi_stage(
+            query=query,
             kb_id=kb_id,
             top_k=top_k,
             focus_doc_ids=focus_doc_ids,
-            index_override=index_override,
-            use_vector=use_vector,
+            boost_doc_ids=boost_doc_ids,
+            session_index=session_index or index_override,
+            index_mode=index_mode,
         )
-        t0 = time.time()
-        results = self.store.search(query=rq)
-        dt = int((time.time() - t0) * 1000)
-        try:
-            self.logger.info(
-                f"RAG.retrieve kb={kb_id} top_k={top_k} focus={len(focus_doc_ids or [])} hits={len(results)} took_ms={dt} index={'session' if index_override else 'default'}"
-            )
-        except Exception:
-            pass
-        # debug footprint
-        try:
-            self._last_retrieval_debug = {
-                "strategy": "basic",
-                "kb_id": kb_id,
-                "top_k": top_k,
-                "hits": len(results),
-                "took_ms": dt,
-                "index": (index_override or settings.ES_DEFAULT_INDEX),
-            }
-        except Exception:
-            self._last_retrieval_debug = None
-        # convert to common dict format for prompt
-        chunks: List[Dict[str, Any]] = []
-        for r in results:
-            chunks.append({"text": r.text, "metadata": r.metadata, "score": r.score, "chunk_id": r.chunk_id})
-        return chunks
 
-    # --- advanced retrieval strategies ---
-    def _retrieve_multi_query(
+    def _retrieve_multi_stage(
         self,
         *,
         query: str,
         kb_id: int,
         top_k: int,
         focus_doc_ids: Optional[List[int]],
-        index_override: Optional[str],
+        boost_doc_ids: Optional[List[int]],
+        session_index: Optional[str],
+        index_mode: str,
     ) -> List[Dict[str, Any]]:
-        """Generate N sub-queries via LLM, retrieve in parallel, fuse by RRF, then dedup and cut to top_k.
-        Minimal implementation: serial calls; easy to evolve to async.
-        """
-        n = max(int(getattr(settings, "SM_MULTI_QUERY_NUM", 4) or 4), 2)
-        # 1) expand queries
-        prompts = [
-            {"role": "system", "content": "You are a helpful assistant that rewrites the question into diverse search intents."},
-            {"role": "user", "content": f"Rewrite the question into {n} diverse short search queries, one per line, concise, no numbering.\nQuestion: {query}"},
-        ]
-        try:
-            qtext = self.llm.generate(prompts, temperature=0.2, max_tokens=128, stream=False) or ""
-            subs = [s.strip(" -•\t").strip() for s in qtext.splitlines() if s.strip()]
-        except Exception:
-            subs = []
-        # 组装子查询：包含原始问题；去重；过滤过短/与原问题完全相同但语义无差异的噪声
-        pool: List[str] = [query] + subs
-        uniq: List[str] = []
-        seen: set[str] = set()
-        for s in pool:
-            t = s.strip()
-            if not t:
-                continue
-            if len(t) < 3:
-                continue
-            k = t.casefold()
-            if k in seen:
-                continue
-            seen.add(k)
-            uniq.append(t)
-        if not uniq:
-            uniq = [query]
-        subs = uniq[:n]
-
-        # 2) retrieve for each sub-query
-        all_hits: List[Dict[str, Any]] = []
-        per_q_hits: Dict[str, int] = {}
-        for q in subs:
-            rq = RetrieveQuery(
-                text=q,
-                kb_id=kb_id,
-                top_k=max(top_k * 2, 10),
-                focus_doc_ids=focus_doc_ids,
-                index_override=index_override,
-                use_vector=True,
-            )
-            results = self.store.search(query=rq)
-            per_q_hits[q] = len(results or [])
-            for r in results:
-                all_hits.append({
-                    "chunk_id": r.chunk_id,
-                    "text": r.text,
-                    "score": float(r.score or 0.0),
-                    "metadata": r.metadata,
-                    "q": q,
-                })
-
-        # 3) RRF fuse (Reciprocal Rank Fusion)
-        # build per-query rank list
-        ranks: Dict[str, Dict[str, int]] = {}
-        for q in subs:
-            q_hits = [h for h in all_hits if h["q"] == q]
-            # sort by ES score desc
-            q_hits.sort(key=lambda x: x["score"], reverse=True)
-            for i, h in enumerate(q_hits[: max(top_k * 3, 30)]):
-                ranks.setdefault(q, {})[h["chunk_id"]] = i + 1
-
-        agg: Dict[str, float] = {}
-        for h in all_hits:
-            cid = h["chunk_id"]
-            s = 0.0
-            for q in subs:
-                r = ranks.get(q, {}).get(cid)
-                if r is not None:
-                    s += 1.0 / (60 + r)  # k=60，稳健融合
-            if s > 0:
-                agg[cid] = agg.get(cid, 0.0) + s
-
-        # 4) dedup by chunk_id, keep metadata/text of first occurrence
-        by_id: Dict[str, Dict[str, Any]] = {}
-        for h in all_hits:
-            cid = h["chunk_id"]
-            if cid not in by_id:
-                by_id[cid] = h
-
-        ordered = sorted(by_id.values(), key=lambda x: agg.get(x["chunk_id"], 0.0), reverse=True)
-        cut = ordered[: top_k]
-        # map to chunks
-        chunks: List[Dict[str, Any]] = []
-        for r in cut:
-            chunks.append({"text": r["text"], "metadata": r["metadata"], "score": agg.get(r["chunk_id"], 0.0), "chunk_id": r["chunk_id"]})
-        try:
-            self.logger.info(f"RAG.retrieve[mq] kb={kb_id} subs={len(subs)} hits_all={len(all_hits)} fused={len(chunks)} top_k={top_k}")
-        except Exception:
-            pass
-        # fallback: 如完全无命中，退回 basic 策略，保证稳健
-        if not chunks:
+        variants = self._generate_query_variants(query)
+        if not variants:
             try:
-                self.logger.warning("RAG.retrieve[mq] got 0 chunks, fallback to basic retrieval")
+                self.logger.warning("RAG.retrieve[multi_stage] no query variants generated")
             except Exception:
                 pass
-            return self.retrieve(query=query, kb_id=kb_id, top_k=top_k, focus_doc_ids=focus_doc_ids, index_override=index_override)
-        # debug footprint for MQ+RRF（裁剪以控制体积）
+            return []
+
         try:
-            fused_preview = [{"chunk_id": r["chunk_id"], "fused": float(agg.get(r["chunk_id"], 0.0)), "doc": r["metadata"].get("document_id"), "page": r["metadata"].get("page")} for r in ordered[: min(50, len(ordered))]]
+            variant_snapshot = [(item["tag"], len(item["text"])) for item in variants]
+            self.logger.debug(
+                "RAG.retrieve[multi_stage] query='%s' variants=%s",
+                (query or "")[:80],
+                variant_snapshot,
+            )
+        except Exception:
+            pass
+
+        mode_alias = {
+            "session": "session_only",
+            "session_only": "session_only",
+            "session-only": "session_only",
+            "global": "global_only",
+            "global_only": "global_only",
+            "global-only": "global_only",
+            "both": "hybrid",
+            "hybrid": "hybrid",
+        }
+        normalized_mode = mode_alias.get((index_mode or "auto").strip().lower(), "auto")
+        default_index_name = self.store.default_index or settings.ES_DEFAULT_INDEX
+
+        index_plan: List[Dict[str, Optional[str]]] = []
+        if normalized_mode == "session_only":
+            if session_index:
+                index_plan.append({"label": "session", "index": session_index, "fallback": None})
+        elif normalized_mode == "global_only":
+            index_plan.append({"label": "global", "index": None, "fallback": None})
+        elif normalized_mode == "hybrid":
+            if session_index:
+                index_plan.append({"label": "session", "index": session_index, "fallback": None})
+            index_plan.append({"label": "global", "index": None, "fallback": None})
+        else:  # auto / legacy
+            if session_index:
+                index_plan.append({"label": "session", "index": session_index, "fallback": default_index_name})
+            else:
+                index_plan.append({"label": "global", "index": None, "fallback": None})
+
+        if not index_plan:
+            index_plan.append({"label": "global", "index": None, "fallback": None})
+
+        channels = None  # use store defaults
+        path_hits: Dict[str, List[RetrievedChunk]] = {}
+        total_candidates = 0
+        index_stats: Dict[str, int] = defaultdict(int)
+        indices_used: set[str] = set()
+
+        for plan in index_plan:
+            plan_label = plan.get("label", "global") or "global"
+            plan_index = plan.get("index")
+            fallback_index = plan.get("fallback")
+
+            for variant in variants:
+                rq = RetrieveQuery(
+                    text=variant["text"],
+                    kb_id=kb_id,
+                    top_k=max(top_k, 5),
+                    focus_doc_ids=focus_doc_ids,
+                    index_override=plan_index,
+                    use_vector=True,
+                    channels=channels,
+                    query_tag=variant["tag"],
+                    synthetic=variant["synthetic"],
+                    boost_doc_ids=boost_doc_ids,
+                    fallback_index=fallback_index,
+                )
+                try:
+                    hits = self.store.search_multi_path(query=rq)
+                except NotFoundError:
+                    try:
+                        self.logger.warning(
+                            "RAG.retrieve[multi_stage] index '%s' (label=%s) not found, skip.",
+                            plan_index,
+                            plan_label,
+                        )
+                    except Exception:
+                        pass
+                    continue
+
+                total_candidates += len(hits)
+                index_stats[plan_label] += len(hits)
+                for hit in hits:
+                    hit.metadata.setdefault("index_label", plan_label)
+                    idx_name = hit.metadata.get("index_name")
+                    if idx_name:
+                        indices_used.add(str(idx_name))
+                    path_id = f"{plan_label}:{variant['tag']}::{hit.source}"
+                    path_hits.setdefault(path_id, []).append(hit)
+
+                try:
+                    self.logger.debug(
+                        "RAG.retrieve[multi_stage] label=%s tag=%s hits=%s sources=%s",
+                        plan_label,
+                        variant["tag"],
+                        len(hits),
+                        list({hit.source for hit in hits}),
+                    )
+                except Exception:
+                    pass
+
+        ordered_chunks, fused_scores, path_summary = self._rrf_fuse(path_hits)
+        if not ordered_chunks:
+            try:
+                self.logger.warning("RAG.retrieve[multi_stage] fusion produced 0 candidates")
+            except Exception:
+                pass
+            return []
+
+        try:
+            self.logger.debug(
+                "RAG.retrieve[multi_stage] rrf_path_summary=%s",
+                {path: len(ids) for path, ids in path_summary.items()},
+            )
+        except Exception:
+            pass
+
+        mmr_selected = self._apply_mmr(
+            ordered_chunks,
+            fused_scores,
+            top_k=top_k,
+        )
+
+        try:
+            mmr_preview = [chunk.chunk_id for chunk in mmr_selected[: min(10, len(mmr_selected))]]
+            self.logger.debug(
+                "RAG.retrieve[multi_stage] mmr_selected_preview=%s",
+                mmr_preview,
+            )
+        except Exception:
+            pass
+
+        if len(index_plan) == 1:
+            primary_index_hint = index_plan[0].get("index") or default_index_name
+        else:
+            primary_index_hint = None
+        if getattr(settings, "SM_EQUATION_CONTEXT_EXPANSION", True):
+            context_augmented = self.store._expand_equation_context(  # type: ignore[attr-defined]
+                chunks=mmr_selected,
+                index_name=primary_index_hint,
+                kb_id=kb_id,
+            )
+            # `_expand_equation_context` 会返回原始块 + 上下文块，需剔除重复
+            base_ids = {chunk.chunk_id for chunk in mmr_selected}
+            augmented: List[RetrievedChunk] = []
+            seen: set[str] = set()
+            for chunk in context_augmented:
+                if chunk.chunk_id in seen:
+                    continue
+                seen.add(chunk.chunk_id)
+                # 对上下文块若不存在 RRF 分数，使用自身得分
+                if chunk.chunk_id not in fused_scores:
+                    fused_scores[chunk.chunk_id] = float(chunk.score or 0.0)
+                augmented.append(chunk)
+            mmr_selected = [c for c in augmented if c.chunk_id in base_ids]
+            context_only = [c for c in augmented if c.chunk_id not in base_ids]
+        else:
+            context_only = []
+
+        final_payloads = self._apply_metadata_stage(mmr_selected, fused_scores)
+
+        try:
+            metadata_preview = [item.get("chunk_id") for item in final_payloads[: min(10, len(final_payloads))]]
+            self.logger.debug(
+                "RAG.retrieve[multi_stage] metadata_stage_preview=%s context_added=%s",
+                metadata_preview,
+                len(context_only),
+            )
+        except Exception:
+            pass
+
+        # 追加上下文块（保持原序，降低权重）
+        for ctx in context_only:
+            ctx_payload = {
+                "text": ctx.text,
+                "metadata": ctx.metadata,
+                "score": float(ctx.score or fused_scores.get(ctx.chunk_id, 0.0)),
+                "chunk_id": ctx.chunk_id,
+            }
+            if "retrieval_source" not in ctx_payload["metadata"]:
+                ctx_payload["metadata"]["retrieval_source"] = ctx.source
+            ctx_payload["metadata"].setdefault("is_context", True)
+            final_payloads.append(ctx_payload)
+
+        final_payloads = self._apply_rl_stage(question=query, payloads=final_payloads)
+
+        try:
+            self.logger.info(
+                "RAG.retrieve[multi_stage] kb=%s variants=%s paths=%s candidates=%s final=%s index_mode=%s",
+                kb_id,
+                len(variants),
+                len(path_hits),
+                total_candidates,
+                len(final_payloads),
+                normalized_mode,
+            )
+        except Exception:
+            pass
+
+        try:
+            top_doc_id = None
+            if final_payloads:
+                md0 = final_payloads[0].get("metadata") or {}
+                top_doc_id = md0.get("document_id")
+            memory_debug = {
+                "boost_doc_ids": boost_doc_ids or [],
+                "top_doc_id": top_doc_id,
+                "top_hit": bool(top_doc_id is not None and boost_doc_ids and str(top_doc_id) in {str(doc) for doc in boost_doc_ids}),
+            }
+            preview = [
+                {
+                    "chunk_id": item["chunk_id"],
+                    "score": round(float(item["score"]), 4),
+                    "source": item["metadata"].get("retrieval_source"),
+                }
+                for item in final_payloads[: min(10, len(final_payloads))]
+            ]
+            meta = self._last_variant_meta or {}
             self._last_retrieval_debug = {
-                "strategy": "multi_query",
-                "subqueries": subs,
-                "per_query_hits": per_q_hits,
-                "kb_id": kb_id,
-                "hits_all": len(all_hits),
-                "fused_kept": len(chunks),
+                "strategy": "multi_stage",
+                "variants": variants,
+                "path_stats": {pth: len(hits) for pth, hits in path_hits.items()},
+                "rrf_candidates": preview,
                 "top_k": top_k,
-                "fused_preview": fused_preview,
-                "index": (index_override or settings.ES_DEFAULT_INDEX),
+                "index_mode": normalized_mode,
+                "index_plan": index_plan,
+                "indices_used": sorted(indices_used),
+                "index_stats": dict(index_stats),
+                "memory": memory_debug,
+                "query_meta": meta,
             }
         except Exception:
             self._last_retrieval_debug = None
-        return chunks
+
+        return final_payloads
+
+    # --- query generation helpers -------------------------------------------------
+    def _generate_query_variants(self, query: str) -> List[Dict[str, Any]]:
+        original_query = (query or "").strip()
+        if not original_query:
+            return []
+
+        contains_cjk = self._contains_cjk(original_query)
+        effective_query = original_query
+        translation_used = False
+
+        if contains_cjk and getattr(settings, "SM_AUTO_TRANSLATE_TO_EN", True):
+            translated = self._translate_to_english(original_query)
+            cleaned = self._clean_query_text(translated)
+            if cleaned and cleaned != original_query:
+                effective_query = cleaned
+                translation_used = True
+                try:
+                    self.logger.debug(
+                        "Auto translated query zh->en: '%s' -> '%s'",
+                        original_query,
+                        effective_query,
+                    )
+                except Exception:
+                    pass
+
+        target_language = "en" if translation_used or not contains_cjk else settings.SM_DEFAULT_LANGUAGE
+
+        variants: List[Dict[str, Any]] = [
+            {"text": effective_query, "tag": "original", "synthetic": False, "language": target_language},
+        ]
+
+        mq_num = max(int(getattr(settings, "SM_MULTI_QUERY_NUM", 1) or 1), 1)
+        if mq_num > 1:
+            rewrites = self._rewrite_queries(effective_query, mq_num - 1)
+            for idx, text in enumerate(rewrites, start=1):
+                variants.append(
+                    {
+                        "text": text,
+                        "tag": f"mq_{idx}",
+                        "synthetic": False,
+                        "language": target_language,
+                    }
+                )
+
+        if getattr(settings, "SM_HYDE_ENABLED", True):
+            hyde_text = self._generate_hyde_document(
+                effective_query,
+                language=target_language,
+            )
+            if hyde_text:
+                variants.append({"text": hyde_text, "tag": "hyde", "synthetic": True, "language": target_language})
+
+        dedup: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in variants:
+            key = item["text"].strip().casefold()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            dedup.append(item)
+        self._last_variant_meta = {
+            "original_query": original_query,
+            "effective_query": effective_query,
+            "translation_used": translation_used,
+            "target_language": target_language,
+        }
+        return dedup
+
+    def _rewrite_queries(self, query: str, extra: int) -> List[str]:
+        if extra <= 0:
+            return []
+        prompts = [
+            {
+                "role": "system",
+                "content": "You rewrite the question into diverse academic search intents. Output one query per line, no numbering.",
+            },
+            {
+                "role": "user",
+                "content": f"Rewrite the question into {extra} diverse, concise search queries.\nQuestion: {query}",
+            },
+        ]
+        try:
+            resp = self.llm.generate(prompts, temperature=0.2, max_tokens=128, stream=False) or ""
+        except Exception:
+            resp = ""
+        results: List[str] = []
+        for line in resp.splitlines():
+            stripped = line.strip(" -•\t").strip()
+            if stripped:
+                results.append(stripped)
+        return results[:extra]
+
+    def _generate_hyde_document(self, query: str, *, language: Optional[str] = None) -> str | None:
+        target_language = (language or settings.SM_DEFAULT_LANGUAGE or "zh").lower()
+        prompts = [
+            {
+                "role": "system",
+                "content": (
+                    "Generate a concise hypothetical abstract that would likely answer the research question. The abstract should be factual-sounding, 4-6 sentences."
+                    if target_language == "en"
+                    else "请生成一段 4-6 句的假设性摘要，仿佛已有论文可完整回答该问题。保持学术语气，避免露骨虚构提示。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": query,
+            },
+        ]
+        try:
+            hyde = self.llm.generate(
+                prompts,
+                temperature=float(getattr(settings, "SM_HYDE_TEMPERATURE", 0.2) or 0.2),
+                max_tokens=int(getattr(settings, "SM_HYDE_MAX_TOKENS", 256) or 256),
+                stream=False,
+            )
+        except Exception:
+            hyde = None
+        hyde = (hyde or "").strip()
+        return hyde or None
+
+    def _contains_cjk(self, text: str) -> bool:
+        return bool(re.search(r"[\u4e00-\u9fff]", text or ""))
+
+    def _translate_to_english(self, text: str) -> str:
+        prompts = [
+            {
+                "role": "system",
+                "content": "You are a professional translator. Translate the user's question into fluent academic English. Output only the translation without explanations.",
+            },
+            {"role": "user", "content": text},
+        ]
+        try:
+            translated = self.llm.generate(
+                prompts,
+                temperature=0.0,
+                max_tokens=256,
+                stream=False,
+            )
+            return translated or text
+        except Exception as exc:
+            try:
+                self.logger.warning("Auto translation failed: %s", exc)
+            except Exception:
+                pass
+            return text
+
+    def _clean_query_text(self, text: str) -> str:
+        cleaned = (text or "").strip()
+        if not cleaned:
+            return ""
+        cleaned = re.sub(r"^[-•\s]+", "", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        return cleaned
+
+    # --- fusion & ranking --------------------------------------------------------
+    def _rrf_fuse(
+        self,
+        path_hits: Dict[str, List[RetrievedChunk]],
+    ) -> tuple[List[RetrievedChunk], Dict[str, float], Dict[str, List[str]]]:
+        if not path_hits:
+            return [], {}, {}
+        k_val = max(int(getattr(settings, "SM_RRF_K", 60) or 60), 1)
+        scores: Dict[str, float] = defaultdict(float)
+        best_chunk: Dict[str, RetrievedChunk] = {}
+        summary: Dict[str, List[str]] = {}
+
+        for path_id, hits in path_hits.items():
+            hits_sorted = sorted(hits, key=lambda h: h.rank or 10**6)
+            summary[path_id] = [h.chunk_id for h in hits_sorted[: min(10, len(hits_sorted))]]
+            for idx, hit in enumerate(hits_sorted, start=1):
+                scores[hit.chunk_id] += 1.0 / (k_val + idx)
+                if hit.chunk_id not in best_chunk or hit.score > best_chunk[hit.chunk_id].score:
+                    best_chunk[hit.chunk_id] = hit
+
+        ordered_ids = sorted(best_chunk.keys(), key=lambda cid: scores[cid], reverse=True)
+        ordered_chunks = [best_chunk[cid] for cid in ordered_ids]
+        return ordered_chunks, scores, summary
+
+    def _apply_mmr(
+        self,
+        candidates: List[RetrievedChunk],
+        fused_scores: Dict[str, float],
+        *,
+        top_k: int,
+    ) -> List[RetrievedChunk]:
+        if not candidates:
+            return []
+        if not getattr(settings, "SM_MMR_ENABLED", True):
+            return candidates[:top_k]
+
+        lambda_val = float(getattr(settings, "SM_MMR_LAMBDA", 0.65) or 0.65)
+        max_candidates = max(int(getattr(settings, "SM_MMR_MAX_CANDIDATES", 60) or 60), top_k)
+        pool = candidates[:max_candidates]
+        selected: List[RetrievedChunk] = []
+
+        while pool and len(selected) < top_k:
+            best_candidate = None
+            best_score = float("-inf")
+            for cand in pool:
+                relevance = fused_scores.get(cand.chunk_id, float(cand.score or 0.0))
+                if not selected:
+                    mmr_score = relevance
+                else:
+                    max_sim = max(self._chunk_similarity(cand, s) for s in selected)
+                    mmr_score = lambda_val * relevance - (1 - lambda_val) * max_sim
+                if mmr_score > best_score:
+                    best_candidate = cand
+                    best_score = mmr_score
+            if best_candidate is None:
+                break
+            selected.append(best_candidate)
+            pool = [c for c in pool if c.chunk_id != best_candidate.chunk_id]
+
+        if len(selected) < top_k:
+            remaining = [c for c in candidates if all(c.chunk_id != s.chunk_id for s in selected)]
+            selected.extend(remaining[: max(0, top_k - len(selected))])
+        return selected
+
+    def _chunk_similarity(self, a: RetrievedChunk, b: RetrievedChunk) -> float:
+        ta = self._token_set(a.text)
+        tb = self._token_set(b.text)
+        if not ta or not tb:
+            return 0.0
+        intersection = len(ta & tb)
+        union = len(ta | tb)
+        if union == 0:
+            return 0.0
+        return intersection / union
+
+    def _token_set(self, text: str) -> set[str]:
+        tokens = re.split(r"[^\w]+", text.lower())
+        return {t for t in tokens if t}
+
+    def _apply_metadata_stage(
+        self,
+        chunks: List[RetrievedChunk],
+        fused_scores: Dict[str, float],
+    ) -> List[Dict[str, Any]]:
+        if not chunks:
+            return []
+
+        current_year = time.localtime().tm_year
+        recency_weight = float(getattr(settings, "SM_METADATA_WEIGHT_RECENCY", 0.0) or 0.0)
+        citation_weight = float(getattr(settings, "SM_METADATA_WEIGHT_CITATIONS", 0.0) or 0.0)
+        section_bonus = float(getattr(settings, "SM_METADATA_SECTION_BONUS", 0.0) or 0.0)
+        priority_raw = getattr(settings, "SM_METADATA_SECTION_PRIORITY", "") or ""
+        priority_order = [seg.strip().casefold() for seg in priority_raw.split(":") if seg.strip()]
+        priority_map = {name: (len(priority_order) - idx) / max(len(priority_order), 1) for idx, name in enumerate(priority_order)}
+
+        enriched: List[tuple[float, RetrievedChunk]] = []
+        for chunk in chunks:
+            md = chunk.metadata or {}
+            score = fused_scores.get(chunk.chunk_id, float(chunk.score or 0.0))
+
+            year = md.get("publication_year")
+            if isinstance(year, str) and year.isdigit():
+                year = int(year)
+            if isinstance(year, int):
+                span = max(current_year - 1970, 1)
+                score += recency_weight * max(0.0, (year - 1970) / span)
+
+            citations = md.get("citation_count")
+            if isinstance(citations, str) and citations.isdigit():
+                citations = int(citations)
+            if isinstance(citations, int) and citations > 0:
+                score += citation_weight * math.log1p(citations)
+
+            section = (md.get("section") or md.get("section_type") or "").casefold()
+            if section_bonus and section in priority_map:
+                score += section_bonus * priority_map.get(section, 0.0)
+
+            md["fused_score"] = fused_scores.get(chunk.chunk_id, float(chunk.score or 0.0))
+            md["retrieval_score"] = score
+            md["retrieval_source"] = md.get("retrieval_source") or chunk.source
+            enriched.append((score, chunk))
+
+        enriched.sort(key=lambda item: item[0], reverse=True)
+        payloads: List[Dict[str, Any]] = []
+        for score, chunk in enriched:
+            payloads.append(self._chunk_to_payload(chunk=chunk, score=score))
+        return payloads
+
+    def _chunk_to_payload(self, *, chunk: RetrievedChunk, score: float) -> Dict[str, Any]:
+        return {
+            "text": chunk.text,
+            "metadata": chunk.metadata,
+            "score": float(score),
+            "chunk_id": chunk.chunk_id,
+        }
+
+    def _apply_rl_stage(self, *, question: str, payloads: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not getattr(settings, "SM_L3_RL_ENABLED", False):
+            return payloads
+        try:
+            self._record_rl_event(question=question, payloads=payloads)
+        except Exception:
+            pass
+        return payloads
+
+    def _record_rl_event(self, *, question: str, payloads: List[Dict[str, Any]]) -> None:
+        buffer_path = Path(getattr(settings, "SM_RL_EVENT_BUFFER", "storage/rl_events.jsonl"))
+        buffer_path.parent.mkdir(parents=True, exist_ok=True)
+        event = {
+            "ts": int(time.time()),
+            "question": question,
+            "candidates": [
+                {
+                    "chunk_id": item.get("chunk_id"),
+                    "score": item.get("score"),
+                    "document_id": (item.get("metadata") or {}).get("document_id"),
+                    "page": (item.get("metadata") or {}).get("page"),
+                    "source": (item.get("metadata") or {}).get("retrieval_source"),
+                }
+                for item in payloads
+            ],
+        }
+        with buffer_path.open("a", encoding="utf-8") as fp:
+            fp.write(json.dumps(event, ensure_ascii=False) + "\n")
 
     def get_last_retrieval_debug(self) -> Dict[str, Any] | None:
         return self._last_retrieval_debug
