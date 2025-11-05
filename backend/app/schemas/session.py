@@ -5,7 +5,7 @@ from typing import List, Dict, Any
 
 class SessionDefaults(BaseModel):
     """会话级默认参数（可保存/回读）。"""
-    retrievalStrategy: Literal["basic", "multi_query", "hyde"] = Field("basic")
+    retrievalStrategy: Literal["multi_stage"] = Field("multi_stage")
     rerankerStrategy: Literal["none", "supervised", "rl"] = Field("none")
     topK: int = Field(5, ge=1, le=50)
     language: Literal["zh", "en"] = Field("zh")

@@ -344,7 +344,7 @@ def generate_critical_questions(
             "kb_id": int(kb_id),
             "question": prompt[:512],
             "top_k": len(chunks),
-            "strategy": getattr(settings, "SM_RETRIEVAL_STRATEGY", "basic"),
+            "strategy": getattr(settings, "SM_RETRIEVAL_STRATEGY", "multi_stage"),
             "hits": len(chunks),
             "retrieval": rag.get_last_retrieval_debug() or {},
             "citations": citations,

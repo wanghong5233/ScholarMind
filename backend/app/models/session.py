@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, TIMESTAMP, Integer, ForeignKey, Text
+from sqlalchemy import Column, String, TIMESTAMP, Integer, ForeignKey, Text, Boolean
 from sqlalchemy.sql import func
 from models.base import Base
 
@@ -36,3 +36,6 @@ class Session(Base):
     defaults_json = Column(Text, nullable=True)
     # 滚动摘要，保存多轮历史的压缩表示（可选）
     rolling_summary = Column(Text, nullable=True)
+    # 记忆引导状态
+    memory_guide_fail_count = Column(Integer, nullable=False, default=0)
+    memory_guide_disabled = Column(Boolean, nullable=False, default=False)

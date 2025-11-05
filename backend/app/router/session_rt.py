@@ -1,32 +1,39 @@
+import asyncio
+
+from dataclasses import asdict
+import json
+import os
+import uuid
+from typing import List as _List, Optional
+
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, UploadFile, File, Query, Body
 from fastapi.responses import StreamingResponse, JSONResponse
 from sqlalchemy.orm import Session
-from schemas.session import CreateSessionRequest, CreateSessionResponse, SessionDefaults, SessionDetail, CompareRequest, CompareResponse
-from schemas.knowledge_base import KnowledgeBaseCreate
-from service.knowledgebase_service import create_kb_for_user, get_kb_by_id
-from service.session_service import SessionService
-from service.job_service import job_service
-from service.job_runner_service import execute_job
-from service.job_handler.local_upload_handler import LocalUploadHandler
-from service.core.api.utils.file_storage import FileStorageUtil
-from service.core.rag.retrieval.vector_store import ESVectoreStore, RetrieveQuery
-from service.core.rag.service import RAGService
-from schemas.rag import Chunk as RagChunk
-from models.message import Message
-from utils.database import get_db
-from utils.get_logger import logger
-from utils.rate_limiter import rate_limiter
-from utils.quota import quota
-from models.user import User
-from service.auth import get_current_user
-import uuid
-import json
-from typing import List as _List, Optional
-import os
+
 from core.config import settings
-from utils.ask_logger import AskEventLogger
-from utils.experiments import assign_variant
+from models.message import Message
+from models.user import User
+from schemas.knowledge_base import KnowledgeBaseCreate
+from schemas.rag import Chunk as RagChunk
+from schemas.session import CreateSessionRequest, CreateSessionResponse, SessionDefaults, SessionDetail, CompareRequest, CompareResponse
 from service import document_service as _doc_svc
+from service.auth import get_current_user
+from service.core.api.utils.file_storage import FileStorageUtil
+from service.core.components_factory import get_reranker
+from service.core.rag.history import ShortTermMemoryBuilder
+from service.core.rag.service import RAGService
+from service.job_handler.local_upload_handler import LocalUploadHandler
+from service.job_runner_service import execute_job
+from service.job_service import job_service
+from service.knowledgebase_service import create_kb_for_user, get_kb_by_id
+from service.memory_service import LongTermMemoryService
+from service.session_service import SessionService
+from utils.ask_logger import AskEventLogger
+from utils.database import get_db
+from utils.experiments import assign_variant
+from utils.get_logger import logger
+from utils.quota import quota
+from utils.rate_limiter import rate_limiter
 
 router = APIRouter()
 @router.get("/{session_id}/messages", summary="分页获取会话完整历史")
@@ -271,6 +278,7 @@ def retrieve_by_session(
     top_k: int = Query(5, ge=1, le=50),
     focus_doc_ids: Optional[str] = Query(None, description="以逗号分隔的 document_id 列表"),
     use_session_index: bool = Query(False, description="是否使用会话级临时索引"),
+    index_mode: Optional[str] = Query(None, description="索引检索模式: auto/session_only/global_only/hybrid"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -292,7 +300,9 @@ def retrieve_by_session(
         except Exception:
             pass
 
-    idx_override = f"sm_sess_{session_id}" if use_session_index else None
+    session_index = f"sm_sess_{session_id}"
+    idx_override = session_index
+    effective_mode = index_mode if isinstance(index_mode, str) else ("session_only" if use_session_index else "global_only")
     focus_ids_list = None
     if focus_doc_ids:
         try:
@@ -300,18 +310,26 @@ def retrieve_by_session(
         except Exception:
             focus_ids_list = None
 
-    store = ESVectoreStore(default_index=settings.ES_DEFAULT_INDEX)
-    rq = RetrieveQuery(text=q, kb_id=int(s.knowledge_base_id), top_k=top_k, focus_doc_ids=focus_ids_list, index_override=idx_override)
-    results = store.search(query=rq)
+    rag = RAGService()
+    stm_builder = ShortTermMemoryBuilder(db)
+    memory_service = LongTermMemoryService(db)
+    results = rag.retrieve(
+        query=q,
+        kb_id=int(s.knowledge_base_id),
+        top_k=top_k,
+        focus_doc_ids=focus_ids_list,
+        session_index=session_index,
+        index_mode=effective_mode,
+    )
 
     out: list[RagChunk] = []
-    for r in results:
-        md = r.metadata or {}
+    for item in results:
+        md = item.get("metadata") or {}
         out.append(
             RagChunk(
-                chunk_id=r.chunk_id,
+                chunk_id=str(item.get("chunk_id", "")),
                 document_id=str(md.get("document_id", "")),
-                content=r.text,
+                content=item.get("text", ""),
                 metadata=md,
             )
         )
@@ -356,6 +374,8 @@ def ask(
     stream = bool((payload or {}).get("stream", True))
     compress_history = bool((payload or {}).get("compressHistory", False))
     focus_ids = payload.get("focusDocIds") if isinstance(payload.get("focusDocIds"), list) else None
+    raw_index_mode = payload.get("indexMode") if isinstance(payload.get("indexMode"), str) else None
+    index_mode = raw_index_mode or "auto"
 
     # basic rate limit: per (user, session) 60 req/min
     bucket = f"ask:{current_user.id}:{session_id}"
@@ -395,41 +415,81 @@ def ask(
     max_tokens = max_tokens if isinstance(max_tokens, int) else settings.SM_MAX_TOKENS
 
     rag = RAGService()
+    stm_builder = ShortTermMemoryBuilder(db)
+    memory_service = LongTermMemoryService(db)
     # 实验分流（稳定一致）
     variant = assign_variant(user_id=current_user.id, session_id=session_id, key="ask_mq_rrf", buckets=("A","B"))
 
     if stream:
         def gen():
             try:
-                idx_override = f"sm_sess_{session_id}"
+                history_list, history_debug, query_embedding = stm_builder.build_history(
+                    session_id=session_id,
+                    question=question,
+                )
+                history_debug_dict = asdict(history_debug)
+                boost_doc_ids, memory_debug_raw = memory_service.fetch_focus_doc_ids(
+                    user_id=current_user.id,
+                    session=s,
+                    query=question,
+                    query_embedding=query_embedding,
+                )
+                session_index = f"sm_sess_{session_id}"
+                idx_override = session_index
+                idx_override = session_index
                 # 先检索，立即告知客户端检索完成，减少“无响应”体感
                 chunks0 = rag.retrieve(
                     query=question,
                     kb_id=int(s.knowledge_base_id),
                     top_k=top_k,
                     focus_doc_ids=focus_ids,
-                    index_override=idx_override,
+                    boost_doc_ids=boost_doc_ids,
+                    session_index=session_index,
+                    index_mode=index_mode,
                 )
+                try:
+                    reranker_stream = get_reranker()
+                except Exception:
+                    reranker_stream = None
+                if reranker_stream and chunks0:
+                    try:
+                        top_stream = int(getattr(settings, "SM_L2_RERANK_TOPK", len(chunks0)) or len(chunks0))
+                        stream_candidates = chunks0[:top_stream]
+                        stream_models = [
+                            RagChunk(
+                                chunk_id=item.get("chunk_id", ""),
+                                document_id=str((item.get("metadata") or {}).get("document_id", "")),
+                                content=item.get("text", ""),
+                                metadata=item.get("metadata", {}),
+                            )
+                            for item in stream_candidates
+                        ]
+                        reranked_stream = asyncio.run(reranker_stream.rerank(question, stream_models))  # type: ignore[arg-type]
+                        chunk_stream_map = {item.get("chunk_id"): item for item in chunks0}
+                        ordered_stream = [chunk_stream_map.get(model.chunk_id) for model in reranked_stream if model.chunk_id in chunk_stream_map]
+                        remaining_stream = [item for item in chunks0 if item.get("chunk_id") not in {model.chunk_id for model in reranked_stream}]
+                        chunks0 = [item for item in ordered_stream if item is not None] + remaining_stream
+                    except Exception as rerank_exc:
+                        logger.warning(f"Cross-encoder rerank failed (stream): {rerank_exc}")
                 import json as _json
-                progress_debug = rag.get_last_retrieval_debug() or {}
-                yield f"event: progress\ndata: {_json.dumps({'stage':'retrieved','hits':len(chunks0),'index':idx_override,'variant':variant,'retrieval':progress_debug})}\n\n"
+                retrieval_debug = rag.get_last_retrieval_debug() or {}
+                progress_payload = {
+                    "stage": "retrieved",
+                    "hits": len(chunks0),
+                    "index": idx_override,
+                    "index_mode": index_mode,
+                    "variant": variant,
+                    "retrieval": retrieval_debug,
+                    "history": history_debug_dict,
+                    "memory": memory_debug_raw,
+                }
+                yield f"event: progress\ndata: {_json.dumps(progress_payload)}\n\n"
 
-                # 读取最近会话历史（用户/助手成对），用于多轮对话
-                hist_msgs_all = (
-                    db.query(Message)
-                    .filter(Message.session_id == session_id)
-                    .order_by(Message.create_time.desc())
-                    .all()
-                )
-                max_turns = int(getattr(settings, "SM_HISTORY_MAX_TURNS", 8) or 8)
-                hist_msgs = hist_msgs_all[:max_turns]
-                history_list = []
-                for m in reversed(hist_msgs):
-                    history_list.append({"role": "user", "content": m.user_question})
-                    history_list.append({"role": "assistant", "content": m.model_answer})
-                # 预算统计在 RAGService 中估算，附带在 builder 调试信息中
                 hb = rag.get_last_history_debug() or {}
-                history_usage = {"total_turns": len(hist_msgs_all), "estTokens": hb.get("estTokens"), "budgetTokens": hb.get("budgetTokens")}
+                history_usage = {
+                    "builder": hb,
+                    "stm": history_debug_dict,
+                }
 
                 answer_accum: list[str] = []
                 for part in rag.generate(question=question, chunks=chunks0, stream=True, history=history_list, compress_history=compress_history, rolling_summary=s.rolling_summary):
@@ -447,10 +507,23 @@ def ask(
                     seen.add(k)
                     citations_tail.append(c)
                 usage_tail = rag.get_last_usage() or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-                debug_tail = {"kb_id": s.knowledge_base_id, "top_k": top_k, "index": idx_override}
+                debug_tail = {
+                    "kb_id": s.knowledge_base_id,
+                    "top_k": top_k,
+                    "index": idx_override,
+                    "index_mode": index_mode,
+                }
                 import json as _json
-                # 附带 history 压缩信息（当前流式不引入历史，保留占位）
-                debug_tail["history"] = {"builder": rag.get_last_history_debug() or {}, "usage": history_usage}
+                debug_tail["history"] = history_usage
+                if not memory_debug_raw.get("disabled"):
+                    memory_result = memory_service.record_guided_result(
+                        session_id=session_id,
+                        success=bool((retrieval_debug.get("memory") or {}).get("top_hit")),
+                    )
+                else:
+                    memory_result = {"success": False, "auto_disabled": True}
+                memory_debug_raw["result"] = memory_result
+                debug_tail["memory"] = memory_debug_raw
                 # 持久化滚动摘要（若生成且开关开启）
                 try:
                     _summary = rag.get_last_history_summary()
@@ -463,6 +536,12 @@ def ask(
                 # 持久化本轮问答（聚合后的答案）
                 try:
                     full_answer = "".join(answer_accum)
+                    memory_service.record_memories(
+                        user_id=current_user.id,
+                        session_id=session_id,
+                        question=question,
+                        citations=citations_tail,
+                    )
                     db.add(
                         Message(
                             session_id=session_id,
@@ -470,7 +549,8 @@ def ask(
                             model_answer=full_answer,
                             retrieval_content=_json.dumps({
                                 "citations": citations_tail,
-                                "retrieval": rag.get_last_retrieval_debug() or {},
+                                "retrieval": retrieval_debug,
+                                "memory": memory_debug_raw,
                             }, ensure_ascii=False),
                         )
                     )
@@ -505,34 +585,54 @@ def ask(
         return StreamingResponse(gen(), media_type="text/event-stream; charset=utf-8")
 
     # non-streaming
-    idx_override = f"sm_sess_{session_id}"
+    session_index = f"sm_sess_{session_id}"
+    idx_override = session_index
+    history_list, history_debug, query_embedding = stm_builder.build_history(
+        session_id=session_id,
+        question=question,
+    )
+    history_debug_dict = asdict(history_debug)
+    boost_doc_ids, memory_debug_raw = memory_service.fetch_focus_doc_ids(
+        user_id=current_user.id,
+        session=s,
+        query=question,
+        query_embedding=query_embedding,
+    )
     chunks = rag.retrieve(
         query=question,
         kb_id=int(s.knowledge_base_id),
         top_k=top_k,
         focus_doc_ids=focus_ids,
-        index_override=idx_override,
+        boost_doc_ids=boost_doc_ids,
+        session_index=session_index,
+        index_mode=index_mode,
     )
-    # 读取最近若干轮历史
-    hist_msgs_all = (
-        db.query(Message)
-        .filter(Message.session_id == session_id)
-        .order_by(Message.create_time.desc())
-        .all()
-    )
-    # 先取尽可能多的历史，再依据 token 预算在 RAGService 内进行压缩/摘要
-    hist_msgs = hist_msgs_all
-    hist_msgs_all = (
-        db.query(Message)
-        .filter(Message.session_id == session_id)
-        .order_by(Message.create_time.desc())
-        .all()
-    )
-    hist_msgs = hist_msgs_all
-    history_list = []
-    for m in reversed(hist_msgs):
-        history_list.append({"role": "user", "content": m.user_question})
-        history_list.append({"role": "assistant", "content": m.model_answer})
+
+    # L2 Cross-Encoder rerank
+    try:
+        reranker = get_reranker()
+    except Exception:
+        reranker = None
+    if reranker and chunks:
+        try:
+            top_for_rerank = int(getattr(settings, "SM_L2_RERANK_TOPK", len(chunks)) or len(chunks))
+            rerank_candidates = chunks[:top_for_rerank]
+            chunk_models = [
+                RagChunk(
+                    chunk_id=item.get("chunk_id", ""),
+                    document_id=str((item.get("metadata") or {}).get("document_id", "")),
+                    content=item.get("text", ""),
+                    metadata=item.get("metadata", {}),
+                )
+                for item in rerank_candidates
+            ]
+            reranked_models = asyncio.run(reranker.rerank(question, chunk_models))  # type: ignore[arg-type]
+            chunk_map = {item.get("chunk_id"): item for item in chunks}
+            ordered = [chunk_map.get(model.chunk_id) for model in reranked_models if model.chunk_id in chunk_map]
+            remaining = [item for item in chunks if item.get("chunk_id") not in {model.chunk_id for model in reranked_models}]
+            chunks = [item for item in ordered if item is not None] + remaining
+        except Exception as rerank_exc:
+            logger.warning(f"Cross-encoder rerank failed: {rerank_exc}")
 
     try:
         content = rag.generate(question=question, chunks=chunks, temperature=temperature, max_tokens=max_tokens, stream=False, history=history_list, compress_history=compress_history, rolling_summary=s.rolling_summary)
@@ -544,14 +644,33 @@ def ask(
         raise HTTPException(status_code=502, detail="LLM generation failed")
     citations = rag.build_citations(chunks)
     usage = rag.get_last_usage() or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    retrieval_debug = rag.get_last_retrieval_debug() or {}
+    history_builder_debug = rag.get_last_history_debug() or {}
     debug = {
         "kb_id": s.knowledge_base_id,
         "top_k": top_k,
         "index": idx_override,
+        "index_mode": index_mode,
         "variant": variant,
-        "retrieval": rag.get_last_retrieval_debug() or {},
-        "history": {"builder": rag.get_last_history_debug() or {}, "usage": {"total_turns": len(hist_msgs_all), "estTokens": (rag.get_last_history_debug() or {}).get("estTokens"), "budgetTokens": (rag.get_last_history_debug() or {}).get("budgetTokens")}},
+        "retrieval": retrieval_debug,
+        "history": {"builder": history_builder_debug, "stm": history_debug_dict},
+        "memory": memory_debug_raw,
     }
+
+    memory_service.record_memories(
+        user_id=current_user.id,
+        session_id=session_id,
+        question=question,
+        citations=citations,
+    )
+    if not memory_debug_raw.get("disabled"):
+        memory_result = memory_service.record_guided_result(
+            session_id=session_id,
+            success=bool((retrieval_debug.get("memory") or {}).get("top_hit")),
+        )
+    else:
+        memory_result = {"success": False, "auto_disabled": True}
+    memory_debug_raw["result"] = memory_result
 
     # 事件日志（非阻塞）
     try:
@@ -561,14 +680,17 @@ def ask(
             "kb_id": int(s.knowledge_base_id),
             "question": str(question)[:512],
             "top_k": int(top_k),
-            "strategy": getattr(settings, "SM_RETRIEVAL_STRATEGY", "basic"),
+            "strategy": getattr(settings, "SM_RETRIEVAL_STRATEGY", "multi_stage"),
             "hits": len(chunks),
-            "retrieval": rag.get_last_retrieval_debug() or {},
+            "retrieval": retrieval_debug,
             "citations": citations,
             "usage": usage,
             "answer_chars": len(content or ""),
             "variant": variant,
-            "historyUsage": {"total_turns": len(hist_msgs_all), "compress": bool(compress_history), "estTokens": (rag.get_last_history_debug() or {}).get("estTokens"), "budgetTokens": (rag.get_last_history_debug() or {}).get("budgetTokens")},
+            "historyUsage": {"builder": history_builder_debug, "stm": history_debug_dict, "compress": bool(compress_history)},
+            "memory": {"request": memory_debug_raw, "result": memory_result},
+            "index": idx_override,
+            "index_mode": index_mode,
         })
     except Exception:
         pass
@@ -589,7 +711,8 @@ def ask(
                 model_answer=content,
                 retrieval_content=json.dumps({
                     "citations": citations,
-                    "retrieval": rag.get_last_retrieval_debug() or {},
+                    "retrieval": retrieval_debug,
+                    "memory": memory_debug_raw,
                 }, ensure_ascii=False),
             )
         )
@@ -677,7 +800,7 @@ def compare_documents(
             "kb_id": int(s.knowledge_base_id),
             "question": question[:512],
             "top_k": int(top_k),
-            "strategy": getattr(settings, "SM_RETRIEVAL_STRATEGY", "basic"),
+            "strategy": getattr(settings, "SM_RETRIEVAL_STRATEGY", "multi_stage"),
             "hits": len(chunks),
             "retrieval": rag.get_last_retrieval_debug() or {},
             "citations": citations,

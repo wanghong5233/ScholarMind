@@ -50,3 +50,23 @@ class SessionService:
             return
         s.rolling_summary = rolling_summary
         self.db.commit()
+
+    def reset_memory_guide(self, *, session_id: str) -> None:
+        s = self.get_session_by_id(session_id=session_id)
+        if not s:
+            return
+        if (s.memory_guide_fail_count or 0) == 0 and not s.memory_guide_disabled:
+            return
+        s.memory_guide_fail_count = 0
+        s.memory_guide_disabled = False
+        self.db.commit()
+
+    def increment_memory_guide_fail(self, *, session_id: str, threshold: int) -> bool:
+        s = self.get_session_by_id(session_id=session_id)
+        if not s:
+            return False
+        s.memory_guide_fail_count = (s.memory_guide_fail_count or 0) + 1
+        if s.memory_guide_fail_count >= threshold:
+            s.memory_guide_disabled = True
+        self.db.commit()
+        return bool(s.memory_guide_disabled)

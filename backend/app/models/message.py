@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Text, TIMESTAMP, Integer
+from sqlalchemy import Column, String, Text, TIMESTAMP, Integer, JSON
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.sql import func
 from models.base import Base
@@ -62,6 +62,12 @@ class Message(Base):
                                  # 这是合理的，因为有些对话可能不涉及知识库检索，只是普通的聊天。
                                  # 这个字段对于调试、分析模型回答的依据以及在前端展示引用来源非常重要。
     )
+
+    # 预计算摘要及向量特征（用于 STM 选择与压缩）
+    user_summary = Column(Text, nullable=True)
+    assistant_summary = Column(Text, nullable=True)
+    user_embedding = Column(JSON, nullable=True)
+    assistant_embedding = Column(JSON, nullable=True)
 
 # 注释掉重复的 KnowledgeBase 类定义，已迁移到 models/knowledgebase.py
 # class KnowledgeBase(Base):
