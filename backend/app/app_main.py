@@ -3,7 +3,6 @@ from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from core.config import settings  # <--- 关键改动：在顶部显式导入配置
-from router import chat_rt
 from router import user_rt
 from router import history_rt
 from router import knowledgebase_rt
@@ -91,7 +90,6 @@ app.add_middleware(
 
 # 包含各个模块的路由，并为它们设置统一的前缀和标签
 # 这有助于API文档的组织和URL的结构化
-app.include_router(chat_rt.router, prefix="/api/chat", tags=["Chat"])
 app.include_router(user_rt.router, prefix="/api/users", tags=["Users"])
 app.include_router(history_rt.router, prefix="/api/history", tags=["History"])
 # app.include_router(document_upload_rt.router, prefix="/api/document-upload", tags=["Document Upload"])
