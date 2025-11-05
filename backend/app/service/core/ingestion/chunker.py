@@ -6,6 +6,53 @@ from service.core.ingestion.interfaces import ParsedBlock, Chunker
 from utils.get_logger import log
 
 
+def _merge_short_chunks(chunks: List[ParsedBlock]) -> List[ParsedBlock]:
+    """Merge or drop overly short chunks to避免检索阶段产生无意义片段 (如单词级)。"""
+    min_chars = max(int(getattr(settings, "SM_CHUNK_MIN_FILTER_CHARS", 20) or 0), 0)
+    if min_chars <= 0 or not chunks:
+        return [c for c in chunks if (c.text or "").strip()]
+
+    merged: List[ParsedBlock] = []
+    pending: List[str] = []
+
+    for chunk in chunks:
+        text = (chunk.text or "").strip()
+        if not text:
+            continue
+
+        if len(text) < min_chars:
+            pending.append(text)
+            # 优先合入上一块，避免丢失信息
+            if merged:
+                last = merged.pop()
+                combined = (last.text or "").rstrip()
+                if combined:
+                    combined += "\n"
+                combined += "\n".join(pending)
+                merged.append(ParsedBlock(text=combined, metadata=last.metadata))
+                pending.clear()
+            continue
+
+        if pending:
+            text = "\n".join(pending + [text])
+            pending.clear()
+
+        merged.append(ParsedBlock(text=text, metadata=chunk.metadata))
+
+    if pending:
+        if merged:
+            last = merged.pop()
+            combined = (last.text or "").rstrip()
+            if combined:
+                combined += "\n"
+            combined += "\n".join(pending)
+            merged.append(ParsedBlock(text=combined, metadata=last.metadata))
+        else:
+            merged.append(ParsedBlock(text="\n".join(pending), metadata={}))
+
+    return merged
+
+
 class RecursiveCharacterChunker(Chunker):
     """递归字符分块器（兜底方案）
     
@@ -62,6 +109,8 @@ class RecursiveCharacterChunker(Chunker):
                 start = end - self.overlap
                 if start < 0:
                     start = 0
+        results = _merge_short_chunks(results)
+
         try:
             log.info(
                 f"RecursiveCharacterChunker output_chunks={len(results)} input_blocks={len(block_list)} target_chars={self.target_chars}"
@@ -104,6 +153,32 @@ class SemanticAwareChunker(Chunker):
         import re
         s = re.split(r"(?<=[。！？!?.])\s+|\n+", text.strip())
         return [t.strip() for t in s if t and t.strip()]
+
+    def _split_block_sliding(self, block: ParsedBlock) -> List[ParsedBlock]:
+        """滑窗兜底：当块长度远超 max_chunk_chars 时使用固定窗口切分。"""
+        text = (block.text or "").strip()
+        if not text:
+            return []
+
+        target = getattr(settings, "SM_CHUNK_TARGET_CHARS", self.target_chars)
+        overlap = getattr(settings, "SM_CHUNK_OVERLAP_CHARS", 150)
+        target = max(target, 400)  # IEEE 首段较长，兜底窗口稍大
+        overlap = max(min(overlap, target // 3), 50)
+
+        pieces: List[ParsedBlock] = []
+        start = 0
+        length = len(text)
+        while start < length:
+            end = min(length, start + target)
+            chunk_txt = text[start:end]
+            pieces.append(ParsedBlock(text=chunk_txt, metadata=dict(block.metadata)))
+            if end >= length:
+                break
+            start = end - overlap
+            if start < 0:
+                start = 0
+
+        return pieces
 
     def _embed(self, sents: List[str]) -> List[List[float]]:
         # 复用已有 Embedder（本地或API），以确保维度一致
@@ -225,19 +300,46 @@ class SemanticAwareChunker(Chunker):
         # 输出最后一个块
         if current_block:
             results.append(current_block)
-        
+
+        # 确保块级结果不会超过 max_chunk_chars；过长则回退到句级/滑窗切分
+        final_results: List[ParsedBlock] = []
+        for block in results:
+            text = (block.text or "").strip()
+            if not text:
+                continue
+            if len(text) <= self.max_chunk_chars:
+                final_results.append(block)
+                continue
+
+            # 回退策略：按句子切分，保持 target/max 约束；若分句失败则使用滑窗
+            sents = self._split_sentences(text)
+            if not sents:
+                final_results.extend(self._split_block_sliding(block))
+                continue
+
+            buf: List[str] = []
+            for sent in sents:
+                tentative = ("\n".join(buf) + ("\n" if buf else "") + sent) if buf else sent
+                if len(tentative) > self.max_chunk_chars and buf:
+                    final_results.append(ParsedBlock(text="\n".join(buf), metadata=dict(block.metadata)))
+                    buf = [sent]
+                    continue
+                buf.append(sent)
+            if buf:
+                final_results.append(ParsedBlock(text="\n".join(buf), metadata=dict(block.metadata)))
+
         try:
-            log.info(f"SemanticAwareChunker.block_level: input={len(valid_blocks)} output={len(results)} merged={len(valid_blocks)-len(results)}")
-            
+            log.info(f"SemanticAwareChunker.block_level: input={len(valid_blocks)} output={len(final_results)} merged={len(valid_blocks)-len(final_results)}")
+
             # 调试：打印前2个块级合并后的 chunk
-            for i, block in enumerate(results[:2]):
+            for i, block in enumerate(final_results[:2]):
                 log.info(f"[DEBUG_BLOCK_LEVEL_CHUNK_{i+1}] element_type={block.metadata.get('element_type')} "
                          f"page={block.metadata.get('page')} len={len(block.text)} chars={len(block.text)} "
                          f"text_preview={block.text[:100]}...")
         except Exception:
             pass
-        
-        return results
+
+        return final_results
 
     def chunk(self, *, blocks: Iterable[ParsedBlock]) -> List[ParsedBlock]:
         # 保障可重复遍历与统计
@@ -256,7 +358,8 @@ class SemanticAwareChunker(Chunker):
         
         if is_pre_merged:
             # 块级语义合并：保留预合并块的完整性，只在块边界做跨块合并
-            return self._chunk_block_level(_blocks)
+            block_level = self._chunk_block_level(_blocks)
+            return _merge_short_chunks(block_level)
         
         # 原有逻辑：句子级语义分块（适用于非预合并场景）
         for b in _blocks:
@@ -340,6 +443,8 @@ class SemanticAwareChunker(Chunker):
                     except Exception:
                         pass
                 results.append(ParsedBlock(text="\n".join(buf), metadata=md))
+        results = _merge_short_chunks(results)
+
         try:
             log.info(
                 f"SemanticAwareChunker.finish blocks={len(_blocks)} chunks={len(results)}"

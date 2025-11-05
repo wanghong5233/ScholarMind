@@ -53,6 +53,22 @@ def _normalize_whitespace(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _normalize_keyword_list(candidates: List[str]) -> List[str]:
+    """轻量归一化关键词：仅整理空白、收尾标点并去重。"""
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for raw in candidates:
+        kw = re.sub(r"\s+", " ", raw).strip().strip('.;:,')
+        if not kw:
+            continue
+        key = kw.casefold()
+        if key in seen:
+            continue
+        normalized.append(kw)
+        seen.add(key)
+    return normalized
+
+
 class DefaultMetadataExtractor(MetadataExtractor):
     """
     负责从解析块中抽取 title/doi/abstract/keywords，并用外部 API 高置信补全。
@@ -63,14 +79,35 @@ class DefaultMetadataExtractor(MetadataExtractor):
     """
 
     def extract_and_enrich(self, *, db, document, blocks: List[ParsedBlock]):
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        doc_id = getattr(document, "id", "unknown")
+        logger.info(f"[METADATA_EXTRACT_START] doc_id={doc_id}")
+        
         # 先做轻量内容解析，收集候选（但此时不写回，只缓存）
         parsed_title, parsed_doi, parsed_abstract, parsed_keywords = self._extract_from_blocks(blocks)
+        logger.info(
+            f"[METADATA_FROM_BLOCKS] doc_id={doc_id} "
+            f"title={'YES' if parsed_title else 'NO'} "
+            f"doi={'YES' if parsed_doi else 'NO'} "
+            f"abstract={'YES' if parsed_abstract else 'NO'} "
+            f"keywords={len(parsed_keywords) if parsed_keywords else 0}"
+        )
+        
         if (not parsed_title or not parsed_doi or not parsed_abstract) and document.local_pdf_path:
             f_title, f_doi, f_abs, f_kw = self._fallback_from_pdf(document.local_pdf_path)
             parsed_title = parsed_title or f_title
             parsed_doi = parsed_doi or f_doi
             parsed_abstract = parsed_abstract or f_abs
             parsed_keywords = parsed_keywords or f_kw
+            logger.info(
+                f"[METADATA_FALLBACK_PDF] doc_id={doc_id} "
+                f"title={'YES' if f_title else 'NO'} "
+                f"doi={'YES' if f_doi else 'NO'} "
+                f"abstract={'YES' if f_abs else 'NO'} "
+                f"keywords={len(f_kw) if f_kw else 0}"
+            )
 
         changed = False
 
@@ -84,42 +121,79 @@ class DefaultMetadataExtractor(MetadataExtractor):
                 if grobid_client.is_available():
                     grobid_metadata = grobid_client.process_header_document(document.local_pdf_path)
                     if grobid_metadata:
+                        g_title = grobid_metadata.get("title")
+                        g_doi = grobid_metadata.get("doi")
+                        g_abstract = grobid_metadata.get("abstract")
+                        g_keywords = grobid_metadata.get("keywords")
+                        
+                        logger.info(
+                            f"[METADATA_FROM_GROBID] doc_id={doc_id} "
+                            f"title={'YES' if g_title else 'NO'} "
+                            f"doi={'YES' if g_doi else 'NO'} "
+                            f"abstract_len={len(g_abstract) if g_abstract else 0} "
+                            f"keywords={len(g_keywords) if g_keywords else 0}"
+                        )
+                        
                         # Grobid 结果优先填充（DOI用于后续查询，摘要/关键词保留）
-                        parsed_title = grobid_metadata.get("title") or parsed_title
-                        parsed_doi = grobid_metadata.get("doi") or parsed_doi
-                        parsed_abstract = grobid_metadata.get("abstract") or parsed_abstract  # Grobid摘要更完整
-                        parsed_keywords = grobid_metadata.get("keywords") or parsed_keywords  # Semantic Scholar基本没有
+                        parsed_title = g_title or parsed_title
+                        parsed_doi = g_doi or parsed_doi
+                        if g_abstract:
+                            logger.info(f"[METADATA_ABSTRACT_SOURCE] doc_id={doc_id} source=GROBID preview={g_abstract[:100]}...")
+                            parsed_abstract = g_abstract
+                        parsed_keywords = g_keywords or parsed_keywords
             except Exception as e:
-                import logging
-                logging.getLogger(__name__).warning(f"Grobid extraction failed: {e}")
+                logger.warning(f"[METADATA_GROBID_FAILED] doc_id={doc_id} error={e}")
 
         # 1) Semantic Scholar 补强（用Grobid的DOI查询，获取标准化标题和学术元数据）
         doi = document.doi or parsed_doi
         detail = None
         if doi:
+            logger.info(f"[METADATA_S2_QUERY] doc_id={doc_id} method=doi value={doi}")
             detail = semantic_scholar_service.get_paper_by_doi(doi)
             if not detail:
                 papers = semantic_scholar_service.search_papers(query=doi, limit=1)
                 detail = papers[0].model_dump() if papers else None
         elif parsed_title:
+            logger.info(f"[METADATA_S2_QUERY] doc_id={doc_id} method=title value={parsed_title[:80]}")
             papers = semantic_scholar_service.search_papers(query=parsed_title, limit=1)
             detail = papers[0].model_dump() if papers else None
 
         if detail:
+            s2_title = detail.get("title")
+            s2_keywords_raw = detail.get("keywords")
+            s2_abstract = detail.get("abstract")
+            logger.info(
+                f"[METADATA_FROM_S2] doc_id={doc_id} "
+                f"title={'YES' if s2_title else 'NO'} "
+                f"abstract={'YES' if s2_abstract else 'NO'} "
+                f"keywords_raw={len(s2_keywords_raw) if isinstance(s2_keywords_raw, list) else 0}"
+            )
             # Semantic Scholar 允许覆盖标题（更标准化）和作者（更完整），但不覆盖摘要和关键词
             changed = self._merge_semantic_scholar_detail(document, detail, override_title=True) or changed
 
         # 2) 再用解析结果仅补空（不覆盖非空字段，不伪造）
         if parsed_title and not getattr(document, "title", None):
+            logger.info(f"[METADATA_WRITE] doc_id={doc_id} field=title source=parsed")
             document.title = parsed_title
             changed = True
         if parsed_doi and not getattr(document, "doi", None):
+            logger.info(f"[METADATA_WRITE] doc_id={doc_id} field=doi source=parsed value={parsed_doi}")
             document.doi = parsed_doi
             changed = True
         if parsed_abstract and not getattr(document, "abstract", None):
+            abstract_source = "GROBID" if grobid_metadata and grobid_metadata.get("abstract") else "PARSED"
+            logger.info(
+                f"[METADATA_WRITE] doc_id={doc_id} field=abstract source={abstract_source} "
+                f"len={len(parsed_abstract)} preview={parsed_abstract[:100]}..."
+            )
             document.abstract = parsed_abstract[:4000]
             changed = True
         if parsed_keywords and not getattr(document, "keywords", None):
+            kw_source = "GROBID" if grobid_metadata and grobid_metadata.get("keywords") else "PARSED"
+            logger.info(
+                f"[METADATA_WRITE] doc_id={doc_id} field=keywords source={kw_source} "
+                f"count={len(parsed_keywords)} values={parsed_keywords[:5]}"
+            )
             document.keywords = parsed_keywords[:50]
             changed = True
         
@@ -128,6 +202,7 @@ class DefaultMetadataExtractor(MetadataExtractor):
             if not getattr(document, "authors", None) and grobid_metadata.get("authors"):
                 authors = [a.get("name") for a in grobid_metadata["authors"] if a.get("name")]
                 if authors:
+                    logger.info(f"[METADATA_WRITE] doc_id={doc_id} field=authors source=GROBID count={len(authors)}")
                     document.authors = authors
                     changed = True
 
@@ -135,6 +210,12 @@ class DefaultMetadataExtractor(MetadataExtractor):
             db.add(document)
             db.commit()
             db.refresh(document)
+        
+        logger.info(
+            f"[METADATA_EXTRACT_DONE] doc_id={doc_id} "
+            f"final_abstract_len={len(getattr(document, 'abstract', '') or '')} "
+            f"final_keywords={len(getattr(document, 'keywords', []) or [])}"
+        )
         return document
 
     def _extract_from_blocks(self, blocks: List[ParsedBlock]) -> Tuple[str | None, str | None, str | None, list | None]:
@@ -176,22 +257,107 @@ class DefaultMetadataExtractor(MetadataExtractor):
             body = _fix_hyphenation(body)
             body = _strip_leading_punct(body)
             body = _normalize_whitespace(body)
+            
+            # 在 "Index Terms" 或 "Keywords" 或章节标题处停止（避免包含无关内容）
+            stop_match = re.search(
+                r'\b(?:Index\s+Terms?|KEY\s*WORDS?|INTRODUCTION)\b',
+                body,
+                re.IGNORECASE
+            )
+            if stop_match:
+                body = body[:stop_match.start()].strip()
+            
             abstract = body[:4000]
 
-        # 优先 Index Terms，其次 Keywords/Key words
-        mk = INDEX_TERMS_RE.search(joined)
-        if not mk:
-            mk = KEYWORDS_RE.search(joined)
-        if mk:
-            raw = mk.group(1).replace('\n', ' ')
-            raw = _fix_hyphenation(raw)
-            raw = _strip_leading_punct(raw)
-            raw = _normalize_whitespace(raw)
-            parts = [x.strip().strip('.') for x in re.split(r"[,;]", raw) if x.strip()]
-            if parts:
-                keywords = parts
+        # IEEE 双栏专项：优先精确提取 Index Terms（限定首页前 10 块）
+        keywords = self._extract_ieee_index_terms(blocks[:10])
+        
+        # 如果 IEEE 专项未提取到，回退通用正则
+        if not keywords:
+            mk = INDEX_TERMS_RE.search(joined)
+            if not mk:
+                mk = KEYWORDS_RE.search(joined)
+            if mk:
+                raw = mk.group(1).replace('\n', ' ')
+                raw = _fix_hyphenation(raw)
+                raw = _strip_leading_punct(raw)
+                raw = _normalize_whitespace(raw)
+                parts = [x for x in re.split(r"[,;]", raw) if x.strip()]
+                if parts:
+                    keywords = _normalize_keyword_list(parts)
 
         return title, doi, abstract, keywords
+    
+    def _extract_ieee_index_terms(self, blocks: List[ParsedBlock]) -> List[str] | None:
+        """
+        IEEE 双栏专项：精确提取 Index Terms。
+        
+        策略：
+        1. 限定首页前 10 个块（避免误捕正文）
+        2. 精确匹配 "Index Terms—" 或 "Index Terms:" 模式（IEEE 标准格式）
+        3. 截止到下一个段落分隔符或章节标题（I. INTRODUCTION 等）
+        4. 严格过滤：单个关键词长度 < 60 字符，词数 < 6，剔除引用标记/停用词短语
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        for i, block in enumerate(blocks):
+            text = (block.text or "").strip()
+            if not text:
+                continue
+            
+            # 精确匹配 IEEE Index Terms 模式（支持长破折号、短破折号、冒号）
+            # 截止条件：双换行、章节标题（I. / 1. / INTRODUCTION）、或文本结束
+            match = re.search(
+                r"(?:Index\s+Terms?|KEY\s*WORDS?)[\s:—–-]+(.+?)(?=\n\s*\n|(?:^|\n)\s*(?:I{1,3}|IV|V|VI|[1-9])\.\s|(?:^|\n)\s*INTRODUCTION\b|\Z)",
+                text,
+                re.IGNORECASE | re.DOTALL | re.MULTILINE
+            )
+            
+            if match:
+                raw = match.group(1).replace('\n', ' ')
+                raw = _fix_hyphenation(raw)
+                raw = _strip_leading_punct(raw)
+                raw = _normalize_whitespace(raw)
+                
+                # MinerU 把换行合并成空格后，章节标题会变成 ". I. INTRODUCTION" 或 ". 1. Introduction"
+                # 强制在这些模式处截断
+                cutoff = re.search(
+                    r'\.\s+(?:[IVX]{1,4}|[0-9]{1,2})\.\s+[A-Z]',
+                    raw
+                )
+                if cutoff:
+                    raw = raw[:cutoff.start() + 1]  # 保留句号，截断后面
+                
+                # 按逗号/分号分割
+                parts = [p.strip().strip('.') for p in re.split(r'[,;]', raw) if p.strip()]
+                
+                # 二次清理：移除任何残留的章节标记或过长片段
+                filtered = []
+                for kw in parts:
+                    # 如果包含章节标记，直接丢弃
+                    if re.search(r'\b(?:[IVX]{1,4}|[0-9]{1,2})\.\s+[A-Z]|\bINTRODUCTION\b', kw, re.IGNORECASE):
+                        continue
+                    # 如果超过 100 字符（明显是正文），丢弃
+                    if len(kw) > 100:
+                        continue
+                    filtered.append(kw)
+                
+                cleaned = _normalize_keyword_list(filtered)
+
+                if cleaned:
+                    logger.info(
+                        f"[IEEE_INDEX_TERMS_EXTRACTED] block={i} count={len(cleaned)} "
+                        f"values={cleaned[:5]}"
+                    )
+                    return cleaned[:15]  # 最多返回 15 个关键词
+                else:
+                    logger.warning(
+                        f"[IEEE_INDEX_TERMS_ALL_FILTERED] block={i} raw_count={len(parts)} "
+                        f"all empty after normalization"
+                    )
+        
+        return None
 
     def _fallback_from_pdf(self, file_path: str) -> Tuple[str | None, str | None, str | None, list | None]:
         import fitz  # 让缺包直接抛错以便定位
@@ -239,9 +405,9 @@ class DefaultMetadataExtractor(MetadataExtractor):
                     raw = _fix_hyphenation(raw)
                     raw = _strip_leading_punct(raw)
                     raw = _normalize_whitespace(raw)
-                    parts = [x.strip().strip('.') for x in re.split(r"[,;]", raw) if x.strip()]
+                    parts = [x for x in re.split(r"[,;]", raw) if x.strip()]
                     if parts:
-                        keywords = parts
+                        keywords = _normalize_keyword_list(parts)
                 # Title：过滤页眉/版权等
                 head = (pages_text[0] if pages_text else "").splitlines()
                 candidates = []
@@ -384,23 +550,47 @@ class DefaultMetadataExtractor(MetadataExtractor):
         return False
 
     def _merge_semantic_scholar_detail(self, document, detail: dict | None, override_title: bool = True) -> bool:
+        import logging
+        logger = logging.getLogger(__name__)
+        
         if not detail:
             return False
+        
+        doc_id = getattr(document, "id", "unknown")
         changed = False
+        
         title = detail.get("title")
         if title and (override_title or self._should_override_title(document)):
+            logger.info(f"[METADATA_S2_OVERRIDE] doc_id={doc_id} field=title")
             document.title = title
             changed = True
+        
+        # Semantic Scholar 的摘要优先级最高（通常比 parsed 更完整）
+        s2_abstract = detail.get("abstract")
+        if s2_abstract and isinstance(s2_abstract, str) and len(s2_abstract.strip()) > 100:
+            existing_abstract = getattr(document, "abstract", None) or ""
+            # 如果 S2 摘要明显更长（>1.5倍），或者现有摘要过短，则覆盖
+            if len(s2_abstract) > len(existing_abstract) * 1.5 or len(existing_abstract) < 500:
+                logger.info(
+                    f"[METADATA_S2_OVERRIDE] doc_id={doc_id} field=abstract "
+                    f"old_len={len(existing_abstract)} new_len={len(s2_abstract)}"
+                )
+                document.abstract = s2_abstract[:4000]
+                changed = True
+        
         if not getattr(document, "authors", None):
             authors = detail.get("authors") or []
             names = [a.get("name") if isinstance(a, dict) else a for a in authors if a]
             if names:
+                logger.info(f"[METADATA_S2_FILL] doc_id={doc_id} field=authors count={len(names)}")
                 document.authors = names
                 changed = True
         if not getattr(document, "publication_year", None) and detail.get("year"):
+            logger.info(f"[METADATA_S2_FILL] doc_id={doc_id} field=year value={detail.get('year')}")
             document.publication_year = detail.get("year")
             changed = True
         if not getattr(document, "journal_or_conference", None) and detail.get("venue"):
+            logger.info(f"[METADATA_S2_FILL] doc_id={doc_id} field=venue value={detail.get('venue')}")
             document.journal_or_conference = detail.get("venue")
             changed = True
         if not getattr(document, "semantic_scholar_id", None) and detail.get("paperId"):
@@ -412,21 +602,38 @@ class DefaultMetadataExtractor(MetadataExtractor):
         if not getattr(document, "fields_of_study", None) and detail.get("fieldsOfStudy"):
             document.fields_of_study = detail.get("fieldsOfStudy")
             changed = True
+        
         # 不从 fieldsOfStudy 生成关键词；仅当 API 返回明确的 keywords 字段才填入
-        if not getattr(document, "keywords", None):
-            kws_raw = detail.get("keywords")
-            if isinstance(kws_raw, list) and kws_raw:
-                kws: List[str] = []
-                for item in kws_raw:
-                    if isinstance(item, str) and item:
-                        kws.append(item)
-                    elif isinstance(item, dict):
-                        name = item.get("name")
-                        if name:
-                            kws.append(name)
-                if kws:
-                    document.keywords = kws[:50]
-                    changed = True
+        kws_raw = detail.get("keywords")
+        if isinstance(kws_raw, list) and kws_raw:
+            kws: List[str] = []
+            for item in kws_raw:
+                if isinstance(item, str) and item:
+                    kws.append(item)
+                elif isinstance(item, dict):
+                    name = item.get("name")
+                    if name:
+                        kws.append(name)
+            
+            logger.info(
+                f"[METADATA_S2_KEYWORDS_RAW] doc_id={doc_id} count={len(kws)} "
+                f"sample={kws[:3] if kws else []}"
+            )
+            
+            s2_keywords = _normalize_keyword_list(kws)
+            if s2_keywords:
+                logger.info(
+                    f"[METADATA_S2_KEYWORDS_CLEANED] doc_id={doc_id} count={len(s2_keywords)} "
+                    f"values={s2_keywords[:10]}"
+                )
+                document.keywords = s2_keywords[:50]
+                changed = True
+            else:
+                logger.warning(
+                    f"[METADATA_S2_KEYWORDS_ALL_REJECTED] doc_id={doc_id} "
+                    f"raw_count={len(kws)} all empty after normalization"
+                )
+        
         return changed
 
     def _extract_keywords_from_text(self, text: str) -> Optional[List[str]]:

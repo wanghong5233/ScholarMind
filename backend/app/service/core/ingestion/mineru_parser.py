@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import List, Tuple
+import re
 from service.core.ingestion.interfaces import DocumentParser, ParsedBlock
 from utils.get_logger import log
 from core.config import settings
@@ -289,6 +290,28 @@ class MinerUParser(DocumentParser):
                     # 目标范围：3000-10000 字符/块（约 750-2500 tokens），可通过设置微调
                     combined_len = len(current.text) + len(block.text) + 1
                     can_merge = combined_len <= getattr(settings, "SM_PREMERGE_MAX_CHARS", 10000)
+
+                    # 首页更严格：避免把标题/作者/摘要/Index Terms/引言合成超长段
+                    page_no = current.metadata.get("page", 1)
+                    first_page_cap = getattr(settings, "SM_PREMERGE_MAX_CHARS_FIRST_PAGE", 2400)
+                    if page_no == 1 and combined_len > first_page_cap:
+                        can_merge = False
+
+                    # 章节/标记边界：遇到 Abstract / Index Terms / Keywords / (I.|1.) Introduction 等不跨段合并
+                    def _starts_section_heading(txt: str) -> bool:
+                        return bool(re.match(r"\s*(?:Abstract(?:[—:])?|Index\s+Terms?|Keywords?|(?:I|1)\.\s*Introduction)\b", txt, re.IGNORECASE))
+
+                    def _contains_tail_section_marker(txt: str) -> bool:
+                        # 在末尾 80 字符内出现结束信号，如 "Index Terms" 或句号后紧跟章节编号
+                        tail = (txt or "")[-120:]
+                        if re.search(r"\bIndex\s+Terms?\b|\bKeywords?\b", tail, re.IGNORECASE):
+                            return True
+                        if re.search(r"\.\s+(?:[IVX]{1,4}|[0-9]{1,2})\.\s+[A-Z]", tail):
+                            return True
+                        return False
+
+                    if _contains_tail_section_marker(current.text) or _starts_section_heading(block.text):
+                        can_merge = False
                     
                     if can_merge:
                         current = ParsedBlock(
@@ -315,6 +338,18 @@ class MinerUParser(DocumentParser):
             )
         
         return merged
+
+    # 备用：外部也可调用的边界检测（目前仅内部使用）
+    def _has_section_boundary(self, text: str) -> bool:
+        if not text:
+            return False
+        if re.search(r"\b(?:Abstract|Index\s+Terms?|Keywords?)\b", text, re.IGNORECASE):
+            return True
+        if re.search(r"(?:^|\n)\s*(?:I|1)\.\s*Introduction\b", text, re.IGNORECASE):
+            return True
+        if re.search(r"\.\s+(?:[IVX]{1,4}|[0-9]{1,2})\.\s+[A-Z]", text):
+            return True
+        return False
     
     def _split_into_columns(self, page_blocks: List[ParsedBlock]) -> List[List[ParsedBlock]]:
         """根据段落块的 X0（bbox[0]）粗略拆分列（1/2列）。
