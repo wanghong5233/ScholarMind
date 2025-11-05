@@ -72,7 +72,7 @@ ScholarMind 后端是一个基于 **FastAPI** 构建的 Python 服务，旨在�
     *   处理流式响应 (SSE)，将生成器吐出的数据块转发给客户端。
     *   在流结束时，将引用 (Citations) 和用量 (Usage) 等元信息作为尾包发送。
 3.  **RAG 编排层**: `RAGService` 是整个流程的大脑，负责：
-    *   **2. 检索 (retrieve)**: 根据配置的策略（如 `multi_query`）进行检索。
+    *   **2. 检索 (retrieve)**: 统一采用多阶段策略（Multi-Query + HyDE + RRF + MMR）。
         *   **Multi-Query**: 调用 LLM 将原问题扩展为多个子查询。
         *   **ESVectorStore**: 对每个查询执行向量检索，并使用 **RRF (Reciprocal Rank Fusion)** 算法融合多路结果，得到高质量的 Chunks 候选集。
     *   **3. 返回 Chunks**: 将命中的 Chunks 返回给编排层。

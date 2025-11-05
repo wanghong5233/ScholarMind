@@ -13,6 +13,7 @@ help:
 	@echo "  build     - 仅构建或重新构建服务的镜像"
 	@echo "  logs      - 实时查看所有服务的日志输出"
 	@echo "  logs-api  - (推荐) 仅实时查看后端API服务的日志"
+	@echo "  logs-mineru - 实时查看 MinerU 服务日志"
 	@echo "  ps        - 查看当前服务的容器状态"
 	@echo ""
 	@echo "调试命令:"
@@ -63,6 +64,11 @@ logs:
 .PHONY: logs-api
 logs-api:
 	docker compose logs -f scholarmind_api
+
+# 实时查看 MinerU 日志
+.PHONY: logs-mineru
+logs-mineru:
+	docker compose logs -f mineru
 
 # 查看服务容器状态
 .PHONY: ps

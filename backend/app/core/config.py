@@ -68,13 +68,38 @@ class Settings(BaseSettings):
     SM_LLM_TYPE: Literal["local", "dashscope", "openai"] = "local"
 
     # RAG 策略与特性开关（T2.2）
-    SM_RETRIEVAL_STRATEGY: Literal["basic", "multi_query", "hyde"] = "basic"  # 检索策略
+    SM_RETRIEVAL_STRATEGY: Literal["multi_stage"] = "multi_stage"  # 检索策略
     SM_RERANKER_STRATEGY: Literal["none", "supervised", "rl"] = "none"       # 重排策略
     SM_ENABLE_CITATIONS: bool = True                                             # 是否返回引用
     SM_STREAMING_ENABLED: bool = True                                            # SSE 流式开关
     SM_DEFAULT_LANGUAGE: Literal["zh", "en"] = "zh"                           # 默认语言
+    SM_AUTO_TRANSLATE_TO_EN: bool = True                                          # 中文查询是否自动翻译为英文以提升检索命中
     SM_MULTI_QUERY_NUM: int = 4                                                  # Multi-Query 子查询数
-    SM_HYDE_ENABLED: bool = False                                                # 便捷开关（与 strategy=hyde 二选一）
+    SM_HYDE_ENABLED: bool = True                                                 # 是否启用 HyDE
+    SM_HYDE_MAX_TOKENS: int = 256                                                # HyDE 生成内容长度上限
+    SM_HYDE_TEMPERATURE: float = 0.2                                             # HyDE 采样温度
+    # SM_RECALL_SOURCES: str = "bm25,vector,colbert" # 参与召回的通道集合 临时关闭 colbert
+    SM_RECALL_SOURCES: str = "bm25,vector"                                      # 参与召回的通道集合（临时关闭 colbert）
+    SM_BM25_FIELDS: str = "text^1.0,title^4.0,abstract^2.5,keywords^3.0,figure_caption^2.0"
+    SM_BM25_TOPK: int = 30                                                       # BM25 单路召回候选数
+    SM_VECTOR_TOPK: int = 30                                                     # 向量单路召回候选数
+    SM_COLBERT_ENABLED: bool = False                                             # 是否启用 ColBERT 晚交互召回
+    SM_COLBERT_ENDPOINT: Optional[str] = None                                    # ColBERT 服务地址
+    SM_COLBERT_TOPK: int = 20                                                    # ColBERT 单路召回候选数
+    SM_RRF_K: int = 60                                                           # RRF 融合平滑系数 K
+    SM_RECALL_CANDIDATE_MULTIPLIER: int = 3                                      # RRF 前的候选放大量
+    SM_MMR_ENABLED: bool = True                                                  # 是否启用 MMR 多样性过滤
+    SM_MMR_LAMBDA: float = 0.65                                                  # MMR 权衡参数 λ
+    SM_MMR_MAX_CANDIDATES: int = 60                                              # 参与 MMR 的最大候选数
+    SM_METADATA_L1_ENABLED: bool = True                                          # 是否启用元数据预排
+    SM_METADATA_WEIGHT_RECENCY: float = 0.05                                     # 年份加权系数
+    SM_METADATA_WEIGHT_CITATIONS: float = 0.03                                   # 引用数加权系数
+    SM_METADATA_SECTION_BONUS: float = 0.3                                       # 重点章节加成
+    SM_METADATA_SECTION_PRIORITY: str = "abstract:introduction:methodology:results:discussion:conclusion"
+    SM_L2_RERANK_TOPK: int = 20                                                  # 进入 Cross-Encoder 的候选数量
+    SM_L3_RL_ENABLED: bool = False                                               # 是否启用 RL 重排阶段
+    SM_RL_EVENT_BUFFER: str = "storage/rl_events.jsonl"                         # RL 反馈事件落盘路径
+    SM_RETRIEVAL_MIN_TEXT_CHARS: int = 20                                        # 检索阶段最小文本长度过滤（避免单词级块）
     # 索引增强开关（默认开启，便于灰度）
     SM_SEMANTIC_CHUNKING_ENABLED: bool = True                                    # 语义感知分块
     SM_MULTIMODAL_PARSE_ENABLED: bool = True                                     # 多模态（表格/图表Caption）抽取
@@ -128,6 +153,25 @@ class Settings(BaseSettings):
     SM_HISTORY_HEADROOM: int = 4096  # 预留给检索上下文/系统提示/答案空间
     HISTORY_RECENT_TURNS: int = 4
     ENABLE_ROLLING_SUMMARY: bool = True
+
+    # 短期记忆（STM）配置
+    SM_STM_SCAN_MESSAGES: int = 40
+    SM_STM_MAX_SELECTED: int = 6
+    SM_STM_SCORE_DECAY_LAMBDA: float = 0.1
+    SM_STM_SCORE_SUMMARY_THRESHOLD: float = 0.4
+    SM_STM_SCORE_FULL_THRESHOLD: float = 0.6
+    SM_STM_LONG_MSG_THRESHOLD: int = 200
+
+    # 长期记忆（LTM）配置
+    SM_LTM_MAX_CANDIDATES: int = 32
+    SM_LTM_MAX_DOCIDS: int = 2
+    SM_LTM_SCORE_DECAY_LAMBDA: float = 0.01
+    SM_LTM_SEMANTIC_WEIGHT: float = 0.75
+    SM_LTM_TIME_WEIGHT: float = 0.25
+
+    # 记忆引导检索增强
+    SM_MEMORY_DOC_BOOST: float = 0.3
+    SM_MEMORY_GUIDE_MAX_FAILS: int = 5
 
     # 本地模型路径与设备
     LOCAL_EMBEDDER_PATH: str = "/models/bge-large-zh-v1.5"

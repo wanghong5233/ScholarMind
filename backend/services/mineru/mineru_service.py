@@ -104,7 +104,7 @@ async def parse_pdf(file: UploadFile = File(...)):
                 shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                timeout=1200,  # 20分钟超时，应对复杂PDF（18页+可能需要>10分钟）
+                timeout=1500,  # 25分钟超时，应对复杂PDF（留出缓冲）
                 text=True
             )
             
@@ -194,5 +194,12 @@ async def _parse_with_python_api(pdf_path: str) -> dict:
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8001)
+    # 增加超时以支持大文件/复杂PDF（与 subprocess timeout 对齐）
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=8001,
+        timeout_keep_alive=1800,  # 30分钟 keep-alive
+        timeout_graceful_shutdown=30
+    )
 

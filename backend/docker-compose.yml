@@ -131,8 +131,6 @@ services: # 定义一系列的服务（容器）
     container_name: scholarmind_grobid
     image: lfoppiano/grobid:0.8.0
     hostname: grobid
-    ports:
-      - "9070:8070"  # Grobid 默认端口（宿主机 9070 映射到容器 8070，避免 Windows 保留端口）
     environment:
       - GROBID_OPTS=-Xmx4g
     healthcheck:
