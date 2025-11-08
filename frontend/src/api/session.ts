@@ -4,7 +4,7 @@ import { request } from './request'
 export function list(params?: {}, options?: AxiosRequestConfig) {
   return request.get<{
     sessions: API.Session[]
-  }>(`/get_sessions`, {
+  }>('history/get_sessions', {
     ...options,
     params,
   })
@@ -27,86 +27,89 @@ export function detail(
       documents?: string
       recommended_questions?: string
     }[]
-  >(`/get_messages`, {
+  >('history/get_messages', {
     ...options,
     params,
   })
 }
 
-export function create(params?: {}, options?: AxiosRequestConfig) {
-  return request.post<
-    API.Result<{
-      session_id: string
-    }>
-  >(`/create_session`, params, options)
+export function info(
+  params: { sessionId: string },
+  options?: AxiosRequestConfig,
+) {
+  const { sessionId, ...rest } = params
+  return request.get<API.SessionDetail>(`sessions/${sessionId}`, {
+    ...options,
+    params: rest,
+  })
+}
+
+export function create(
+  params: {
+    kbId?: number
+    ephemeral?: boolean
+    defaults?: Partial<API.SessionDefaults>
+  } = {
+    ephemeral: true,
+  },
+  options?: AxiosRequestConfig,
+) {
+  const payload = {
+    ephemeral: params?.kbId ? false : params.ephemeral ?? true,
+    kbId: params?.kbId,
+    defaults: params?.defaults,
+  }
+  return request.post<API.CreateSessionResponse>('sessions', payload, options)
 }
 
 export function chat(
   params: {
     id: string
-    message: string
+    question: string
+    stream?: boolean
+    focusDocIds?: number[]
+    topK?: number
+    temperature?: number
+    maxTokens?: number
+    compressHistory?: boolean
+    indexMode?: 'auto' | 'session_only' | 'global_only' | 'hybrid'
   },
   options?: AxiosRequestConfig,
 ) {
-  const { id, ..._params } = params
+  const { id, ...body } = params
   return request.post<ReadableStream>(
-    //后端路由
-    '/chat_on_docs',
+    `sessions/${id}/ask`,
     {
-      ..._params,
+      stream: true,
+      ...body,
     },
     {
       headers: {
         Accept: 'text/event-stream',
+        'Content-Type': 'application/json',
       },
       responseType: 'stream',
       adapter: 'fetch',
       loading: false,
-      params: {
-        session_id: id,
-      },
       ...options,
     },
   )
 }
 
-export function quickParse(
+export function upload(
   params: {
-    session_id: string
+    sessionId: string
     file: File
   },
   options?: AxiosRequestConfig,
 ) {
-  const { file, ..._params } = params
+  const { sessionId, file } = params
   const formData = new FormData()
   formData.append('file', file)
-  return request.post('/quick_parse', formData, {
+  return request.post(`sessions/${sessionId}/upload`, formData, {
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
     ...options,
-    params: _params,
-  })
-}
-
-export function documents(
-  params: {
-    session_id: string
-  },
-  options?: AxiosRequestConfig,
-) {
-  const { session_id, ..._params } = params
-  return request.get<{
-    documents?: {
-      created_at: string
-      document_name: string
-      document_type: string
-      file_size: number
-      id: number
-      session_id: string
-      updated_at: string
-      upload_time: string
-    }[]
-    has_documents: boolean
-  }>(`/sessions/${session_id}/documents`, {
-    ...options,
-    params: _params,
   })
 }

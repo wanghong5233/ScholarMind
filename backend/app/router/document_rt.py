@@ -1,9 +1,11 @@
 from typing import List
 from fastapi import APIRouter, Depends, HTTPException, status, Body, BackgroundTasks
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
+import os
 from models.user import User
 from schemas.document import DocumentInDB, DocumentUpdate, DocumentCreate, CriticalQuestionsResponse
-from service.auth import get_current_user
+from service.auth import get_current_user, get_current_user_optional_query_token
 from service import document_service
 from service.ingestion_service import ingestion_service
 from service.job_service import job_service
@@ -216,7 +218,12 @@ def list_documents(
 ):
     try:
         documents = document_service.list_documents_by_kb_id(db, kb_id, current_user.id)
-        return documents
+        parser_pipeline = getattr(settings, "SM_PARSER_ORDER", "")
+        enriched: List[DocumentInDB] = []
+        for doc in documents:
+            model = DocumentInDB.model_validate(doc)
+            enriched.append(model.model_copy(update={"parser_pipeline": parser_pipeline}))
+        return enriched
     except ResourceNotFoundException as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except PermissionDeniedException as e:
@@ -356,3 +363,54 @@ def generate_critical_questions(
         pass
 
     return CriticalQuestionsResponse(questions=questions, citations=citations, debug=debug)
+
+
+@router.get(
+    "/{doc_id}/preview",
+    summary="预览/下载 PDF 文件",
+    description="返回文档的 PDF 文件，可在浏览器中预览或下载"
+)
+def preview_document(
+    kb_id: int,
+    doc_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user_optional_query_token),
+):
+    """
+    预览或下载文档的 PDF 文件
+    - 权限校验：确保用户有权访问该知识库和文档
+    - 返回 PDF 文件流，浏览器可直接预览
+    """
+    # 权限校验：KB 与文档归属
+    try:
+        knowledgebase_service.get_kb_by_id(db=db, kb_id=kb_id, user_id=current_user.id)
+    except (ResourceNotFoundException, PermissionDeniedException) as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    
+    try:
+        doc = document_service.get_document_by_id(db=db, doc_id=doc_id, user_id=current_user.id, kb_id=kb_id)
+    except (ResourceNotFoundException, PermissionDeniedException) as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e))
+    
+    # 获取文件路径
+    file_path = doc.local_pdf_path
+    if not file_path:
+        raise HTTPException(status_code=404, detail="PDF file not found for this document")
+    
+    # 检查文件是否存在
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail=f"PDF file does not exist at path: {file_path}")
+    
+    # 返回文件响应，设置 Content-Disposition 为 inline 以便浏览器预览
+    # 如果想强制下载，可以改为 attachment
+    filename = doc.title or f"document_{doc_id}.pdf"
+    if not filename.endswith('.pdf'):
+        filename += '.pdf'
+    
+    return FileResponse(
+        path=file_path,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'inline; filename="{filename}"'
+        }
+    )

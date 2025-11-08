@@ -1,4 +1,5 @@
 import * as api from '@/api'
+import type { RepositoryDocument } from '@/api/repository'
 import IconSendThunder from '@/assets/component/send-thunder.svg'
 import { FileOutlined } from '@ant-design/icons'
 import { useRequest } from 'ahooks'
@@ -30,13 +31,13 @@ export default function ComSender(
 
   const uploaded = useRequest(
     async () => {
-      if (!sessionId) return
-
-      const res = await api.session.documents({
-        session_id: sessionId,
+      if (!sessionId) return null
+      const { data: sessionDetail } = await api.session.info({ sessionId })
+      if (!sessionDetail?.kbId) return null
+      const { data: docs } = await api.repository.listDocuments({
+        kbId: sessionDetail.kbId,
       })
-
-      return res.data?.documents?.[0]
+      return (docs?.[0] as RepositoryDocument | undefined) ?? null
     },
     {
       refreshDeps: [sessionId],
@@ -71,20 +72,18 @@ export default function ComSender(
                 color="default"
                 shape="round"
                 disabled
-                title={uploaded.data.document_name}
+                title={uploaded.data.title}
               >
                 <FileOutlined style={{ fontSize: 14 }} />
                 <span className="document-name">
-                  {uploaded.data.document_name}
+                  {uploaded.data.title}
                 </span>
               </Button>
             ) : (
               <Uploader
                 sessionId={sessionId}
-                onSuccess={(file) => {
-                  uploaded.mutate({
-                    document_name: file.name,
-                  } as any)
+                onSuccess={() => {
+                  uploaded.refresh()
                 }}
               />
             )

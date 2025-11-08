@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Security
+from fastapi import APIRouter, Depends, Security, HTTPException
 from sqlalchemy.orm import Session
 from utils.database import get_db
 from models.knowledgebase import KnowledgeBase  
@@ -108,25 +108,48 @@ async def get_messages_by_session_id(
         if not user_id:
             raise HTTPException(status_code=401, detail="Invalid authentication credentials")
 
-        # 查询 messages 表中对应 session_id 的消息
+        # 查询 messages（新表结构：retrieval_content/create_time 等）
         messages_data = db.execute(
-            text("SELECT message_id, session_id, user_question, model_answer, documents, recommended_questions, think, created_at FROM messages WHERE session_id = :session_id"),
-            {"session_id": session_id}
+            text(
+                """
+                SELECT message_id,
+                       session_id,
+                       user_question,
+                       model_answer,
+                       retrieval_content,
+                       create_time
+                  FROM messages
+                 WHERE session_id = :session_id
+                 ORDER BY create_time ASC
+                """
+            ),
+            {"session_id": session_id},
         ).fetchall()
 
         # 构造返回数据
         messages = []
-        for message in messages_data:
+        import json as _json
+        for m in messages_data:
+            docs_field = None
+            try:
+                if m.retrieval_content:
+                    rc = _json.loads(m.retrieval_content)
+                    cits = rc.get("citations") or []
+                    if isinstance(cits, list):
+                        docs_field = _json.dumps(cits, ensure_ascii=False)
+            except Exception:
+                docs_field = None
+
             messages.append(
                 {
-                    "message_id": message.message_id,
-                    "session_id": message.session_id,
-                    "user_question": message.user_question,
-                    "model_answer":message.model_answer,
-                    "documents" : message.documents,
-                    "recommended_questions" : message.recommended_questions,
-                    "think" : message.think,
-                    "created_at": message.created_at.strftime("%Y-%m-%d %H:%M:%S")
+                    "message_id": m.message_id,
+                    "session_id": m.session_id,
+                    "user_question": m.user_question,
+                    "model_answer": m.model_answer,
+                    "documents": docs_field,  # 兼容旧前端字段
+                    "recommended_questions": None,
+                    "think": None,
+                    "created_at": m.create_time.strftime("%Y-%m-%d %H:%M:%S"),
                 }
             )
 

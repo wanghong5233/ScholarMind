@@ -62,9 +62,9 @@ class RAGFlowPdfParser:
                 logging.info(f"Deepdoc XGBoost model loaded from settings: {cfg_path}")
             else:
                 # 2) 使用项目内置目录（可能是旧二进制）
-                model_dir = os.path.join(
-                    get_project_base_directory(),
-                    "rag/res/deepdoc")
+            model_dir = os.path.join(
+                get_project_base_directory(),
+                "rag/res/deepdoc")
                 mdl_path = os.path.join(model_dir, "updown_concat_xgb.model")
                 self.updown_cnt_mdl = xgb.Booster()
                 self.updown_cnt_mdl.load_model(mdl_path)
@@ -74,10 +74,10 @@ class RAGFlowPdfParser:
             try:
                 # 3) 从远端仓库下载（可通过 settings 指定 JSON/UBJ 版本的 repo）
                 repo = getattr(settings, "DEEPDOC_XGB_REMOTE_REPO", None) or "InfiniFlow/text_concat_xgb_v1.0"
-                model_dir = snapshot_download(
+            model_dir = snapshot_download(
                     repo_id=repo,
-                    local_dir=os.path.join(get_project_base_directory(), "rag/res/deepdoc"),
-                    local_dir_use_symlinks=False)
+                local_dir=os.path.join(get_project_base_directory(), "rag/res/deepdoc"),
+                local_dir_use_symlinks=False)
                 # 优先 JSON/UBJ
                 cand = [
                     os.path.join(model_dir, "updown_concat_xgb.json"),

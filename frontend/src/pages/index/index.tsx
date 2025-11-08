@@ -7,7 +7,7 @@ export default function Index() {
 
   useMount(async () => {
     const { data } = await api.session.create()
-    navigate(`/chat/${data.session_id}`)
+    navigate(`/chat/${data.sessionId}`)
   })
 
   return null

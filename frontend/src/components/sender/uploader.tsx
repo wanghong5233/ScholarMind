@@ -3,7 +3,7 @@ import { PlusCircleOutlined } from '@ant-design/icons'
 import { Button, Upload } from 'antd'
 
 const ACCEPT = ['pdf', 'doc', 'docx', 'txt']
-const LIMIT = 5
+const LIMIT = 50
 
 export default function Uploader(props: {
   sessionId: string
@@ -40,8 +40,8 @@ export default function Uploader(props: {
 
         try {
           // 上传文件
-          await api.session.quickParse({
-            session_id: sessionId,
+          await api.session.upload({
+            sessionId,
             file,
           })
           onSuccess?.('')

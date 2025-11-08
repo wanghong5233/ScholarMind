@@ -7,6 +7,27 @@ declare namespace API {
     // user_id: string
   }
 
+  interface SessionDefaults {
+    retrievalStrategy: 'multi_stage'
+    rerankerStrategy: 'none' | 'supervised' | 'rl'
+    topK: number
+    language: 'zh' | 'en'
+    streaming: boolean
+  }
+
+  interface CreateSessionResponse {
+    sessionId: string
+    kbId?: number | null
+    ephemeral: boolean
+    defaults: SessionDefaults
+  }
+
+  interface SessionDetail {
+    sessionId: string
+    kbId?: number | null
+    sessionName: string
+  }
+
   interface ChatItem {
     id: number
     role: import('@/configs').ChatRole

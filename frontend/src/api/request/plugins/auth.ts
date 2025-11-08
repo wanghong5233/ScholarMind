@@ -8,7 +8,17 @@ const AUTH_ERROR_MAP = {
   401: '登录状态已失效，请重新登录',
 }
 
-const blackList = ['/login']
+const blackList = [
+  '/users/login',
+  'users/login',
+  '/api/users/login',
+  '/users/register',
+  'users/register',
+  '/api/users/register',
+  '/users/sts-token',
+  'users/sts-token',
+  '/api/users/sts-token',
+]
 
 export const authPlugin: IRequestPlugin = {
   install(instance) {

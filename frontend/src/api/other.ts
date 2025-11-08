@@ -12,7 +12,7 @@ export function getVolcToken(
   return request.post<{
     jwt_token?: string
   }>(
-    '/sts-token',
+    'users/sts-token',
     {
       appid,
       accessKey,

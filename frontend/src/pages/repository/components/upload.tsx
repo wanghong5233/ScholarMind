@@ -8,9 +8,15 @@ export type RepositoryUploadRef = {
   submit: () => Promise<void>
 }
 
-export default forwardRef<RepositoryUploadRef, UploadProps>(
-  function RepositoryUpload(props: UploadProps, ref) {
-    const { ...otherProps } = props
+type Props = UploadProps & {
+  kbId?: number | null
+}
+
+export default forwardRef<RepositoryUploadRef, Props>(function RepositoryUpload(
+  props: Props,
+  ref,
+) {
+  const { kbId, ...otherProps } = props
 
     const [fileList, setFileList] = useState<UploadFile[]>([])
 
@@ -35,12 +41,19 @@ export default forwardRef<RepositoryUploadRef, UploadProps>(
               }),
             )
             try {
+              if (!kbId) {
+                throw new Error('请选择知识库后再上传文档')
+              }
               // 检查文件大小
-              if ((file.size ?? 0) > 5 * 1024 * 1024) {
-                throw new Error('文件大小不能超过5M')
+              const LIMIT_MB = 50
+              if ((file.size ?? 0) > LIMIT_MB * 1024 * 1024) {
+                throw new Error(`文件大小不能超过${LIMIT_MB}M`)
               }
               //上传接口
-              await api.repository.upload({ files: file.originFileObj as File })
+              await api.repository.upload({
+                kbId,
+                file: file.originFileObj as File,
+              })
 
               setFileList((prev) =>
                 prev.map((item) => {
@@ -104,7 +117,7 @@ export default forwardRef<RepositoryUploadRef, UploadProps>(
         </Upload.Dragger>
 
         <p className={styles['repository-upload__desc']}>
-          支持单个或批量文件上传。文件大小不能超过5M，最多支持10个文件。
+          支持单个或批量文件上传。文件大小不能超过50M，最多支持10个文件。
         </p>
 
         <Upload

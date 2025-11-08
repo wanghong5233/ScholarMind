@@ -1,17 +1,140 @@
 import { AxiosRequestConfig } from 'axios'
 import { request } from './request'
 
-export function list(params?: {}, options?: AxiosRequestConfig) {
-  return request.get<API.Repository[]>('/get_files', {
+export interface KnowledgeBase {
+  id: number
+  name: string
+  description?: string | null
+  is_ephemeral: boolean
+  created_at: string
+  updated_at: string
+}
+
+export interface RepositoryDocument {
+  id: number
+  knowledge_base_id: number
+  title: string
+  authors?: string[] | null
+  abstract?: string | null
+  publication_year?: number | null
+  journal_or_conference?: string | null
+  keywords?: string[] | null
+  citation_count?: number | null
+  fields_of_study?: string[] | null
+  doi?: string | null
+  semantic_scholar_id?: string | null
+  source_url?: string | null
+  local_pdf_path?: string | null
+  file_hash?: string | null
+  ingestion_source: string
+  created_at: string
+  updated_at: string
+  parser_pipeline?: string | null
+}
+
+export interface OnlineSearchParams {
+  query: string
+  limit?: number
+  year?: string
+}
+
+export interface OnlineDocumentCandidate {
+  title: string
+  authors?: string[]
+  abstract?: string | null
+  publication_year?: number | null
+  journal_or_conference?: string | null
+  keywords?: string[] | null
+  citation_count?: number | null
+  fields_of_study?: string[] | null
+  doi?: string | null
+  semantic_scholar_id?: string | null
+  source_url?: string | null
+  ingestion_source: string
+  highLight?: boolean | null
+}
+
+export interface JobDetail {
+  doc_id: number
+  title: string
+  status?: 'ok' | 'skipped_pdf' | 'failed'
+  download_status?: 'downloaded' | 'skipped' | 'failed'
+  parse_status?: 'parsed' | 'failed' | 'not_applicable'
+  note?: string
+  manual_download_url?: string
+  local_pdf_path?: string | null
+  error?: string
+  parse_error?: string
+  chunks?: number
+}
+
+export interface JobInfo {
+  id: number
+  user_id: number
+  knowledge_base_id: number
+  type: string
+  status: string
+  progress: number
+  total: number
+  succeeded: number
+  failed: number
+  error?: string | null
+  details?: JobDetail[]
+  payload?: Record<string, any> | null
+  created_at?: string
+  updated_at?: string
+}
+
+export function listKnowledgeBases(options?: AxiosRequestConfig) {
+  return request.get<KnowledgeBase[]>('knowledgebases', {
     ...options,
-    params,
   })
 }
 
-export function upload(params: { files: File }, options?: AxiosRequestConfig) {
+export function createKnowledgeBase(
+  payload: { name: string; description?: string },
+  options?: AxiosRequestConfig,
+) {
+  return request.post<KnowledgeBase>('knowledgebases', payload, {
+    ...options,
+  })
+}
+
+export function updateKnowledgeBase(
+  params: { kbId: number; payload: { name?: string; description?: string } },
+  options?: AxiosRequestConfig,
+) {
+  const { kbId, payload } = params
+  return request.patch<KnowledgeBase>(`knowledgebases/${kbId}`, payload, {
+    ...options,
+  })
+}
+
+export function deleteKnowledgeBase(kbId: number, options?: AxiosRequestConfig) {
+  return request.delete<KnowledgeBase>(`knowledgebases/${kbId}`, {
+    ...options,
+  })
+}
+
+export function listDocuments(
+  params: { kbId: number },
+  options?: AxiosRequestConfig,
+) {
+  const { kbId, ...rest } = params
+  return request.get<RepositoryDocument[]>(`knowledgebases/${kbId}/documents`, {
+    ...options,
+    params: rest,
+  })
+}
+
+export function upload(
+  params: { kbId: number; file: File },
+  options?: AxiosRequestConfig,
+) {
+  const { kbId, file } = params
   const form = new FormData()
-  form.append('files', params.files)
-  return request.post<API.Result<{ file_id: string }>>(`/upload_files`, form, {
+  form.append('file', file)
+  return request.post(`knowledgebases/${kbId}/documents/upload`, form, {
     headers: {
       'Content-Type': 'multipart/form-data',
     },
@@ -20,12 +143,56 @@ export function upload(params: { files: File }, options?: AxiosRequestConfig) {
 }
 
 export function remove(
-  params: { file_name: string },
+  params: { kbId: number; docId: number },
   options?: AxiosRequestConfig,
 ) {
-  const { file_name, ..._params } = params
-  return request.delete(`/delete_file/${encodeURIComponent(file_name)}`, {
+  const { kbId, docId, ...rest } = params
+  return request.delete(`knowledgebases/${kbId}/documents/${docId}`, {
     ...options,
-    params: _params,
+    params: rest,
   })
+}
+
+export function searchOnlineDocuments(
+  params: { kbId: number; payload: OnlineSearchParams },
+  options?: AxiosRequestConfig,
+) {
+  const { kbId, payload } = params
+  return request.post<OnlineDocumentCandidate[]>(
+    `knowledgebases/${kbId}/documents/ingest/search-online`,
+    payload,
+    options,
+  )
+}
+
+export function addOnlineDocuments(
+  params: { kbId: number; documents: OnlineDocumentCandidate[] },
+  options?: AxiosRequestConfig,
+) {
+  const { kbId, documents } = params
+  return request.post<JobInfo>(
+    `knowledgebases/${kbId}/documents/ingest/add-online`,
+    {
+      documents,
+    },
+    options,
+  )
+}
+
+/**
+ * 获取文档预览 URL
+ * @param kbId 知识库 ID
+ * @param docId 文档 ID
+ * @param token JWT token（必须提供）
+ * @returns 完整的预览 URL，包含 token 查询参数
+ */
+export function getDocumentPreviewUrl(kbId: number, docId: number, token: string): string {
+  const baseURL = import.meta.env.VITE_API_BASE || '/api'
+  
+  // 构建 URL，附加 token 作为查询参数
+  const url = `${baseURL}/knowledgebases/${kbId}/documents/${docId}/preview`
+  if (token) {
+    return `${url}?token=${encodeURIComponent(token)}`
+  }
+  return url
 }

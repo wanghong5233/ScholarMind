@@ -8,8 +8,9 @@ import secrets
 from datetime import timedelta
 import os
 import logging
-from fastapi import Depends
+from fastapi import Depends, Query, HTTPException, status
 from fastapi_jwt import JwtAuthorizationCredentials
+from typing import Optional
 
 # JWT配置
 from core.config import settings
@@ -24,6 +25,13 @@ access_security = JwtAccessBearerCookie(
     secret_key=JWT_SECRET_KEY,
     auto_error=True,
     access_expires_delta=timedelta(days=settings.JWT_ACCESS_TOKEN_EXPIRE_DAYS)  # 从配置读取过期时间
+)
+
+# 用于可选 token 的安全配置（不自动抛出错误）
+access_security_optional = JwtAccessBearerCookie(
+    secret_key=JWT_SECRET_KEY,
+    auto_error=False,  # 不自动抛出错误，允许我们手动处理
+    access_expires_delta=timedelta(days=settings.JWT_ACCESS_TOKEN_EXPIRE_DAYS)
 )
 
 def create_token(user_id: int, user_name: str, salting: str = ""):
@@ -150,5 +158,58 @@ def get_current_user(subject: "JwtAuthorizationCredentials" = Depends(access_sec
     except Exception as e:
         # 重新抛出 AuthError 以便全局异常处理器可以捕获
         raise AuthError(str(e))
+    finally:
+        db.close()
+
+
+def get_current_user_optional_query_token(
+    token: Optional[str] = Query(None, description="JWT token for authentication"),
+    subject: Optional["JwtAuthorizationCredentials"] = Depends(access_security_optional)
+):
+    """
+    支持从查询参数或 Authorization header 中读取 token 的认证依赖。
+    优先使用 header 中的 token，如果不存在则尝试查询参数。
+    用于需要在新标签页打开的场景（如 PDF 预览）。
+    """
+    db = next(get_db())
+    try:
+        # 优先使用 header 中的 token
+        if subject is not None:
+            payload = subject.subject
+            user_id = payload.get("user_id")
+        # 如果 header 中没有 token，尝试从查询参数解析
+        elif token:
+            try:
+                # 手动解析 token
+                from jose import jwt, JWTError
+                decoded = jwt.decode(token, JWT_SECRET_KEY, algorithms=["HS256"])
+                # JWT payload 结构: {"subject": {"user_id": 1, "user_name": "...", ...}, ...}
+                payload = decoded.get("subject", {})
+                user_id = payload.get("user_id")
+            except JWTError as e:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail=f"Invalid token: {str(e)}"
+                )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Credentials are not provided"
+            )
+        
+        if user_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token: user_id not found"
+            )
+        
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not found"
+            )
+        
+        return user
     finally:
         db.close()

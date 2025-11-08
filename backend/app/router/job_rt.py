@@ -17,7 +17,9 @@ def list_jobs(
     current_user: User = Depends(get_current_user),
     kb_id: Optional[int] = Query(None),
 ):
-    return job_service.list_jobs(db, user_id=current_user.id, kb_id=kb_id)
+    jobs = job_service.list_jobs(db, user_id=current_user.id, kb_id=kb_id)
+    # 显式进行模型校验，确保 computed_field 被序列化
+    return [JobInDB.model_validate(job) for job in jobs]
 
 
 @router.get("/{job_id}", response_model=JobInDB, summary="查询任务详情")
@@ -26,6 +28,7 @@ def get_job(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return job_service.get_job(db, job_id=job_id, user_id=current_user.id)
+    job = job_service.get_job(db, job_id=job_id, user_id=current_user.id)
+    return JobInDB.model_validate(job)
 
 

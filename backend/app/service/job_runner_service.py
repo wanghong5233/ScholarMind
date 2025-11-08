@@ -51,11 +51,15 @@ def execute_job(job_id: int, handler_cls: Type[BaseJobHandler]):
 
         job = db.query(Job).filter(Job.id == job.id).first()
         if job:
+            from sqlalchemy.orm.attributes import flag_modified
             payload = job.payload or {}
             payload["resultDetails"] = result.details
             job.payload = payload
+            flag_modified(job, "payload")  # 强制标记 JSON 字段为已修改
             db.add(job)
             db.commit()
+            db.refresh(job)
+            log.info(f"JobRunner: saved resultDetails count={len(result.details)} to job_id={job.id}")
 
         # 触发后续解析任务
         if result.doc_ids_to_parse:

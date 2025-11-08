@@ -17,6 +17,9 @@ export const servicePlugin: IRequestPlugin = {
         if (!(CODE_KEY in data)) return response
 
         const code = data[CODE_KEY]
+        if (code !== 'success' && code !== 'error') {
+          return response
+        }
         if (code !== 'success') {
           const message =
             data[MESSAGE_KEY] || data.detail || '接口数据异常'

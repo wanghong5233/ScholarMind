@@ -148,7 +148,7 @@ export default function Index() {
         //后端接口
         const res = await api.session.chat({
           id: id!,
-          message,
+          question: message,
         })
         sessionActions.updateKey()
 
@@ -192,46 +192,80 @@ export default function Index() {
       }
 
       function parseData(slice: string) {
+        const raw = slice.trim()
+        if (!raw.startsWith('data:')) {
+          return
+        }
+        const str = raw.replace(/^data\s*:\s*/, '').trim()
+        if (!str || str === '[DONE]') {
+          return
+        }
+
+        let json: any = null
         try {
-          const str = slice
-            .trim()
-            .replace(/^data\: /, '')
-            .trim()
-          if (str === '[DONE]') {
-            return
+          json = JSON.parse(str)
+        } catch (error) {
+          // 纯文本流式内容
+          target.content = `${target.content || ''}${str}`
+          return
+        }
+
+        if (json?.content) {
+          if (json.thinking) {
+            target.think = `${target.think || ''}${json.content || ''}`
+          } else {
+            target.content = `${target.content || ''}${json.content || ''}`
           }
+        } else if (typeof json === 'string') {
+          target.content = `${target.content || ''}${json}`
+        }
 
-          const json = JSON.parse(str)
-          if (json?.content) {
-            if (json.thinking) {
-              target.think = `${target.think || ''}${json.content || ''}`
-            } else {
-              target.content = `${target.content || ''}${json.content || ''}`
-            }
-          }
+        if (Array.isArray(json?.documents) && json.documents.length) {
+          target.reference = json.documents
 
-          if (json?.documents?.length) {
-            target.reference = json.documents
-
-            const map = new Map<string, API.Document>()
-            json?.documents.forEach((chunk: API.Reference) => {
-              map.set(chunk.document_id, {
-                document_id: chunk.document_id,
-                document_name: chunk.document_name,
-                content_with_weight: chunk.content_with_weight,
-              })
+          const map = new Map<string, API.Document>()
+          json.documents.forEach((chunk: API.Reference) => {
+            map.set(chunk.document_id, {
+              document_id: chunk.document_id,
+              document_name: chunk.document_name,
+              content_with_weight: chunk.content_with_weight,
             })
-            const documents = Array.from(map.values())
-            target.documents = documents
-            setDocuments(documents)
-          }
+          })
+          const docs = Array.from(map.values())
+          target.documents = docs
+          setDocuments(docs)
+        }
 
-          if (json?.recommended_questions?.length) {
-            target.recommended_questions = json.recommended_questions
-          }
-        } catch {
-          console.debug('解析失败')
-          console.debug(slice)
+        if (Array.isArray(json?.citations) && json.citations.length) {
+          const refs: API.Reference[] = json.citations.map(
+            (item: any, idx: number) => {
+              const docId = String(item.document_id ?? '')
+              return {
+                id: `${docId}-${item.chunk_id ?? idx}`,
+                document_id: docId,
+                document_name: item.document_title || `文档 ${docId || idx + 1}`,
+                content_with_weight: item.snippet ?? '',
+                positions: item.page ? [[item.page, 0]] : [],
+              }
+            },
+          )
+
+          target.reference = refs
+          const map = new Map<string, API.Document>()
+          refs.forEach((chunk) => {
+            map.set(chunk.document_id, {
+              document_id: chunk.document_id,
+              document_name: chunk.document_name,
+              content_with_weight: chunk.content_with_weight,
+            })
+          })
+          const docs = Array.from(map.values())
+          target.documents = docs
+          setDocuments(docs)
+        }
+
+        if (Array.isArray(json?.recommended_questions)) {
+          target.recommended_questions = json.recommended_questions
         }
       }
     },

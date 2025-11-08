@@ -61,6 +61,7 @@ class DocumentInDB(DocumentBase):
     knowledge_base_id: int
     created_at: datetime
     updated_at: datetime
+    parser_pipeline: Optional[str] = None
 
     class Config:
         from_attributes = True

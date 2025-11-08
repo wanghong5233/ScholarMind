@@ -8,7 +8,7 @@ export function register(
   },
   options?: AxiosRequestConfig,
 ) {
-  return request.post<{}>(`/register`, params, options)
+  return request.post<{}>('users/register', params, options)
 }
 
 export function login(
@@ -20,5 +20,5 @@ export function login(
 ) {
   return request.post<{
     access_token: string
-  }>(`/login`, params, options)
+  }>('users/login', params, options)
 }
