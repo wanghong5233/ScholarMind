@@ -29,7 +29,7 @@ class RAGService:
         self.prompt = PromptBuilder(
             language=settings.SM_DEFAULT_LANGUAGE,
             enable_citations=settings.SM_ENABLE_CITATIONS,
-            max_context_chars=6000,
+            max_context_chars=400000,  # 支持现代大模型的长上下文窗口（约100k tokens）
         )
         self.llm = LLMClient()
         self.logger = logging.getLogger("rag.service")

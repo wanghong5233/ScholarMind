@@ -1,6 +1,10 @@
-from typing import Optional
+from typing import Optional, Tuple, Dict, Any
 from sqlalchemy.orm import Session
 from models.session import Session as SessionModel
+from models.message import Message
+from models.knowledgebase import KnowledgeBase
+from service import knowledgebase_service
+from utils.get_logger import logger
 
 
 class SessionService:
@@ -36,6 +40,70 @@ class SessionService:
             .filter(SessionModel.session_id == session_id)
             .first()
         )
+
+    def _resolve_ephemeral_kb(self, session_obj: SessionModel) -> Tuple[Optional[int], bool]:
+        kb_id = session_obj.knowledge_base_id
+        if not kb_id:
+            return None, False
+        kb = (
+            self.db.query(KnowledgeBase)
+            .filter(KnowledgeBase.id == kb_id)
+            .first()
+        )
+        if not kb:
+            return kb_id, False
+        return kb_id, bool(kb.is_ephemeral)
+
+    def delete_session(self, *, session_id: str) -> Dict[str, Any]:
+        """Delete a session, its messages and associated ephemeral knowledge base."""
+        session_obj = self.get_session_by_id(session_id=session_id)
+        if not session_obj:
+            return {"deleted": False, "messages_deleted": 0, "kb_deleted": False}
+
+        kb_id, kb_is_ephemeral = self._resolve_ephemeral_kb(session_obj)
+        owner_id = session_obj.user_id
+
+        deleted_messages = (
+            self.db.query(Message)
+            .filter(Message.session_id == session_id)
+            .delete(synchronize_session=False)
+        )
+        self.db.delete(session_obj)
+        self.db.commit()
+
+        kb_deleted = False
+        if kb_id and kb_is_ephemeral:
+            try:
+                user_id_int = int(owner_id) if owner_id is not None else None
+            except (TypeError, ValueError):
+                user_id_int = None
+
+            if user_id_int is not None:
+                try:
+                    knowledgebase_service.delete_kb(
+                        db=self.db,
+                        kb_id=kb_id,
+                        user_id=user_id_int,
+                    )
+                    kb_deleted = True
+                    logger.info(
+                        "Deleted ephemeral knowledge base %(kb_id)s after removing session %(session_id)s",
+                        {"kb_id": kb_id, "session_id": session_id},
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "Failed to delete ephemeral knowledge base %s for session %s: %s",
+                        kb_id,
+                        session_id,
+                        exc,
+                    )
+
+        return {
+            "deleted": True,
+            "messages_deleted": deleted_messages,
+            "kb_deleted": kb_deleted,
+            "kb_id": kb_id if kb_deleted else None,
+        }
 
     def update_defaults_json(self, *, session_id: str, defaults_json: Optional[str]) -> None:
         s = self.get_session_by_id(session_id=session_id)

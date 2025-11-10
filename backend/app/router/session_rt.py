@@ -4,7 +4,7 @@ from dataclasses import asdict
 import json
 import os
 import uuid
-from typing import List as _List, Optional
+from typing import Any, List as _List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, UploadFile, File, Query, Body
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -89,6 +89,8 @@ def create_session(
     session_id = f"session_{uuid.uuid4().hex[:8]}"
     session_svc = SessionService(db)
 
+    defaults = req.defaults.model_copy() if req.defaults is not None else SessionDefaults()
+
     if req.ephemeral:
         kb_name = f"temp_kb_for_{session_id}"
         kb = create_kb_for_user(
@@ -98,17 +100,25 @@ def create_session(
         )
         kb_id = kb.id
         logger.info(f"Created ephemeral KB id={kb_id} for session {session_id}")
+        if req.defaults is None:
+            defaults.useSessionKnowledgeBase = True
+            defaults.useUserKnowledgeBase = False
+            defaults.userKnowledgeBaseId = None
     elif req.kbId:
         kb = get_kb_by_id(db=db, kb_id=req.kbId, user_id=current_user.id)
         kb_id = kb.id
         logger.info(f"Bind session {session_id} to existing KB id={kb_id}")
+        if defaults.useUserKnowledgeBase and defaults.userKnowledgeBaseId is None:
+            defaults.userKnowledgeBaseId = kb_id
+        if req.defaults is None:
+            defaults.useSessionKnowledgeBase = False
+            defaults.useUserKnowledgeBase = True
+            defaults.userKnowledgeBaseId = kb_id
     else:
         raise HTTPException(
             status_code=400,
             detail="必须提供 kbId 或将 ephemeral 设为 true。",
         )
-
-    defaults = req.defaults or SessionDefaults()
 
     session_svc.create_session(
         session_id=session_id,
@@ -201,8 +211,24 @@ def update_session_defaults(
         raise HTTPException(status_code=404, detail="会话不存在")
     if str(current_user.id) != str(s.user_id):
         raise HTTPException(status_code=403, detail="无权访问该会话")
-    svc.update_defaults_json(session_id=session_id, defaults_json=json.dumps(payload.model_dump(), ensure_ascii=False))
-    return payload
+    data = payload.model_dump()
+    if data.get("useSessionKnowledgeBase"):
+        if s.knowledge_base_id is None:
+            raise HTTPException(status_code=400, detail="当前会话没有可用的临时知识库")
+    if data.get("useUserKnowledgeBase"):
+        user_kb_id = data.get("userKnowledgeBaseId")
+        if user_kb_id is None:
+            raise HTTPException(status_code=400, detail="启用本地知识库时必须选择知识库")
+        get_kb_by_id(db=db, kb_id=user_kb_id, user_id=current_user.id)
+    else:
+        data["userKnowledgeBaseId"] = None
+
+    normalized = SessionDefaults(**data)
+    svc.update_defaults_json(
+        session_id=session_id,
+        defaults_json=json.dumps(normalized.model_dump(), ensure_ascii=False),
+    )
+    return normalized
 
 
 @router.post("/{session_id}/upload", summary="基于会话的本地上传（异步）")
@@ -269,6 +295,88 @@ def upload_by_session(
     )
 
     return job
+
+
+@router.post("/{session_id}/upload-for-context", summary="上传文件并提取内容作为对话上下文")
+def upload_for_context(
+    session_id: str,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    轻量级文件上传：提取文件内容作为对话上下文，不触发RAG索引。
+    适用于用户希望直接将文档内容作为对话上下文，而不是通过RAG检索的场景。
+    """
+    session_svc = SessionService(db)
+    s = session_svc.get_session_by_id(session_id=session_id)
+    if not s:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if str(current_user.id) != str(s.user_id):
+        raise HTTPException(status_code=403, detail="无权操作该会话")
+
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="文件名不能为空")
+
+    allowed_exts = {".pdf", ".docx", ".txt"}
+    if not any(file.filename.lower().endswith(ext) for ext in allowed_exts):
+        raise HTTPException(status_code=400, detail=f"仅支持 {', '.join(allowed_exts)} 格式")
+
+    # 保存临时文件
+    import tempfile
+    import os
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1]) as tmp:
+            content = file.file.read()
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        # 使用轻量级解析器提取文本
+        from service.core.ingestion.document_parser import LightweightDocumentParser
+        parser = LightweightDocumentParser()
+        blocks = parser.parse(file_path=tmp_path)
+        
+        # 合并所有文本块
+        extracted_text = "\n\n".join([block.text for block in blocks if block.text.strip()])
+        
+        # 限制文本长度（支持现代大模型的长上下文）
+        max_chars = 400000  # 约 100k tokens，支持 128k token 窗口的模型
+        if len(extracted_text) > max_chars:
+            extracted_text = extracted_text[:max_chars] + "\n\n[文档内容过长，已截断]"
+
+        # 清理临时文件
+        os.remove(tmp_path)
+
+        # 将文件内容存储到会话的临时上下文中
+        context_data = s.context_json or {}
+        if isinstance(context_data, str):
+            try:
+                context_data = json.loads(context_data)
+            except Exception:
+                context_data = {}
+        
+        if "uploaded_files" not in context_data:
+            context_data["uploaded_files"] = []
+        
+        context_data["uploaded_files"].append({
+            "filename": file.filename,
+            "content": extracted_text,
+            "uploaded_at": __import__("datetime").datetime.utcnow().isoformat(),
+        })
+        
+        s.context_json = json.dumps(context_data, ensure_ascii=False)
+        db.add(s)
+        db.commit()
+        
+        logger.info(f"[UPLOAD_FOR_CONTEXT] session={session_id} filename={file.filename} content_len={len(extracted_text)} total_files={len(context_data['uploaded_files'])}")
+
+        return {"filename": file.filename, "content": extracted_text}
+
+    except Exception as e:
+        if 'tmp_path' in locals() and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        logger.error(f"文件内容提取失败: {e}")
+        raise HTTPException(status_code=500, detail=f"文件内容提取失败: {str(e)}")
 
 
 @router.get("/{session_id}/retrieve", response_model=list[RagChunk], summary="最小检索验证")
@@ -349,9 +457,8 @@ def delete_session(
     if str(current_user.id) != str(s.user_id):
         raise HTTPException(status_code=403, detail="无权操作该会话")
 
-    # 文件清理（第三波会扩展到会话专属 tmp 与索引清理）
-    # 这里暂只返回 200，避免误删 KB 资源
-    return {"deleted": True}
+    result = svc.delete_session(session_id=session_id)
+    return result
 
 
 @router.post("/{session_id}/ask", summary="RAG 基础问答（流式/非流式）")
@@ -367,9 +474,6 @@ def ask(
         raise HTTPException(status_code=404, detail="会话不存在")
     if str(current_user.id) != str(s.user_id):
         raise HTTPException(status_code=403, detail="无权访问该会话")
-    if not s.knowledge_base_id:
-        raise HTTPException(status_code=400, detail="该会话未绑定知识库")
-
     question = (payload or {}).get("question") or ""
     stream = bool((payload or {}).get("stream", True))
     compress_history = bool((payload or {}).get("compressHistory", False))
@@ -398,27 +502,151 @@ def ask(
     temperature = payload.get("temperature") if isinstance(payload.get("temperature"), (int, float)) else None
     max_tokens = payload.get("maxTokens") if isinstance(payload.get("maxTokens"), int) else None
 
+    defaults_raw: dict[str, Any] = {}
+    defaults_model = SessionDefaults()
     if s.defaults_json:
         try:
-            d = json.loads(s.defaults_json)
-            if top_k is None and isinstance(d.get("topK"), int):
-                top_k = d.get("topK")
-            if temperature is None and isinstance(d.get("temperature"), (int, float)):
-                temperature = d.get("temperature")
-            if max_tokens is None and isinstance(d.get("maxTokens"), int):
-                max_tokens = d.get("maxTokens")
+            defaults_raw = json.loads(s.defaults_json)
+            defaults_model = SessionDefaults(**defaults_raw)
         except Exception:
-            pass
+            defaults_raw = {}
+            defaults_model = SessionDefaults()
+
+    if defaults_raw:
+        if top_k is None and isinstance(defaults_raw.get("topK"), int):
+            top_k = defaults_raw.get("topK")
+        if temperature is None and isinstance(defaults_raw.get("temperature"), (int, float)):
+            temperature = defaults_raw.get("temperature")
+        if max_tokens is None and isinstance(defaults_raw.get("maxTokens"), int):
+            max_tokens = defaults_raw.get("maxTokens")
 
     top_k = top_k if isinstance(top_k, int) and 1 <= top_k <= 50 else settings.SM_RAG_TOPK
     temperature = temperature if isinstance(temperature, (int, float)) else settings.SM_TEMPERATURE
     max_tokens = max_tokens if isinstance(max_tokens, int) else settings.SM_MAX_TOKENS
+
+    session_kb_id: Optional[int] = int(s.knowledge_base_id) if s.knowledge_base_id is not None else None
+    use_session_kb = bool(defaults_model.useSessionKnowledgeBase and session_kb_id is not None)
+    user_kb_id: Optional[int] = (
+        int(defaults_model.userKnowledgeBaseId)
+        if defaults_model.userKnowledgeBaseId is not None
+        else None
+    )
+    use_user_kb = bool(defaults_model.useUserKnowledgeBase and user_kb_id is not None)
+
+    retrieval_plan: list[tuple[str, int]] = []
+    if use_session_kb and session_kb_id is not None:
+        retrieval_plan.append(("session", session_kb_id))
+    if use_user_kb and user_kb_id is not None and user_kb_id != session_kb_id:
+        retrieval_plan.append(("user", user_kb_id))
+
+    if not retrieval_plan and use_user_kb and user_kb_id is not None and user_kb_id == session_kb_id:
+        # 仅启用一个知识库，但被同时标记为会话/用户时，避免重复检索。
+        retrieval_plan.append(("user", user_kb_id))
+
+    if not retrieval_plan:
+        effective_index_mode = "disabled"
+    elif len(retrieval_plan) == 1:
+        effective_index_mode = "session_only" if retrieval_plan[0][0] == "session" else "global_only"
+    else:
+        effective_index_mode = "hybrid"
+
+    index_mode = effective_index_mode
+    primary_kb_for_debug: Optional[int] = session_kb_id if session_kb_id is not None else user_kb_id
+    kb_ids_for_debug = [kb for _, kb in retrieval_plan]
+    if not kb_ids_for_debug:
+        primary_kb_for_debug = None
 
     rag = RAGService()
     stm_builder = ShortTermMemoryBuilder(db)
     memory_service = LongTermMemoryService(db)
     # 实验分流（稳定一致）
     variant = assign_variant(user_id=current_user.id, session_id=session_id, key="ask_mq_rrf", buckets=("A","B"))
+    session_index_name = f"sm_sess_{session_id}"
+
+    def merge_chunks(candidates, limit: int):
+        if not candidates or not isinstance(limit, int) or limit <= 0:
+            return []
+        def _score(chunk):
+            metadata = chunk.get("metadata") or {}
+            return float(
+                metadata.get("retrieval_score")
+                or metadata.get("fused_score")
+                or chunk.get("score")
+                or 0.0
+            )
+        ordered = sorted(candidates, key=_score, reverse=True)
+        merged = []
+        seen = set()
+        for chunk in ordered:
+            metadata = chunk.get("metadata") or {}
+            key = (
+                chunk.get("chunk_id"),
+                metadata.get("document_id"),
+                metadata.get("knowledge_base_id"),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(chunk)
+            if len(merged) >= limit:
+                break
+        return merged
+
+    def perform_retrieval(
+        *,
+        question: str,
+        top_k: int,
+        focus_ids: Optional[list[int]],
+        boost_ids: Optional[list[int]],
+    ):
+        if not retrieval_plan:
+            return [], {}, {}, "disabled"
+        all_candidates = []
+        sources_debug: dict[str, Any] = {}
+        latest_debug: dict[str, Any] = {}
+        for label, kb_id_value in retrieval_plan:
+            mode_override = "session_only" if label == "session" else "global_only"
+            subset = rag.retrieve(
+                query=question,
+                kb_id=kb_id_value,
+                top_k=top_k,
+                focus_doc_ids=focus_ids,
+                boost_doc_ids=boost_ids,
+                session_index=session_index_name if label == "session" else None,
+                index_mode=mode_override,
+            )
+            for chunk in subset:
+                metadata = chunk.setdefault("metadata", {})
+                metadata["knowledge_base_scope"] = label
+                metadata["knowledge_base_id"] = kb_id_value
+            all_candidates.extend(subset)
+            debug_snapshot = rag.get_last_retrieval_debug() or {}
+            sources_debug[label] = debug_snapshot
+            latest_debug = debug_snapshot
+        merged = merge_chunks(all_candidates, top_k)
+        index_descriptor = " | ".join(f"{label}:{kb_id}" for label, kb_id in retrieval_plan) or "disabled"
+        return merged, latest_debug, sources_debug, index_descriptor
+
+    # 提取 context_json 中的文件内容（用于 RAG 关闭时的上下文）
+    context_files = []
+    context_text_for_llm = ""
+    if s.context_json:
+        try:
+            context_data = json.loads(s.context_json) if isinstance(s.context_json, str) else s.context_json
+            uploaded_files = context_data.get("uploaded_files", [])
+            if uploaded_files:
+                context_files = [
+                    {"filename": f.get("filename"), "uploaded_at": f.get("uploaded_at")}
+                    for f in uploaded_files
+                ]
+                # 构建用于 LLM 的上下文文本
+                file_texts = []
+                for f in uploaded_files:
+                    file_texts.append(f"--- 文件: {f.get('filename')} ---\n{f.get('content', '')}\n--- 文件结束 ---")
+                context_text_for_llm = "\n\n".join(file_texts)
+                logger.info(f"[CONTEXT_JSON_LOADED] session={session_id} files_count={len(uploaded_files)} context_text_len={len(context_text_for_llm)}")
+        except Exception as ctx_err:
+            logger.warning(f"Failed to parse context_json: {ctx_err}")
 
     if stream:
         def gen():
@@ -434,18 +662,11 @@ def ask(
                     query=question,
                     query_embedding=query_embedding,
                 )
-                session_index = f"sm_sess_{session_id}"
-                idx_override = session_index
-                idx_override = session_index
-                # 先检索，立即告知客户端检索完成，减少“无响应”体感
-                chunks0 = rag.retrieve(
-                    query=question,
-                    kb_id=int(s.knowledge_base_id),
+                chunks0, retrieval_debug, retrieval_sources, idx_override = perform_retrieval(
+                    question=question,
                     top_k=top_k,
-                    focus_doc_ids=focus_ids,
-                    boost_doc_ids=boost_doc_ids,
-                    session_index=session_index,
-                    index_mode=index_mode,
+                    focus_ids=focus_ids,
+                    boost_ids=boost_doc_ids,
                 )
                 try:
                     reranker_stream = get_reranker()
@@ -472,7 +693,6 @@ def ask(
                     except Exception as rerank_exc:
                         logger.warning(f"Cross-encoder rerank failed (stream): {rerank_exc}")
                 import json as _json
-                retrieval_debug = rag.get_last_retrieval_debug() or {}
                 progress_payload = {
                     "stage": "retrieved",
                     "hits": len(chunks0),
@@ -483,6 +703,8 @@ def ask(
                     "history": history_debug_dict,
                     "memory": memory_debug_raw,
                 }
+                if retrieval_sources:
+                    progress_payload["retrieval_sources"] = retrieval_sources
                 yield f"event: progress\ndata: {_json.dumps(progress_payload)}\n\n"
 
                 hb = rag.get_last_history_debug() or {}
@@ -492,7 +714,27 @@ def ask(
                 }
 
                 answer_accum: list[str] = []
-                for part in rag.generate(question=question, chunks=chunks0, stream=True, history=history_list, compress_history=compress_history, rolling_summary=s.rolling_summary):
+                # 如果有上下文文件且 RAG 关闭，将文件内容添加到 chunks
+                effective_chunks = chunks0
+                extra_system_prompt = None
+                if context_text_for_llm and index_mode == "disabled":
+                    # 将文件内容作为一个特殊的 chunk 传递给 LLM
+                    context_chunk = {
+                        "chunk_id": "context_file",
+                        "text": context_text_for_llm,
+                        "metadata": {
+                            "document_id": "用户上传文档",
+                            "page": 1,
+                            "source": "uploaded_context",
+                            "type": "file_content"
+                        },
+                    }
+                    effective_chunks = [context_chunk] + chunks0
+                    # 添加额外的系统提示，告诉 LLM 这是用户上传的文档
+                    extra_system_prompt = "用户已上传文档作为对话上下文，请基于文档内容回答问题。" if rag.prompt.language == "zh" else "The user has uploaded documents as conversation context. Please answer based on the document content."
+                    logger.info(f"[CONTEXT_FILE_ADDED] session={session_id} context_text_len={len(context_text_for_llm)} chunks_count={len(effective_chunks)} extra_prompt={extra_system_prompt}")
+                
+                for part in rag.generate(question=question, chunks=effective_chunks, stream=True, history=history_list, compress_history=compress_history, rolling_summary=s.rolling_summary, extra_system=extra_system_prompt):
                     answer_accum.append(part)
                     yield f"data: {part}\n\n"
                 # stream tail: attach citations/usage/debug
@@ -508,11 +750,14 @@ def ask(
                     citations_tail.append(c)
                 usage_tail = rag.get_last_usage() or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
                 debug_tail = {
-                    "kb_id": s.knowledge_base_id,
+                    "kb_id": primary_kb_for_debug,
+                    "kb_ids": kb_ids_for_debug,
                     "top_k": top_k,
                     "index": idx_override,
                     "index_mode": index_mode,
                 }
+                if retrieval_sources:
+                    debug_tail["retrieval_sources"] = retrieval_sources
                 import json as _json
                 debug_tail["history"] = history_usage
                 if not memory_debug_raw.get("disabled"):
@@ -536,26 +781,44 @@ def ask(
                 # 持久化本轮问答（聚合后的答案）
                 try:
                     full_answer = "".join(answer_accum)
+                    logger.info(f"[STREAM_BEFORE_SAVE] session={session_id} answer_parts={len(answer_accum)} full_answer_len={len(full_answer)} question_len={len(question)}")
                     memory_service.record_memories(
                         user_id=current_user.id,
                         session_id=session_id,
                         question=question,
                         citations=citations_tail,
                     )
-                    db.add(
-                        Message(
-                            session_id=session_id,
-                            user_question=question,
-                            model_answer=full_answer,
-                            retrieval_content=_json.dumps({
-                                "citations": citations_tail,
-                                "retrieval": retrieval_debug,
-                                "memory": memory_debug_raw,
-                            }, ensure_ascii=False),
-                        )
+                    retrieval_data = {
+                        "citations": citations_tail,
+                        "retrieval": retrieval_debug,
+                        "memory": memory_debug_raw,
+                    }
+                    if retrieval_sources:
+                        retrieval_data["retrieval_sources"] = retrieval_sources
+                    if context_files:
+                        retrieval_data["context_files"] = context_files
+                    
+                    msg = Message(
+                        session_id=session_id,
+                        user_question=question,
+                        model_answer=full_answer,
+                        retrieval_content=_json.dumps(retrieval_data, ensure_ascii=False),
                     )
+                    db.add(msg)
                     db.commit()
-                except Exception:
+                    logger.info(f"[STREAM_SAVE_OK] session={session_id} question_len={len(question)} answer_len={len(full_answer)} msg_id={msg.message_id}")
+                    
+                    # 清空 context_json 中的文件内容（避免影响后续消息）
+                    if context_files:
+                        try:
+                            s.context_json = None
+                            db.add(s)
+                            db.commit()
+                            logger.info(f"[CONTEXT_CLEARED] session={session_id}")
+                        except Exception as clear_err:
+                            logger.warning(f"Failed to clear context_json: {clear_err}")
+                except Exception as save_err:
+                    logger.error(f"[STREAM_SAVE_FAIL] session={session_id} error={save_err}")
                     db.rollback()
                 yield f"event: completion\ndata: {tail}\n\n"
             except Exception as e:
@@ -585,8 +848,6 @@ def ask(
         return StreamingResponse(gen(), media_type="text/event-stream; charset=utf-8")
 
     # non-streaming
-    session_index = f"sm_sess_{session_id}"
-    idx_override = session_index
     history_list, history_debug, query_embedding = stm_builder.build_history(
         session_id=session_id,
         question=question,
@@ -598,14 +859,11 @@ def ask(
         query=question,
         query_embedding=query_embedding,
     )
-    chunks = rag.retrieve(
-        query=question,
-        kb_id=int(s.knowledge_base_id),
+    chunks, retrieval_debug, retrieval_sources, idx_override = perform_retrieval(
+        question=question,
         top_k=top_k,
-        focus_doc_ids=focus_ids,
-        boost_doc_ids=boost_doc_ids,
-        session_index=session_index,
-        index_mode=index_mode,
+        focus_ids=focus_ids,
+        boost_ids=boost_doc_ids,
     )
 
     # L2 Cross-Encoder rerank
@@ -635,7 +893,24 @@ def ask(
             logger.warning(f"Cross-encoder rerank failed: {rerank_exc}")
 
     try:
-        content = rag.generate(question=question, chunks=chunks, temperature=temperature, max_tokens=max_tokens, stream=False, history=history_list, compress_history=compress_history, rolling_summary=s.rolling_summary)
+        # 如果有上下文文件且 RAG 关闭，将文件内容添加到 chunks
+        effective_chunks_non_stream = chunks
+        extra_system_prompt_non_stream = None
+        if context_text_for_llm and index_mode == "disabled":
+            context_chunk = {
+                "chunk_id": "context_file",
+                "text": context_text_for_llm,
+                "metadata": {
+                    "document_id": "用户上传文档",
+                    "page": 1,
+                    "source": "uploaded_context",
+                    "type": "file_content"
+                },
+            }
+            effective_chunks_non_stream = [context_chunk] + chunks
+            extra_system_prompt_non_stream = "用户已上传文档作为对话上下文，请基于文档内容回答问题。" if rag.prompt.language == "zh" else "The user has uploaded documents as conversation context. Please answer based on the document content."
+        
+        content = rag.generate(question=question, chunks=effective_chunks_non_stream, temperature=temperature, max_tokens=max_tokens, stream=False, history=history_list, compress_history=compress_history, rolling_summary=s.rolling_summary, extra_system=extra_system_prompt_non_stream)
     except Exception as e:
         try:
             logger.error(f"ASK generate error user={current_user.id} session={session_id}: {e}")
@@ -647,7 +922,8 @@ def ask(
     retrieval_debug = rag.get_last_retrieval_debug() or {}
     history_builder_debug = rag.get_last_history_debug() or {}
     debug = {
-        "kb_id": s.knowledge_base_id,
+        "kb_id": primary_kb_for_debug,
+        "kb_ids": kb_ids_for_debug,
         "top_k": top_k,
         "index": idx_override,
         "index_mode": index_mode,
@@ -656,6 +932,8 @@ def ask(
         "history": {"builder": history_builder_debug, "stm": history_debug_dict},
         "memory": memory_debug_raw,
     }
+    if retrieval_sources:
+        debug["retrieval_sources"] = retrieval_sources
 
     memory_service.record_memories(
         user_id=current_user.id,
@@ -677,12 +955,14 @@ def ask(
         AskEventLogger().log_event({
             "user_id": str(current_user.id),
             "session_id": session_id,
-            "kb_id": int(s.knowledge_base_id),
+            "kb_id": int(primary_kb_for_debug) if primary_kb_for_debug is not None else None,
+            "kb_ids": kb_ids_for_debug,
             "question": str(question)[:512],
             "top_k": int(top_k),
             "strategy": getattr(settings, "SM_RETRIEVAL_STRATEGY", "multi_stage"),
             "hits": len(chunks),
             "retrieval": retrieval_debug,
+            "retrieval_sources": retrieval_sources,
             "citations": citations,
             "usage": usage,
             "answer_chars": len(content or ""),
@@ -704,19 +984,35 @@ def ask(
         pass
     # 持久化本轮问答
     try:
+        retrieval_data_non_stream = {
+            "citations": citations,
+            "retrieval": retrieval_debug,
+            "memory": memory_debug_raw,
+        }
+        if retrieval_sources:
+            retrieval_data_non_stream["retrieval_sources"] = retrieval_sources
+        if context_files:
+            retrieval_data_non_stream["context_files"] = context_files
+        
         db.add(
             Message(
                 session_id=session_id,
                 user_question=question,
                 model_answer=content,
-                retrieval_content=json.dumps({
-                    "citations": citations,
-                    "retrieval": retrieval_debug,
-                    "memory": memory_debug_raw,
-                }, ensure_ascii=False),
+                retrieval_content=json.dumps(retrieval_data_non_stream, ensure_ascii=False),
             )
         )
         db.commit()
+        
+        # 清空 context_json 中的文件内容（避免影响后续消息）
+        if context_files:
+            try:
+                s.context_json = None
+                db.add(s)
+                db.commit()
+                logger.info(f"[CONTEXT_CLEARED] session={session_id}")
+            except Exception as clear_err:
+                logger.warning(f"Failed to clear context_json: {clear_err}")
     except Exception:
         db.rollback()
     return JSONResponse(content={"answer": content, "chunks": chunks, "citations": citations, "usage": usage, "debug": debug})

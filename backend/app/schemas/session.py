@@ -5,11 +5,21 @@ from typing import List, Dict, Any
 
 class SessionDefaults(BaseModel):
     """会话级默认参数（可保存/回读）。"""
+
     retrievalStrategy: Literal["multi_stage"] = Field("multi_stage")
     rerankerStrategy: Literal["none", "supervised", "rl"] = Field("none")
     topK: int = Field(5, ge=1, le=50)
     language: Literal["zh", "en"] = Field("zh")
     streaming: bool = Field(True)
+    useSessionKnowledgeBase: bool = Field(
+        True, description="是否启用当前会话的临时知识库用于检索"
+    )
+    useUserKnowledgeBase: bool = Field(
+        False, description="是否启用用户已有知识库用于检索"
+    )
+    userKnowledgeBaseId: Optional[int] = Field(
+        None, description="启用用户知识库时所绑定的知识库ID"
+    )
 
 
 class CreateSessionRequest(BaseModel):

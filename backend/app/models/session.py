@@ -39,3 +39,5 @@ class Session(Base):
     # 记忆引导状态
     memory_guide_fail_count = Column(Integer, nullable=False, default=0)
     memory_guide_disabled = Column(Boolean, nullable=False, default=False)
+    # 会话临时上下文（JSON 字符串），用于存储直接上传的文件内容等
+    context_json = Column(Text, nullable=True)

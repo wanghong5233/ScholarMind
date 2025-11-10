@@ -490,6 +490,7 @@ export default function Index() {
   const handleOpenJobModal = async () => {
     if (!currentKbId) return
     setJobModalOpen(true)
+    setJobPage(1)
     await fetchJobList()
   }
 

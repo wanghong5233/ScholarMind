@@ -26,6 +26,7 @@ export function detail(
       think?: string
       documents?: string
       recommended_questions?: string
+      retrieval_content?: string
     }[]
   >('history/get_messages', {
     ...options,
@@ -42,6 +43,29 @@ export function info(
     ...options,
     params: rest,
   })
+}
+
+export function getDefaults(
+  params: { sessionId: string },
+  options?: AxiosRequestConfig,
+) {
+  const { sessionId, ...rest } = params
+  return request.get<API.SessionDefaults>(`sessions/${sessionId}/defaults`, {
+    ...options,
+    params: rest,
+  })
+}
+
+export function updateDefaults(
+  params: { sessionId: string; defaults: API.SessionDefaults },
+  options?: AxiosRequestConfig,
+) {
+  const { sessionId, defaults } = params
+  return request.put<API.SessionDefaults>(
+    `sessions/${sessionId}/defaults`,
+    defaults,
+    options,
+  )
 }
 
 export function create(
@@ -112,4 +136,40 @@ export function upload(
     },
     ...options,
   })
+}
+
+export function uploadForContext(
+  params: {
+    sessionId: string
+    file: File
+  },
+  options?: AxiosRequestConfig,
+) {
+  const { sessionId, file } = params
+  const formData = new FormData()
+  formData.append('file', file)
+  return request.post<{ filename: string; content: string }>(
+    `sessions/${sessionId}/upload-for-context`,
+    formData,
+    {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+      ...options,
+    },
+  )
+}
+
+export function remove(
+  params: { sessionId: string },
+  options?: AxiosRequestConfig,
+) {
+  const { sessionId, ...rest } = params
+  return request.delete<{ deleted: boolean; messages_deleted?: number }>(
+    `sessions/${sessionId}`,
+    {
+      ...options,
+      params: rest,
+    },
+  )
 }

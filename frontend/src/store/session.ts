@@ -12,6 +12,9 @@ const actions = {
   add(item: API.Session) {
     state.list.push(item)
   },
+  remove(sessionId: string) {
+    state.list = state.list.filter((item) => item.session_id !== sessionId)
+  },
   updateKey() {
     state.updateKey += 1
   },

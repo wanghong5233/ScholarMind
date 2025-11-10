@@ -1,55 +1,39 @@
-import * as api from '@/api'
 import { PlusCircleOutlined } from '@ant-design/icons'
 import { Button, Upload } from 'antd'
 
 const ACCEPT = ['pdf', 'doc', 'docx', 'txt']
-const LIMIT = 50
+const LIMIT = 200  // 单文件最大 200MB，支持大型文档
 
 export default function Uploader(props: {
-  sessionId: string
-  onSuccess: (file: File) => void
+  onFileSelected: (file: File) => void
 }) {
-  const { sessionId } = props
+  const { onFileSelected } = props
 
   return (
     <Upload
       showUploadList={false}
       maxCount={1}
       accept={ACCEPT.map((item) => `.${item}`).join(',')}
-      customRequest={async (options) => {
-        const file = options.file as File
-        const { onSuccess, onError } = options
-
-        const _onError = (error: Error) => {
-          onError?.(error)
-          window.$app.message.error(error.message)
-        }
-
+      beforeUpload={(file) => {
         // 检查后缀名
         const ext = file.name?.split('.')?.pop()?.toLowerCase() ?? ''
         const isAccept = ACCEPT.includes(ext)
         if (!isAccept) {
-          return _onError?.(new Error(`只支持 ${ACCEPT.join('、')}`))
+          window.$app.message.error(`只支持 ${ACCEPT.join('、')}`)
+          return Upload.LIST_IGNORE
         }
 
         // 文件大小限制
         const isLimit = file.size <= LIMIT * 1024 * 1024
         if (!isLimit) {
-          return _onError?.(new Error(`文件大小不能超过${LIMIT}M`))
+          window.$app.message.error(`文件大小不能超过${LIMIT}M`)
+          return Upload.LIST_IGNORE
         }
 
-        try {
-          // 上传文件
-          await api.session.upload({
-            sessionId,
-            file,
-          })
-          onSuccess?.('')
-          props.onSuccess?.(file)
-          window.$app.message.success('上传成功')
-        } catch (error: any) {
-          onError?.(error)
-        }
+        // 仅将文件传递给父组件，不上传
+        onFileSelected(file)
+        window.$app.message.success('文件已添加')
+        return false // 阻止自动上传
       }}
     >
       <Button

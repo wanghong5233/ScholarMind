@@ -1,5 +1,6 @@
 import IconAvatar from '@/assets/chat/avatar.svg'
 import { ChatRole, ChatType } from '@/configs'
+import { FileOutlined } from '@ant-design/icons'
 import { Avatar } from 'antd'
 import classNames from 'classnames'
 import { useMemo } from 'react'
@@ -19,6 +20,20 @@ function UserMessage(props: { item: API.ChatItem }) {
       )}
     >
       <div className={styles['chat-message-item__content']}>{item.content}</div>
+      {item.attachments?.length ? (
+        <div className={styles['chat-message-item__attachments']}>
+          {item.attachments.map((doc) => (
+            <div
+              key={doc.id}
+              className={styles['chat-message-item__attachment']}
+              title={doc.title}
+            >
+              <FileOutlined />
+              <span>{doc.title}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
     </div>
   )
 }

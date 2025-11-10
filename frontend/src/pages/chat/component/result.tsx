@@ -7,7 +7,6 @@ import { ArrowRightOutlined } from '@ant-design/icons'
 import { Button, Dropdown } from 'antd'
 import classNames from 'classnames'
 import dayjs from 'dayjs'
-import { TokenizerAndRendererExtension } from 'marked'
 import { useCallback, useMemo } from 'react'
 import styles from './result.module.scss'
 
@@ -39,36 +38,6 @@ export function Result(props: {
     ]
   }, [item.content])
 
-  /* markdown */
-  const extensions = useMemo<TokenizerAndRendererExtension[]>(
-    () => [
-      {
-        name: 'reference',
-        level: 'inline',
-        start(src) {
-          return src.match(/##\d+\$\$/)?.index
-        },
-        tokenizer(src) {
-          const match = /^##(\d+?)\$\$/.exec(src)
-          if (match) {
-            const [raw, index] = match
-            return {
-              type: 'reference',
-              raw,
-              index: this.lexer.inlineTokens(index),
-              tokens: [],
-            }
-          }
-        },
-        renderer(token) {
-          const index = this.parser.parseInline(token.index)
-          return `<span class="refrence-token" data-refrence-index="${index}">[${Number(index) + 1}]</span>`
-        },
-      },
-    ],
-    [],
-  )
-
   const handleClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       const target = e.target as HTMLElement
@@ -83,24 +52,39 @@ export function Result(props: {
   return (
     <div className={styles['chat-message-result']}>
       {item.think ? (
-        <Markdown
-          className={classNames(
-            styles['chat-message-result__think'],
-            styles['chat-message-result__md'],
-          )}
-          value={item.think}
-          extensions={extensions}
-          onClick={handleClick}
-        />
+        item.loading ? (
+          <div
+            className={classNames(
+              styles['chat-message-result__think'],
+              styles['chat-message-result__streaming'],
+            )}
+          >
+            {item.think}
+          </div>
+        ) : (
+          <Markdown
+            className={classNames(
+              styles['chat-message-result__think'],
+              styles['chat-message-result__md'],
+            )}
+            value={item.think}
+            onClick={handleClick}
+          />
+        )
       ) : null}
 
       {item.content ? (
-        <Markdown
-          className={styles['chat-message-result__md']}
-          value={item.content}
-          extensions={extensions}
-          onClick={handleClick}
-        />
+        item.loading ? (
+          <div className={styles['chat-message-result__streaming']}>
+            {item.content}
+          </div>
+        ) : (
+          <Markdown
+            className={styles['chat-message-result__md']}
+            value={item.content}
+            onClick={handleClick}
+          />
+        )
       ) : null}
 
       {item.error ? (

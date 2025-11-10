@@ -13,6 +13,9 @@ declare namespace API {
     topK: number
     language: 'zh' | 'en'
     streaming: boolean
+    useSessionKnowledgeBase: boolean
+    useUserKnowledgeBase: boolean
+    userKnowledgeBaseId?: number | null
   }
 
   interface CreateSessionResponse {
@@ -40,6 +43,13 @@ declare namespace API {
     documents?: Document[]
     reference?: Reference[]
     recommended_questions?: string[]
+    attachments?: ChatAttachment[]
+  }
+
+  interface ChatAttachment {
+    id: number
+    title: string
+    knowledgeBaseId?: number
   }
 
   interface Document {

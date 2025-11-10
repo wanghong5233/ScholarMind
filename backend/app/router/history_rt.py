@@ -150,6 +150,7 @@ async def get_messages_by_session_id(
                     "recommended_questions": None,
                     "think": None,
                     "created_at": m.create_time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "retrieval_content": m.retrieval_content,  # 添加完整的 retrieval_content
                 }
             )
 

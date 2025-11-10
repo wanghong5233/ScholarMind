@@ -140,7 +140,7 @@ class Settings(BaseSettings):
     # RAG 超参数
     SM_RAG_TOPK: int = 5
     SM_RETRIEVE_PAGE_SIZE: int = 5
-    SM_MAX_TOKENS: int = 1024
+    SM_MAX_TOKENS: int = 4096  # LLM 生成的最大 token 数，支持长回答
     SM_TEMPERATURE: float = 0.3
     
     # 公式块上下文扩展（检索时自动附带前后文本块）
@@ -149,8 +149,8 @@ class Settings(BaseSettings):
     SM_EQUATION_EXPANSION_NEXT: int = 1         # 向后扩展的块数
     # history context controls
     SM_HISTORY_MAX_TURNS: int = 8  # 兼容旧逻辑（优先使用 token 预算）
-    SM_HISTORY_MAX_TOKENS: int = 65536
-    SM_HISTORY_HEADROOM: int = 4096  # 预留给检索上下文/系统提示/答案空间
+    SM_HISTORY_MAX_TOKENS: int = 100000  # 历史对话最大 token 数，支持长对话
+    SM_HISTORY_HEADROOM: int = 30000  # 预留给检索上下文/系统提示/答案空间（约 120k 字符）
     HISTORY_RECENT_TURNS: int = 4
     ENABLE_ROLLING_SUMMARY: bool = True
 
@@ -208,12 +208,12 @@ class Settings(BaseSettings):
     DEEPDOC_XGB_REMOTE_REPO: Optional[str] = None  # 自定义HF仓库名（优先使用 JSON/UBJ 版本）
 
     # Quotas (生产级配额，根据实际需求调整)
-    DAILY_UPLOAD_MB: int = 500  # 每用户每日上传配额（MB）- 生产环境建议 500MB
+    DAILY_UPLOAD_MB: int = 2000  # 每用户每日上传配额（MB）- 生产环境建议 2GB
     DAILY_ASK_COUNT: int = 1000  # 每用户每日提问配额 - 生产环境建议 1000 次
-    MAX_CONCURRENT_UPLOADS: int = 3  # 每用户最大并发上传数
+    MAX_CONCURRENT_UPLOADS: int = 5  # 每用户最大并发上传数
     
     # Upload limits
-    MAX_UPLOAD_SIZE_MB: int = 50  # 单文件最大 50MB（学术论文通常 < 20MB）
+    MAX_UPLOAD_SIZE_MB: int = 200  # 单文件最大 200MB，支持大型文档（技术报告、书籍章节等）
     ALLOWED_FILE_EXTENSIONS: list = [".pdf", ".txt", ".md", ".docx"]  # 允许的文件类型
     
     # Rate limiting (生产环境必须启用)
