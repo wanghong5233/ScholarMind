@@ -1,56 +1,100 @@
 from __future__ import annotations
 
-from typing import Iterable, List
+from typing import Iterable, List, Tuple, Dict, Any
 from core.config import settings
+from service.core.ingestion.constants import is_multimodal_metadata
 from service.core.ingestion.interfaces import ParsedBlock, Chunker
 from utils.get_logger import log
 
 
+def _normalize_page_range(value: Any, fallback: Any = None) -> List[int]:
+    pages: List[int] = []
+    candidates = []
+    if value is not None:
+        candidates.append(value)
+    if fallback is not None:
+        candidates.append(fallback)
+    for cand in candidates:
+        if cand is None:
+            continue
+        if isinstance(cand, int):
+            pages.append(int(cand))
+        elif isinstance(cand, list):
+            for item in cand:
+                try:
+                    pages.append(int(item))
+                except Exception:
+                    continue
+        elif isinstance(cand, (tuple, set)):
+            for item in cand:
+                try:
+                    pages.append(int(item))
+                except Exception:
+                    continue
+    seen: List[int] = []
+    for p in pages:
+        if p not in seen:
+            seen.append(p)
+    return seen
+
+
+def _merge_page_ranges(metas: List[Dict[str, Any]]) -> List[int]:
+    combined: List[int] = []
+    for meta in metas:
+        if not isinstance(meta, dict):
+            continue
+        rng = _normalize_page_range(meta.get("page_range"), meta.get("page"))
+        for p in rng:
+            if p not in combined:
+                combined.append(p)
+    return combined
+
+
 def _merge_short_chunks(chunks: List[ParsedBlock]) -> List[ParsedBlock]:
-    """Merge or drop overly short chunks to避免检索阶段产生无意义片段 (如单词级)。"""
-    min_chars = max(int(getattr(settings, "SM_CHUNK_MIN_FILTER_CHARS", 20) or 0), 0)
-    if min_chars <= 0 or not chunks:
-        return [c for c in chunks if (c.text or "").strip()]
+    """
+    历史遗留函数：在结构化重构后不再合并短块，仅负责清理空文本。
+    （保留函数签名，以兼容旧逻辑调用。）
+    """
+    if not chunks:
+        return []
+    return [c for c in chunks if (c.text or "").strip()]
 
-    merged: List[ParsedBlock] = []
-    pending: List[str] = []
 
-    for chunk in chunks:
-        text = (chunk.text or "").strip()
-        if not text:
-            continue
+def _is_multimodal_block(block: ParsedBlock) -> bool:
+    return is_multimodal_metadata(block.metadata)
 
-        if len(text) < min_chars:
-            pending.append(text)
-            # 优先合入上一块，避免丢失信息
-            if merged:
-                last = merged.pop()
-                combined = (last.text or "").rstrip()
-                if combined:
-                    combined += "\n"
-                combined += "\n".join(pending)
-                merged.append(ParsedBlock(text=combined, metadata=last.metadata))
-                pending.clear()
-            continue
 
-        if pending:
-            text = "\n".join(pending + [text])
-            pending.clear()
+def _produce_chunk(
+    block: ParsedBlock,
+    text: str,
+    index: int,
+    total: int,
+    start: int,
+    end: int,
+    override_metadata: Dict[str, Any] | None = None,
+) -> ParsedBlock:
+    md = dict(block.metadata or {})
+    if override_metadata:
+        md.update(override_metadata)
 
-        merged.append(ParsedBlock(text=text, metadata=chunk.metadata))
+    pages = _normalize_page_range(md.get("page_range"), md.get("page"))
+    if pages:
+        md["page_range"] = pages
+        md.setdefault("page", pages[0])
 
-    if pending:
-        if merged:
-            last = merged.pop()
-            combined = (last.text or "").rstrip()
-            if combined:
-                combined += "\n"
-            combined += "\n".join(pending)
-            merged.append(ParsedBlock(text=combined, metadata=last.metadata))
-        else:
-            merged.append(ParsedBlock(text="\n".join(pending), metadata={}))
+    md["structure_chunk_index"] = index
+    md["structure_chunk_total"] = total
+    md["offset_start"] = start
+    md["offset_end"] = end
+    md.setdefault("logical_type", (block.metadata or {}).get("logical_type"))
+    md.setdefault("element_type", md.get("logical_type") or (block.metadata or {}).get("element_type"))
+    md.setdefault("structure_path", (block.metadata or {}).get("structure_path"))
+    if block.metadata.get("structure_title"):
+        md.setdefault("structure_title", block.metadata.get("structure_title"))
+    if block.metadata.get("title"):
+        md.setdefault("title", block.metadata.get("title"))
 
-    return merged
+    return ParsedBlock(text=text, metadata=md)
 
 
 class RecursiveCharacterChunker(Chunker):
@@ -64,9 +108,43 @@ class RecursiveCharacterChunker(Chunker):
         self.target_chars = target_chars
         self.overlap = overlap
 
+    def _min_chunk_chars(self) -> int:
+        return max(int(getattr(settings, "SM_CHUNK_MIN_CHARS", 200)), 100)
+
+    def _find_chunk_boundary(self, text: str, start: int, preferred_end: int) -> int:
+        """
+        在首选终点附近寻找更自然的切分点（段落/句末），否则退回到首选位置。
+        """
+        length = len(text)
+        preferred_end = min(length, max(start + self._min_chunk_chars(), preferred_end))
+        back_window = max(int(getattr(settings, "SM_CHUNK_BREAK_BACK_WINDOW", 180)), 50)
+        forward_window = max(int(getattr(settings, "SM_CHUNK_BREAK_FORWARD_WINDOW", 120)), 20)
+        markers = ["\n\n", "\n", "。", "！", "？", ".", "!", "?"]
+
+        # 1) 向后（优先选择靠近目标长度的断点）
+        search_start = max(start + 1, preferred_end - back_window)
+        snippet = text[search_start:preferred_end]
+        for marker in markers:
+            idx = snippet.rfind(marker)
+            if idx != -1 and (search_start + idx) > start:
+                return search_start + idx + len(marker)
+
+        # 2) 向前（若后向没有命中，则允许稍超出目标长度）
+        search_end = min(length, preferred_end + forward_window)
+        snippet = text[preferred_end:search_end]
+        for marker in markers:
+            idx = snippet.find(marker)
+            if idx != -1:
+                pos = preferred_end + idx + len(marker)
+                if pos - start >= self._min_chunk_chars():
+                    return pos
+
+        # 3) 兜底：直接使用首选终点
+        return preferred_end
+
     def chunk(self, *, blocks: Iterable[ParsedBlock]) -> List[ParsedBlock]:
-        # 为了稳定统计与日志，这里转换为列表（上游 parse 已返回 List，额外开销可接受）
-        block_list: List[ParsedBlock] = list(blocks)
+        # 结构优先：先按结构块迭代，内部再做长度切分
+        block_list: List[ParsedBlock] = [b for b in blocks if (b.text or "").strip()]
         if getattr(settings, "SM_SEMANTIC_CHUNKING_ENABLED", False):
             # 从配置读取 SOTA 参数
             target = getattr(settings, "SM_CHUNK_TARGET_CHARS", 800)
@@ -95,20 +173,26 @@ class RecursiveCharacterChunker(Chunker):
                 pass
             return chunks
         results: List[ParsedBlock] = []
-        for b in block_list:
-            text = b.text or ""
+        for block in block_list:
+            text = (block.text or "").strip()
             if not text:
                 continue
-            start = 0
-            while start < len(text):
-                end = min(len(text), start + self.target_chars)
-                chunk_txt = text[start:end]
-                results.append(ParsedBlock(text=chunk_txt, metadata=dict(b.metadata)))
-                if end >= len(text):
-                    break
-                start = end - self.overlap
-                if start < 0:
-                    start = 0
+            # Chunker 不负责过滤多模态块，只负责切分
+            # 多模态块直接保留，由 Indexer 统一过滤
+            pieces = self._split_block(text)
+            total = len(pieces)
+            for idx, (chunk_text, start, end) in enumerate(pieces, start=1):
+                results.append(
+                    _produce_chunk(
+                        block=block,
+                        text=chunk_text,
+                        index=idx,
+                        total=total,
+                        start=start,
+                        end=end,
+                    )
+                )
+
         results = _merge_short_chunks(results)
 
         try:
@@ -118,6 +202,29 @@ class RecursiveCharacterChunker(Chunker):
         except Exception:
             pass
         return results
+
+    def _split_block(self, text: str) -> List[Tuple[str, int, int]]:
+        """按 target/overlap 在单个结构块内部切分，返回 (chunk_text, start, end) 列表。"""
+        pieces: List[Tuple[str, int, int]] = []
+        if not text:
+            return pieces
+        start = 0
+        length = len(text)
+        target = max(self.target_chars, 200)
+        overlap = min(self.overlap, target - 50) if target > 50 else 0
+        while start < length:
+            preferred_end = min(length, start + target)
+            boundary = self._find_chunk_boundary(text, start, preferred_end)
+            chunk_txt = text[start:boundary].strip()
+            if chunk_txt:
+                pieces.append((chunk_txt, start, boundary))
+            if boundary >= length:
+                break
+            next_start = boundary - overlap
+            if next_start <= start:
+                next_start = boundary
+            start = next_start
+        return pieces
 
 
 
@@ -165,20 +272,24 @@ class SemanticAwareChunker(Chunker):
         target = max(target, 400)  # IEEE 首段较长，兜底窗口稍大
         overlap = max(min(overlap, target // 3), 50)
 
-        pieces: List[ParsedBlock] = []
+        raw_pieces: List[Tuple[str, int, int]] = []
         start = 0
         length = len(text)
         while start < length:
             end = min(length, start + target)
             chunk_txt = text[start:end]
-            pieces.append(ParsedBlock(text=chunk_txt, metadata=dict(block.metadata)))
+            raw_pieces.append((chunk_txt, start, end))
             if end >= length:
                 break
             start = end - overlap
             if start < 0:
                 start = 0
 
-        return pieces
+        total = len(raw_pieces)
+        return [
+            _produce_chunk(block=block, text=chunk_txt, index=idx + 1, total=total, start=piece_start, end=piece_end)
+            for idx, (chunk_txt, piece_start, piece_end) in enumerate(raw_pieces)
+        ]
 
     def _embed(self, sents: List[str]) -> List[List[float]]:
         # 复用已有 Embedder（本地或API），以确保维度一致
@@ -204,111 +315,31 @@ class SemanticAwareChunker(Chunker):
         return max(-1.0, min(1.0, dot / (da * db)))
     
     def _chunk_block_level(self, blocks: List[ParsedBlock]) -> List[ParsedBlock]:
-        """块级语义合并：保留预合并块的完整性，只在块边界做跨块合并。
-        
-        适用场景：MinerU 等已做结构化预合并的解析器输出。
-        策略：
-        1. 保留每个预合并块的完整性（不重新切分）
-        2. 计算每个块的整体 embedding
-        3. 基于块间语义相似度 + 长度阈值，决定是否跨块合并
-        4. 优先保留结构化信息（如表格/公式不参与合并）
-        """
-        try:
-            log.info(f"SemanticAwareChunker.block_level_mode: preserving pre-merged structure")
-        except Exception:
-            pass
-        
-        # 过滤空块
+        """块级保护模式：保持已有结构块，仅对过长块做内部切分。"""
         valid_blocks = [b for b in blocks if (b.text or "").strip()]
         if not valid_blocks:
             return []
-        
-        # 计算每个块的 embedding（整体，不切分句子）
-        try:
-            from service.core.ingestion.embedder import SimpleAPIEmbedder
-            emb = SimpleAPIEmbedder()
-            recs = emb.embed(chunks=valid_blocks)
-            block_vecs = [r.get("vector") or [] for r in recs]
-        except Exception:
-            # 如果 embedding 失败，直接返回原块（不合并）
-            log.warning("SemanticAwareChunker.block_level: embedding failed, returning original blocks")
-            return valid_blocks
-        
-        # 块级合并
-        results: List[ParsedBlock] = []
-        current_block: ParsedBlock | None = None
-        current_vec: List[float] | None = None
-        
-        for i, block in enumerate(valid_blocks):
-            vec = block_vecs[i] if i < len(block_vecs) else []
-            
-            # 跳过多模态元素（表格/公式/图表），不参与合并
-            element_type = block.metadata.get("element_type", "paragraph")
-            if element_type in ("table_json", "equation_latex", "figure_summary"):
-                if current_block:
-                    results.append(current_block)
-                    current_block = None
-                    current_vec = None
-                results.append(block)
-                continue
-            
-            # 第一个块
-            if current_block is None:
-                current_block = block
-                current_vec = vec
-                continue
-            
-            # 计算块间相似度
-            sim = self._cos(current_vec or [], vec)
-            current_len = len(current_block.text or "")
-            next_len = current_len + 1 + len(block.text or "")
-            
-            # 合并条件（参数化，可通过配置开关调优）：
-            # 1. 语义相似度 ≥ settings.SM_SEMANTIC_SIMILARITY_THRESHOLD（默认 0.60）
-            # 2. 合并后长度 ≤ settings.SM_BLOCK_LEVEL_MAX_CHARS（默认 10000）
-            # 3. 长度优先：current_len < settings.SM_BLOCK_LEVEL_LEN_MERGE_BELOW（默认 5000）
-            # 4. 跨页合并：由 settings.SM_BLOCK_LEVEL_ALLOW_CROSS_PAGE 控制（默认不允许）
-            from core.config import settings
-            semantic_threshold = getattr(settings, "SM_SEMANTIC_SIMILARITY_THRESHOLD", 0.60)
-            max_chars = getattr(settings, "SM_BLOCK_LEVEL_MAX_CHARS", 10000)
-            len_merge_below = getattr(settings, "SM_BLOCK_LEVEL_LEN_MERGE_BELOW", 5000)
-            allow_cross_page = getattr(settings, "SM_BLOCK_LEVEL_ALLOW_CROSS_PAGE", False)
 
-            semantic_merge = sim >= semantic_threshold
-            length_merge = current_len < len_merge_below
-            size_ok = next_len <= max_chars
-            same_page = (current_block.metadata.get("page") == block.metadata.get("page"))
-            page_ok = allow_cross_page or same_page
-            
-            should_merge = size_ok and page_ok and (semantic_merge or length_merge)
-            
-            if should_merge:
-                # 合并块
-                current_block = ParsedBlock(
-                    text=current_block.text + "\n" + block.text,
-                    metadata=current_block.metadata.copy()
-                )
-                # 更新 embedding（简单平均）
-                if current_vec and vec and len(current_vec) == len(vec):
-                    current_vec = [(a + b) / 2 for a, b in zip(current_vec, vec)]
-            else:
-                # 输出当前块，开始新块
-                results.append(current_block)
-                current_block = block
-                current_vec = vec
-        
-        # 输出最后一个块
-        if current_block:
-            results.append(current_block)
-
-        # 确保块级结果不会超过 max_chunk_chars；过长则回退到句级/滑窗切分
         final_results: List[ParsedBlock] = []
-        for block in results:
+        for block in valid_blocks:
             text = (block.text or "").strip()
             if not text:
                 continue
+
+            # Chunker 不负责过滤多模态块，只负责切分
+            # 多模态块直接保留，由 Indexer 统一过滤
+
             if len(text) <= self.max_chunk_chars:
-                final_results.append(block)
+                final_results.append(
+                    _produce_chunk(
+                        block=block,
+                        text=text,
+                        index=1,
+                        total=1,
+                        start=0,
+                        end=len(text),
+                    )
+                )
                 continue
 
             # 回退策略：按句子切分，保持 target/max 约束；若分句失败则使用滑窗
@@ -317,28 +348,37 @@ class SemanticAwareChunker(Chunker):
                 final_results.extend(self._split_block_sliding(block))
                 continue
 
+            chunk_texts: List[str] = []
             buf: List[str] = []
             for sent in sents:
                 tentative = ("\n".join(buf) + ("\n" if buf else "") + sent) if buf else sent
                 if len(tentative) > self.max_chunk_chars and buf:
-                    final_results.append(ParsedBlock(text="\n".join(buf), metadata=dict(block.metadata)))
+                    chunk_texts.append("\n".join(buf))
                     buf = [sent]
                     continue
                 buf.append(sent)
             if buf:
-                final_results.append(ParsedBlock(text="\n".join(buf), metadata=dict(block.metadata)))
+                chunk_texts.append("\n".join(buf))
+
+            total = len(chunk_texts)
+            for idx, chunk_text in enumerate(chunk_texts, start=1):
+                final_results.append(
+                    _produce_chunk(
+                        block=block,
+                        text=chunk_text,
+                        index=idx,
+                        total=total,
+                        start=0,
+                        end=len(chunk_text),
+                    )
+                )
 
         try:
-            log.info(f"SemanticAwareChunker.block_level: input={len(valid_blocks)} output={len(final_results)} merged={len(valid_blocks)-len(final_results)}")
-
-            # 调试：打印前2个块级合并后的 chunk
-            for i, block in enumerate(final_results[:2]):
-                log.info(f"[DEBUG_BLOCK_LEVEL_CHUNK_{i+1}] element_type={block.metadata.get('element_type')} "
-                         f"page={block.metadata.get('page')} len={len(block.text)} chars={len(block.text)} "
-                         f"text_preview={block.text[:100]}...")
+            log.info(
+                f"SemanticAwareChunker.block_level: input={len(valid_blocks)} output={len(final_results)}"
+            )
         except Exception:
             pass
-
         return final_results
 
     def chunk(self, *, blocks: Iterable[ParsedBlock]) -> List[ParsedBlock]:
@@ -357,13 +397,14 @@ class SemanticAwareChunker(Chunker):
         is_pre_merged = any(b.metadata.get("parser_engine") == "mineru" for b in _blocks)
         
         if is_pre_merged:
-            # 块级语义合并：保留预合并块的完整性，只在块边界做跨块合并
             block_level = self._chunk_block_level(_blocks)
             return _merge_short_chunks(block_level)
         
         # 原有逻辑：句子级语义分块（适用于非预合并场景）
         for b in _blocks:
             text = (b.text or "").strip()
+            # Chunker 不负责过滤多模态块，只负责切分
+            # 多模态块直接保留，由 Indexer 统一过滤
             if not text:
                 continue
             sents = self._split_sentences(text)
@@ -373,12 +414,40 @@ class SemanticAwareChunker(Chunker):
                     log.info("SemanticAwareChunker.sents_empty_fallback: using single-block fallback")
                 except Exception:
                     pass
-                results.append(ParsedBlock(text=text, metadata=dict(b.metadata)))
+                results.append(
+                    _produce_chunk(
+                        block=b,
+                        text=text,
+                        index=1,
+                        total=1,
+                        start=0,
+                        end=len(text),
+                    )
+                )
                 continue
             embs = self._embed(sents)
             buf: List[str] = []
             buf_vecs: List[List[float]] = []
             last_vec: List[float] | None = None
+            chunk_payloads: List[Tuple[str, Dict[str, Any]]] = []
+
+            def _flush_buffer():
+                if not buf:
+                    return
+                override_md: Dict[str, Any] = {}
+                if buf_vecs:
+                    try:
+                        dim = len(buf_vecs[0])
+                        acc = [0.0] * dim
+                        for vv in buf_vecs:
+                            if len(vv) == dim:
+                                for j in range(dim):
+                                    acc[j] += float(vv[j])
+                        override_md["pre_embedding"] = [x / max(len(buf_vecs), 1) for x in acc]
+                    except Exception:
+                        pass
+                chunk_payloads.append(("\n".join(buf), override_md))
+
             for i, s in enumerate(sents):
                 cur = s
                 if not buf:
@@ -407,21 +476,7 @@ class SemanticAwareChunker(Chunker):
                 should_split = can_split and (force_split or soft_split)
                 
                 if should_split:
-                    # 汇总当前块向量为 pre_embedding
-                    md = dict(b.metadata)
-                    if buf_vecs:
-                        try:
-                            import math
-                            dim = len(buf_vecs[0])
-                            acc = [0.0] * dim
-                            for vv in buf_vecs:
-                                if len(vv) == dim:
-                                    for j in range(dim):
-                                        acc[j] += float(vv[j])
-                            md["pre_embedding"] = [x / max(len(buf_vecs), 1) for x in acc]
-                        except Exception:
-                            pass
-                    results.append(ParsedBlock(text="\n".join(buf), metadata=md))
+                    _flush_buffer()
                     buf = [cur]
                     buf_vecs = [cur_vec] if isinstance(cur_vec, list) and cur_vec else []
                 else:
@@ -430,19 +485,21 @@ class SemanticAwareChunker(Chunker):
                         buf_vecs.append(cur_vec)
                 last_vec = cur_vec
             if buf:
-                md = dict(b.metadata)
-                if buf_vecs:
-                    try:
-                        dim = len(buf_vecs[0])
-                        acc = [0.0] * dim
-                        for vv in buf_vecs:
-                            if len(vv) == dim:
-                                for j in range(dim):
-                                    acc[j] += float(vv[j])
-                        md["pre_embedding"] = [x / max(len(buf_vecs), 1) for x in acc]
-                    except Exception:
-                        pass
-                results.append(ParsedBlock(text="\n".join(buf), metadata=md))
+                _flush_buffer()
+
+            total = len(chunk_payloads)
+            for idx, (chunk_text, override_md) in enumerate(chunk_payloads, start=1):
+                results.append(
+                    _produce_chunk(
+                        block=b,
+                        text=chunk_text,
+                        index=idx,
+                        total=total,
+                        start=0,
+                        end=len(chunk_text),
+                        override_metadata=override_md,
+                    )
+                )
         results = _merge_short_chunks(results)
 
         try:

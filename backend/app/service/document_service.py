@@ -9,6 +9,8 @@ from service.core.rag.utils.es_conn import ESConnection
 from core.config import settings
 import os
 from utils.get_logger import logger
+from elasticsearch import NotFoundError
+from typing import Dict
 
 def get_document_by_id(db: Session, doc_id: int, user_id: int, kb_id: int = None) -> Document:
     """
@@ -123,56 +125,23 @@ def delete_document(db: Session, doc_id: int, user_id: int, kb_id: int) -> Docum
     logger.info(f"Start ES deletion phase for doc_id={doc_to_delete.id}, kb_id={kb_id}")
     try:
         es = ESConnection()
-        # 仅收敛到指定前缀的索引/别名，避免误删和性能问题
-        es_prefix = settings.ES_DEFAULT_INDEX.split('_')[0]  # 如 scholarmind
-        candidates: Set[str] = set([settings.ES_DEFAULT_INDEX, "default"])  # 兼容早期
-        try:
-            aliases = es.es.cat.aliases(format="json")
-            for a in aliases:
-                alias = a.get('alias')
-                if alias and alias.startswith(es_prefix):
-                    candidates.add(alias)
-            indices = es.es.cat.indices(format="json")
-            for idx in indices:
-                name = idx.get('index')
-                if name and name.startswith(es_prefix):
-                    candidates.add(name)
-            logger.info(f"ES cat aliases(count={len(aliases)}), indices(count={len(indices)}) -> candidate_set={sorted(list(candidates))}")
-        except Exception:
-            pass
-
-        # 先尝试通配符前缀删除，减少漏删概率
-        try:
-            wildcard_index = f"{es_prefix}*"
-            logger.info(f"Attempting wildcard delete on index pattern '{wildcard_index}' for doc_id={doc_to_delete.id}, kb_id={kb_id}")
-            deleted_wc = es.delete({"document_id": str(doc_to_delete.id)}, indexName=wildcard_index, knowledgebaseId=str(kb_id))
-            if deleted_wc > 0:
-                logger.info(f"Wildcard delete removed {deleted_wc} chunks for doc_id={doc_to_delete.id} on '{wildcard_index}'.")
-                # 通配删除已生效则跳过后续逐个索引删除
-                candidates = set()
-        except Exception as ewc:
-            if "index_not_found_exception" not in str(ewc):
-                logger.error(f"Wildcard delete failed on pattern '{wildcard_index}': {ewc}")
-
-        tried = 0
-        max_try = 20
-        for idx_name in sorted(list(candidates)):
-            if tried >= max_try:
-                break
-            tried += 1
-            try:
-                logger.info(f"Attempting to delete document chunks from ES index/alias '{idx_name}' for doc_id={doc_to_delete.id}, kb_id={kb_id}")
-                deleted_count = es.delete({"document_id": str(doc_to_delete.id)}, indexName=idx_name, knowledgebaseId=str(kb_id))
-                if deleted_count > 0:
-                    logger.info(f"Successfully deleted {deleted_count} chunks for doc_id={doc_to_delete.id} from '{idx_name}'.")
-                else:
-                    logger.info(f"No chunks matched for doc_id={doc_to_delete.id} in '{idx_name}'.")
-            except Exception as es_err:
-                if "index_not_found_exception" not in str(es_err):
-                    logger.error(f"Failed to delete document chunks from ES index '{idx_name}' for doc_id={doc_to_delete.id}. Error: {es_err}")
-                continue
+        es_prefix = settings.ES_DEFAULT_INDEX.split('_')[0]
+        target_indices = _resolve_es_targets(es, es_prefix)
+        total_removed = 0
+        for idx in sorted(target_indices):
+            removed = _delete_chunks_from_index(
+                es_conn=es,
+                index_name=idx,
+                kb_id=str(kb_id),
+                doc_id=str(doc_to_delete.id),
+            )
+            total_removed += removed
+        logger.info(
+            f"ES deletion summary for doc_id={doc_to_delete.id}, kb_id={kb_id}: "
+            f"indices_checked={len(target_indices)}, chunks_removed={total_removed}"
+        )
     except Exception as e:
-        logger.error(f"An error occurred during ES deletion for doc_id={doc_to_delete.id}. Error: {e}")
+        logger.exception(f"An error occurred during ES deletion for doc_id={doc_to_delete.id}. Error: {e}")
 
     # 4) 返回被删除的文档对象
     db.delete(doc_to_delete)
@@ -236,6 +205,47 @@ def find_document_by_file_hash(db: Session, kb_id: int, file_hash: str) -> Optio
         )
         .first()
     )
+
+def _resolve_es_targets(es_conn: ESConnection, prefix: str) -> Set[str]:
+    targets: Set[str] = set()
+    if settings.ES_DEFAULT_INDEX:
+        targets.add(settings.ES_DEFAULT_INDEX)
+    targets.add("default")
+    targets.add(f"{prefix}*")
+    try:
+        alias_info: Dict[str, Dict] = es_conn.es.indices.get_alias(index=f"{prefix}*")
+        for index_name, meta in alias_info.items():
+            if index_name:
+                targets.add(index_name)
+            for alias in (meta.get("aliases") or {}).keys():
+                if alias:
+                    targets.add(alias)
+    except NotFoundError:
+        pass
+    except Exception as exc:
+        logger.warning(f"Failed to resolve ES aliases for prefix '{prefix}': {exc}")
+    return targets
+
+
+def _delete_chunks_from_index(es_conn: ESConnection, index_name: str, kb_id: str, doc_id: str) -> int:
+    """
+    多次调用 delete_by_query，直到删除数为 0，确保索引彻底清理。
+    """
+    total_removed = 0
+    consecutive_zero = 0
+    max_attempts = 5
+    for _ in range(max_attempts):
+        removed = es_conn.delete({"document_id": doc_id}, indexName=index_name, knowledgebaseId=kb_id)
+        if removed <= 0:
+            consecutive_zero += 1
+            if consecutive_zero >= 2:
+                break
+            continue
+        total_removed += removed
+        consecutive_zero = 0
+    if total_removed > 0:
+        logger.info(f"Removed {total_removed} chunks from index '{index_name}' for doc_id={doc_id}.")
+    return total_removed
 
 
 def create_documents_bulk_for_kb(

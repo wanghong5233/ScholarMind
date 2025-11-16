@@ -1,14 +1,17 @@
 from __future__ import annotations
 import os
-from typing import Any, Dict
+from datetime import datetime, timezone
+from typing import Any, Dict, List
 from service.job_handler.interfaces import BaseJobHandler, JobResult
 from utils.get_logger import log
 from service.core.ingestion.parser_orchestrator import ParserOrchestrator
 from service.core.ingestion.chunker import RecursiveCharacterChunker
+from service.core.ingestion.interfaces import ParsedBlock
 from core.config import settings
 from service.core.ingestion.embedder import SimpleAPIEmbedder
 from service.core.ingestion.indexer import ESIndexer
 from service.core.ingestion.metadata_extractor import DefaultMetadataExtractor
+from service.core.ingestion.structured_doc_builder import StructuredDocumentBuilder
 from service import document_service
 
 class ParseIndexHandler(BaseJobHandler):
@@ -26,6 +29,7 @@ class ParseIndexHandler(BaseJobHandler):
         embedder = SimpleAPIEmbedder()
         indexer = ESIndexer()
         metadata_extractor = DefaultMetadataExtractor()
+        structured_builder = StructuredDocumentBuilder()
 
         session_index = None
         try:
@@ -72,10 +76,27 @@ class ParseIndexHandler(BaseJobHandler):
                 doc = metadata_extractor.extract_and_enrich(db=db, document=doc, blocks=blocks)
                 log.info(f"[METADATA_OK] doc_id={doc_id} title={doc.title[:50] if doc.title else 'N/A'} doi={doc.doi or 'N/A'}")
                 
+                # 结构化阶段
+                log.info(f"[STRUCT_START] doc_id={doc_id}")
+                structured_doc = structured_builder.build(document=doc, mineru_blocks=blocks)
+                structured_blocks = structured_doc.to_parsed_blocks()
+                log.info(
+                    f"[STRUCT_OK] doc_id={doc_id} structured_blocks={len(structured_blocks)} "
+                    f"logical_types={self._summarize_logical_types(structured_blocks)}"
+                )
+                snapshot = self._build_structure_snapshot(structured_doc)
+                try:
+                    doc.structure_metadata = snapshot
+                    db.add(doc)
+                    db.commit()
+                    db.refresh(doc)
+                except Exception as exc:
+                    log.warning(f"[STRUCT_SNAPSHOT_SAVE_FAIL] doc_id={doc_id} err={exc}")
+
                 # 分块阶段 - 详细日志
                 try:
-                    log.info(f"[CHUNK_START] doc_id={doc_id} input_blocks={len(blocks)}")
-                    chunks = chunker.chunk(blocks=blocks)
+                    log.info(f"[CHUNK_START] doc_id={doc_id} input_blocks={len(structured_blocks)}")
+                    chunks = chunker.chunk(blocks=structured_blocks)
                     
                     # 统计分块结果
                     total_chunks = len(chunks)
@@ -153,3 +174,40 @@ class ParseIndexHandler(BaseJobHandler):
                 result.failed += 1
         
         return result
+
+    def _summarize_logical_types(self, blocks: list[ParsedBlock]) -> dict[str, int]:
+        summary: dict[str, int] = {}
+        for blk in blocks:
+            lt = (blk.metadata or {}).get("logical_type", "unknown")
+            summary[lt] = summary.get(lt, 0) + 1
+        return summary
+
+    def _build_structure_snapshot(self, structured_doc) -> Dict[str, Any]:
+        logical_counter: Dict[str, int] = {}
+        for blk in structured_doc.blocks:
+            logical_counter[blk.logical_type] = logical_counter.get(blk.logical_type, 0) + 1
+
+        max_blocks = getattr(settings, "SM_STRUCTURED_SNAPSHOT_MAX_BLOCKS", 200)
+        preview_blocks = []
+        for blk in structured_doc.blocks[:max_blocks]:
+            meta = blk.metadata or {}
+            preview_blocks.append(
+                {
+                    "block_id": blk.block_id,
+                    "logical_type": blk.logical_type,
+                    "title": blk.title,
+                    "structure_path": blk.structure_path,
+                    "level": blk.level,
+                    "page_range": meta.get("page_range"),
+                    "alignment_status": meta.get("alignment_status"),
+                    "source": meta.get("source"),
+                    "text_preview": (blk.text or "")[:500],
+                }
+            )
+
+        return {
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "total_blocks": len(structured_doc.blocks),
+            "logical_types": logical_counter,
+            "blocks": preview_blocks,
+        }

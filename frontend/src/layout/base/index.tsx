@@ -1,5 +1,6 @@
 import iconNewchat from '@/assets/layout/newchat.svg'
 import iconRepository from '@/assets/layout/repository.svg'
+import iconDebug from '@/assets/layout/debug.svg'
 import logo from '@/assets/logo.svg'
 import { deviceState } from '@/store/device'
 import { useNavigate } from 'react-router-dom'
@@ -48,6 +49,17 @@ export function BaseLayout({ children }: { children?: React.ReactNode }) {
                 src={iconRepository}
               />
               <span className="base-layout__nav-header-title">知识库</span>
+            </div>
+
+            <div
+              className="base-layout__nav-header"
+              onClick={() => (device.chatting ? null : navigate('/debug/parse'))}
+            >
+              <img
+                className="base-layout__nav-header-icon"
+                src={iconDebug}
+              />
+              <span className="base-layout__nav-header-title">解析调试</span>
             </div>
           </div>
 

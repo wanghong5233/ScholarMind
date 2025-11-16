@@ -115,6 +115,7 @@ class Settings(BaseSettings):
     SM_BLOCK_LEVEL_ALLOW_CROSS_PAGE: bool = False     # 是否允许块级跨页合并（默认不允许，保障可溯源）
     SM_BLOCK_LEVEL_MAX_CHARS: int = 5600              # 与总体上限一致
     SM_BLOCK_LEVEL_LEN_MERGE_BELOW: int = 4200        # ~1050 tokens，长度优先阈值
+    SM_ENABLE_MULTIMODAL_CHUNKS: bool = False         # 是否将图/表等多模态块写入索引
     # 解析回退控制
     SM_FORCE_PYMUPDF_FALLBACK: bool = False                                      # 强制对 PDF 启用 PyMuPDF 兜底/补强
     # 解析器编排顺序（逗号分隔，按顺序尝试）。可选项：deepdoc, mineru, unstructured, pymupdf

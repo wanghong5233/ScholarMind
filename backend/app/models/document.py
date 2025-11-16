@@ -40,6 +40,7 @@ class Document(Base):
     local_pdf_path = Column(String(1024), nullable=True, comment="本地PDF文件存储路径")
     file_hash = Column(String(255), nullable=True, comment="本地文件的SHA256哈希值")
     ingestion_source = Column(String(50), nullable=False, default=DocumentIngestionSource.LOCAL_UPLOAD.value, comment="文档来源")
+    structure_metadata = Column(JSON, nullable=True, comment="结构化解析元数据快照")
 
     # 时间戳
     created_at = Column(TIMESTAMP, nullable=False, server_default=func.now(), comment="创建时间")

@@ -4,6 +4,7 @@ import Chat from '@/pages/chat'
 import Index from '@/pages/index'
 import Login from '@/pages/login'
 import Repository from '@/pages/repository'
+import ParseDebugPage from '@/pages/debug/parse'
 import RepositoryOnlineImport from '@/pages/repository/OnlineImport'
 import {
   Outlet,
@@ -37,6 +38,10 @@ export const routes: IRouteObject[] = [
   {
     path: '/repository/:kbId/online-import',
     Component: RepositoryOnlineImport,
+  },
+  {
+    path: '/debug/parse',
+    Component: ParseDebugPage,
   },
 ]
 

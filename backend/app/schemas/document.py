@@ -62,6 +62,7 @@ class DocumentInDB(DocumentBase):
     created_at: datetime
     updated_at: datetime
     parser_pipeline: Optional[str] = None
+    structure_metadata: Optional[Dict[str, Any]] = None
 
     class Config:
         from_attributes = True
@@ -76,3 +77,50 @@ class CriticalQuestionsResponse(BaseModel):
     questions: List[str]
     citations: List[Dict[str, Any]] = []
     debug: Dict[str, Any] = {}
+
+
+class DocumentParseBlock(BaseModel):
+    """单个解析块的结构化表示。"""
+
+    index: int = Field(..., description="块在解析结果中的顺序，从 1 开始。")
+    text: str = Field("", description="块的文本内容。")
+    element_type: Optional[str] = Field(
+        default=None, description="块的类型，例如 paragraph/table_json/equation_latex。"
+    )
+    page: Optional[int] = Field(default=None, description="所属页码（从 1 开始）。")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="原始解析 metadata。")
+
+
+class DocumentParseStats(BaseModel):
+    """解析统计信息。"""
+
+    total_blocks: int = Field(..., description="解析返回的块总数。")
+    nonempty_blocks: int = Field(..., description="文本非空的块数量。")
+    total_chars: int = Field(..., description="所有块文本长度之和。")
+    element_types: Dict[str, int] = Field(default_factory=dict, description="不同 element_type 的数量统计。")
+    parser_engines: Dict[str, int] = Field(
+        default_factory=dict, description="不同 parser_engine 的数量统计。"
+    )
+
+
+class DocumentParseStage(BaseModel):
+    """单个解析阶段（原始解析/分块/入库）的详情。"""
+
+    key: str = Field(..., description="阶段唯一标识，如 parser/chunker/indexed。")
+    title: str = Field(..., description="阶段名称，前端展示用。")
+    description: Optional[str] = Field(default=None, description="阶段说明。")
+    stats: DocumentParseStats
+    blocks: List[DocumentParseBlock]
+
+
+class DocumentParsePreviewResponse(BaseModel):
+    """文档解析预览响应。"""
+
+    document_id: int
+    knowledge_base_id: int
+    filename: Optional[str] = None
+    parser_order: List[str] = Field(default_factory=list, description="解析器尝试顺序。")
+    stages: List[DocumentParseStage] = Field(default_factory=list, description="各阶段解析/分块/入库的内容。")
+    stats: DocumentParseStats
+    blocks: List[DocumentParseBlock]
+

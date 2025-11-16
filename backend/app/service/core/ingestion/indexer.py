@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Dict, Iterable, Optional
 from service.core.rag.utils.es_conn import ESConnection
 from core.config import settings
+from service.core.ingestion.constants import is_multimodal_metadata
 import hashlib
 import logging
 import math
@@ -17,9 +18,32 @@ class ESIndexer:
     def index(self, *, records: Iterable[Dict], kb_id: int, document_id: int, session_index: Optional[str] = None) -> None:
         docs = []
         records_list = list(records)  # 转换为列表以便访问相邻元素
+        if not settings.SM_ENABLE_MULTIMODAL_CHUNKS:
+            filtered_records = []
+            for r in records_list:
+                meta = r.get("metadata", {})
+                if is_multimodal_metadata(meta):
+                    try:
+                        logging.getLogger('ragflow.indexer').info(
+                            f"[INDEXER_FILTERED] logical_type={meta.get('logical_type')} "
+                            f"element_type={meta.get('element_type')} "
+                            f"text_preview={r.get('text', '')[:50]}..."
+                        )
+                    except Exception:
+                        pass
+                else:
+                    filtered_records.append(r)
+            records_list = filtered_records
         
         for i, r in enumerate(records_list):
             meta = dict(r.get("metadata", {}))
+            logical_type = meta.get("logical_type")
+            element_type = meta.get("element_type")
+            if not element_type and logical_type:
+                meta["element_type"] = logical_type
+            elif not element_type:
+                meta["element_type"] = meta.get("structure_title") or "unknown"
+            meta.setdefault("logical_type", logical_type or meta.get("element_type"))
             meta["kb_id"] = str(kb_id)
             meta["document_id"] = str(document_id)
             meta["chunk_index"] = i  # 记录块在文档中的顺序

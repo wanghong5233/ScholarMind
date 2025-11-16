@@ -30,6 +30,7 @@ export interface RepositoryDocument {
   created_at: string
   updated_at: string
   parser_pipeline?: string | null
+  structure_metadata?: Record<string, any> | null
 }
 
 export interface OnlineSearchParams {
@@ -83,6 +84,40 @@ export interface JobInfo {
   payload?: Record<string, any> | null
   created_at?: string
   updated_at?: string
+}
+
+export interface DocumentParseBlock {
+  index: number
+  text: string
+  element_type?: string | null
+  page?: number | null
+  metadata: Record<string, any>
+}
+
+export interface DocumentParseStats {
+  total_blocks: number
+  nonempty_blocks: number
+  total_chars: number
+  element_types: Record<string, number>
+  parser_engines: Record<string, number>
+}
+
+export interface DocumentParseStage {
+  key: string
+  title: string
+  description?: string | null
+  stats: DocumentParseStats
+  blocks: DocumentParseBlock[]
+}
+
+export interface DocumentParsePreviewResponse {
+  document_id: number
+  knowledge_base_id: number
+  filename?: string | null
+  parser_order: string[]
+  stages: DocumentParseStage[]
+  stats: DocumentParseStats
+  blocks: DocumentParseBlock[]
 }
 
 export function listKnowledgeBases(options?: AxiosRequestConfig) {
@@ -195,4 +230,18 @@ export function getDocumentPreviewUrl(kbId: number, docId: number, token: string
     return `${url}?token=${encodeURIComponent(token)}`
   }
   return url
+}
+
+export function getDocumentParsePreview(
+  params: { kbId: number; docId: number },
+  options?: AxiosRequestConfig,
+) {
+  const { kbId, docId, ...rest } = params
+  return request.get<DocumentParsePreviewResponse>(
+    `knowledgebases/${kbId}/documents/${docId}/parse-preview`,
+    {
+      ...options,
+      params: rest,
+    },
+  )
 }

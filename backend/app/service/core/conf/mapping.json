@@ -24,6 +24,23 @@
         "type": "keyword",
         "store": true
       },
+      "logical_type": {
+        "type": "keyword",
+        "store": true
+      },
+      "structure_path": {
+        "type": "keyword",
+        "store": true
+      },
+      "structure_title": {
+        "type": "text",
+        "analyzer": "standard",
+        "store": true
+      },
+      "alignment_status": {
+        "type": "keyword",
+        "store": true
+      },
       "parser_engine": {
         "type": "keyword",
         "store": true
@@ -47,6 +64,11 @@
         "type": "float",
         "store": true
       },
+      "bbox_list": {
+        "type": "object",
+        "enabled": false,
+        "store": true
+      },
       "confidence": {
         "type": "float",
         "store": true
@@ -66,6 +88,10 @@
         "index": false
       },
       "chunk_index": {
+        "type": "integer",
+        "store": true
+      },
+      "page_range": {
         "type": "integer",
         "store": true
       }
