@@ -227,6 +227,7 @@ storage_root/
 backend/test_*.pdf
 backend/test_*.docx
 backend/test_*.txt
+backend/testpdf/
 backend/RAG文档处理与分块流程图.pdf
 
 # Backup and original files
@@ -244,3 +245,5 @@ frontend/.env.local
 frontend/.env.production
 backend/app/logs/
 manual_rag_e2e_test_plan.md
+
+精排方案设计.md
