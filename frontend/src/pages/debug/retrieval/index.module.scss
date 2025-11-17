@@ -1,0 +1,240 @@
+.retrieval-debug-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+
+  .controls-card {
+    .control-field {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 180px;
+
+      .control-label {
+        font-size: 12px;
+        color: rgba(0, 0, 0, 0.6);
+      }
+    }
+
+    .query-input {
+      margin-top: 16px;
+    }
+
+    .action-row {
+      margin-top: 16px;
+    }
+  }
+
+  .summary-card {
+    .ant-descriptions-item-label {
+      width: 140px;
+    }
+  }
+
+  .panel-card {
+    .variants-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 12px;
+    }
+
+    .variant-card {
+      height: 100%;
+
+      .variant-header {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        margin-bottom: 8px;
+      }
+    }
+  }
+
+  .prompt-section-list {
+    display: grid;
+    gap: 12px;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+
+    .prompt-card {
+      height: 100%;
+    }
+
+    .prompt-text {
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+  }
+
+  .flow-card {
+    .retrieval-flow {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 24px;
+      gap: 16px;
+      overflow-x: auto;
+
+      .flow-stage {
+        flex: 1;
+        min-width: 160px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding: 16px;
+        background: #f7f9ff;
+        border: 1px solid #e6ebf5;
+        border-radius: 8px;
+        transition: all 0.3s;
+
+        &:hover {
+          border-color: #4a90e2;
+          box-shadow: 0 2px 8px rgba(74, 144, 226, 0.15);
+        }
+
+        .stage-header {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 8px;
+          margin-bottom: 12px;
+
+          .stage-title {
+            font-weight: 600;
+            font-size: 14px;
+            color: #14213d;
+          }
+        }
+
+        .stage-content {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 8px;
+
+          .chunk-count {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 4px;
+
+            .count-label {
+              font-size: 12px;
+              color: #8b95a8;
+            }
+
+            .count-value {
+              font-size: 24px;
+              font-weight: 700;
+              color: #4a90e2;
+            }
+          }
+
+          .stage-note {
+            font-size: 11px;
+            color: #8b95a8;
+            font-style: italic;
+            text-align: center;
+          }
+
+          .stage-description {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 2px;
+            text-align: center;
+            margin-top: 4px;
+
+            .desc-main {
+              font-size: 12px;
+              color: #14213d;
+              font-weight: 500;
+            }
+
+            .desc-note {
+              font-size: 11px;
+              color: #8b95a8;
+              font-style: italic;
+            }
+          }
+
+          .stage-description-inline {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            text-align: center;
+            margin-top: 4px;
+            flex-wrap: nowrap;
+            white-space: nowrap;
+            font-size: 12px;
+            color: #4a5568;
+
+            .desc-note {
+              font-size: 12px;
+              color: #4a5568;
+            }
+
+            .score-separator {
+              color: #c0c8d4;
+              margin: 0 2px;
+            }
+
+            span:not(.desc-note):not(.score-separator) {
+              font-size: 12px;
+              color: #4a5568;
+            }
+          }
+
+          .score-info {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            font-size: 11px;
+            color: #6b7b9c;
+            text-align: center;
+            margin-top: 4px;
+          }
+
+          .score-info-inline {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            font-size: 11px;
+            color: #6b7b9c;
+            text-align: center;
+            margin-top: 4px;
+            flex-wrap: nowrap;
+            white-space: nowrap;
+
+            .score-separator {
+              color: #c0c8d4;
+              margin: 0 2px;
+            }
+
+            .stage-note-inline {
+              color: #8b95a8;
+              font-style: italic;
+            }
+          }
+        }
+      }
+
+      .flow-arrow {
+        flex-shrink: 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 40px;
+        height: 40px;
+
+        .arrow-icon {
+          font-size: 24px;
+          color: #4a90e2;
+          font-weight: bold;
+        }
+      }
+    }
+  }
+}
+

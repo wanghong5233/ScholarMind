@@ -97,6 +97,7 @@ export function chat(
     maxTokens?: number
     compressHistory?: boolean
     indexMode?: 'auto' | 'session_only' | 'global_only' | 'hybrid'
+    replaceFromMessageId?: string
   },
   options?: AxiosRequestConfig,
 ) {

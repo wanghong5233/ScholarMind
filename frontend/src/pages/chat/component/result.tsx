@@ -1,10 +1,11 @@
 import IconCopy from '@/assets/chat/copy.svg'
+import IconReference from '@/assets/chat/reference.svg'
 import IconRefresh from '@/assets/chat/refresh.svg'
 import IconShare from '@/assets/chat/share.svg'
 import IconTip from '@/assets/chat/tip.svg'
 import Markdown from '@/components/markdown'
 import { ArrowRightOutlined } from '@ant-design/icons'
-import { Button, Dropdown } from 'antd'
+import { Button, Dropdown, Tooltip, message } from 'antd'
 import classNames from 'classnames'
 import dayjs from 'dayjs'
 import { useCallback, useMemo } from 'react'
@@ -15,8 +16,9 @@ export function Result(props: {
   isEnd?: boolean
   onSend?: (text: string) => void
   onRefrence?: (index: number) => void
+  onOpenCitations?: () => void
 }) {
-  const { item, isEnd, onSend, onRefrence } = props
+  const { item, isEnd, onSend, onRefrence, onOpenCitations } = props
 
   const shareMenu = useMemo(() => {
     return [
@@ -48,6 +50,51 @@ export function Result(props: {
     },
     [onRefrence],
   )
+
+  const handleCopyContent = useCallback(async () => {
+    const text = item.content || item.think || ''
+    if (!text) {
+      message.warning('暂无可复制的内容')
+      return
+    }
+
+    const tryClipboard = async () => {
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(text)
+          return true
+        }
+      } catch {
+        return false
+      }
+      return false
+    }
+
+    const fallbackCopy = () => {
+      try {
+        const textarea = document.createElement('textarea')
+        textarea.value = text
+        textarea.style.position = 'fixed'
+        textarea.style.opacity = '0'
+        textarea.style.left = '-9999px'
+        document.body.appendChild(textarea)
+        textarea.focus()
+        textarea.select()
+        const succeeded = document.execCommand('copy')
+        document.body.removeChild(textarea)
+        return succeeded
+      } catch {
+        return false
+      }
+    }
+
+    const success = (await tryClipboard()) || fallbackCopy()
+    if (success) {
+      message.success('回答内容已复制')
+    } else {
+      message.error('复制失败，请手动选择文本')
+    }
+  }, [item.content, item.think])
 
   return (
     <div className={styles['chat-message-result']}>
@@ -126,6 +173,7 @@ export function Result(props: {
               shape="circle"
               size="small"
               style={{ color: 'var(--ant-color-primary)' }}
+              onClick={handleCopyContent}
             >
               <img src={IconCopy} />
             </Button>
@@ -141,6 +189,21 @@ export function Result(props: {
                 <img src={IconShare} />
               </Button>
             </Dropdown>
+
+            {item.reference?.length ? (
+              <Tooltip title="查看该回答的参考引文">
+                <Button
+                  variant="text"
+                  color="primary"
+                  shape="circle"
+                  size="small"
+                  style={{ color: 'var(--ant-color-primary)' }}
+                  onClick={onOpenCitations}
+                >
+                  <img src={IconReference} />
+                </Button>
+              </Tooltip>
+            ) : null}
           </div>
 
           {isEnd ? (

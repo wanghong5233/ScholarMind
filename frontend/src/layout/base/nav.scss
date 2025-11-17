@@ -33,8 +33,26 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    border-radius: 8px;
+    transition: background-color 0.2s;
+
     &:hover {
       background-color: rgba(0, 0, 0, 0.03);
+    }
+
+    &--active {
+      background-color: #e3f2fd;
+      
+      &:hover {
+        background-color: #bbdefb;
+      }
+
+      .base-layout-nav__item-main {
+        .title {
+          color: #1976d2;
+          font-weight: 500;
+        }
+      }
     }
 
     & + .base-layout-nav__item {

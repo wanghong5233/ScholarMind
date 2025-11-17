@@ -1,8 +1,8 @@
-import IconSendThunder from '@/assets/component/send-thunder.svg'
-import { CloseOutlined, FileOutlined } from '@ant-design/icons'
+import { CloseOutlined, FileOutlined, SendOutlined, StopOutlined } from '@ant-design/icons'
 import { Button, Input, Select, Space, Switch, Tooltip } from 'antd'
+import type { TextAreaRef } from 'antd/es/input/TextArea'
 import classNames from 'classnames'
-import { PropsWithChildren, useState } from 'react'
+import { PropsWithChildren, useEffect, useRef, useState } from 'react'
 import './index.scss'
 import Recorder from './recorder'
 import Uploader from './uploader'
@@ -12,6 +12,7 @@ export default function ComSender(
     className?: string
     loading?: boolean
     onSend?: (value: string) => void | Promise<void>
+    onAbort?: () => void
     onContract?: () => void
     sessionId?: string
     enableSessionKnowledgeBase?: boolean
@@ -33,11 +34,15 @@ export default function ComSender(
     pendingAttachments?: API.ChatAttachment[]
     onRemovePendingAttachment?: (id: number) => void
     onFileSelected?: (file: File) => void
+    value?: string
+    onValueChange?: (value: string) => void
+    focusKey?: number
   }>,
 ) {
   const {
     className,
     onSend,
+    onAbort,
     onContract,
     loading,
     sessionId,
@@ -47,15 +52,40 @@ export default function ComSender(
     pendingAttachments = [],
     onRemovePendingAttachment,
     onFileSelected,
+    value: controlledValue,
+    onValueChange,
+    focusKey,
     ...rest
   } = props
-  const [value, setValue] = useState('')
+  const [innerValue, setInnerValue] = useState('')
+  const textareaRef = useRef<TextAreaRef>(null)
+  const isControlled = typeof controlledValue === 'string'
+  const value = isControlled ? controlledValue! : innerValue
+
+  useEffect(() => {
+    if (typeof focusKey === 'number' && textareaRef.current) {
+      textareaRef.current.focus()
+    }
+  }, [focusKey])
+
+  const updateValue = (next: string) => {
+    if (onValueChange) onValueChange(next)
+    if (!isControlled) setInnerValue(next)
+  }
 
   async function send() {
     if (loading) return
     if (!value) return
     await onSend?.(value)
-    setValue('')
+    updateValue('')
+  }
+
+  function handleSendClick() {
+    if (loading && onAbort) {
+      onAbort()
+    } else {
+      send()
+    }
   }
   return (
     <div className={classNames('com-sender', className)} {...rest}>
@@ -79,8 +109,9 @@ export default function ComSender(
         </div>
       )}
       <Input.TextArea
+        ref={textareaRef}
         value={value}
-        onChange={(e) => setValue(e.target.value)}
+        onChange={(e) => updateValue(e.target.value)}
         placeholder="输入你的问题…"
         autoSize={{ minRows: 2 }}
         autoFocus
@@ -90,7 +121,7 @@ export default function ComSender(
         <Space className="com-sender__actions-left" size={12}>
           <Recorder
             onMessage={(text) => {
-              setValue(text)
+              updateValue(text)
             }}
           />
           {knowledgeControl ? (
@@ -143,14 +174,12 @@ export default function ComSender(
           ) : null}
           <Button
             className="com-sender__action--send"
-            variant="solid"
-            color="primary"
-            shape="round"
-            onClick={send}
-            loading={loading}
+            type="primary"
+            shape="circle"
+            onClick={handleSendClick}
+            disabled={!loading && !value?.trim()}
           >
-            发送
-            <img src={IconSendThunder} />
+            {loading ? <StopOutlined /> : <SendOutlined />}
           </Button>
         </Space>
       </div>

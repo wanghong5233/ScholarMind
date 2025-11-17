@@ -1,7 +1,7 @@
 import IconAvatar from '@/assets/chat/avatar.svg'
 import { ChatRole, ChatType } from '@/configs'
 import { FileOutlined } from '@ant-design/icons'
-import { Avatar } from 'antd'
+import { Avatar, Button } from 'antd'
 import classNames from 'classnames'
 import { useMemo } from 'react'
 import { createChatIdText } from '../shared'
@@ -9,32 +9,58 @@ import styles from './chat-message.module.scss'
 import { Result } from './result'
 import ChooseFile from './select-file'
 
-function UserMessage(props: { item: API.ChatItem }) {
-  const { item } = props
+function UserMessage(props: {
+  item: API.ChatItem
+  index: number
+  onRetry?: (item: API.ChatItem, index: number) => void
+  onResend?: (item: API.ChatItem, index: number) => void
+}) {
+  const { item, index, onRetry, onResend } = props
 
   return (
-    <div
-      className={classNames(
-        styles['chat-message-item'],
-        styles['chat-message-item--user'],
-      )}
-    >
-      <div className={styles['chat-message-item__content']}>{item.content}</div>
-      {item.attachments?.length ? (
-        <div className={styles['chat-message-item__attachments']}>
-          {item.attachments.map((doc) => (
-            <div
-              key={doc.id}
-              className={styles['chat-message-item__attachment']}
-              title={doc.title}
-            >
-              <FileOutlined />
-              <span>{doc.title}</span>
+    <>
+      <div
+        className={classNames(
+          styles['chat-message-item'],
+          styles['chat-message-item--user'],
+        )}
+      >
+        <div className={styles['chat-message-item__bubble']}>
+          <div className={styles['chat-message-item__content']}>
+            {item.content}
+          </div>
+          {item.attachments?.length ? (
+            <div className={styles['chat-message-item__attachments']}>
+              {item.attachments.map((doc) => (
+                <div
+                  key={doc.id}
+                  className={styles['chat-message-item__attachment']}
+                  title={doc.title}
+                >
+                  <FileOutlined />
+                  <span>{doc.title}</span>
+                </div>
+              ))}
             </div>
-          ))}
+          ) : null}
+        </div>
+      </div>
+
+      {item.message_id ? (
+        <div className={styles['chat-message-item__toolbar']}>
+          <Button type="text" size="small" onClick={() => onRetry?.(item, index)}>
+            重新编辑
+          </Button>
+          <Button
+            type="text"
+            size="small"
+            onClick={() => onResend?.(item, index)}
+          >
+            立即重发
+          </Button>
         </div>
       ) : null}
-    </div>
+    </>
   )
 }
 
@@ -90,8 +116,10 @@ function AssistantMessage(props: {
           isEnd={isEnd}
           onSend={onSend}
           onRefrence={onRefrence}
+          onOpenCitations={onOpenCiations}
         />
       </div>
+
     </div>
   )
 }
@@ -101,14 +129,31 @@ export default function ChatMessage(props: {
   onSend?: (text: string) => void
   onOpenCiations?: (item: API.ChatItem) => void
   onRefrence?: (target: API.Reference) => void
+  onRetryUserMessage?: (item: API.ChatItem, index: number) => void
+  onResendUserMessage?: (item: API.ChatItem, index: number) => void
 }) {
-  const { list, onSend, onOpenCiations, onRefrence } = props
+  const {
+    list,
+    onSend,
+    onOpenCiations,
+    onRefrence,
+    onRetryUserMessage,
+    onResendUserMessage,
+  } = props
 
   return (
     <div className={styles['chat-message']}>
       {list.map((item, index) => {
         if (item.role === ChatRole.User) {
-          return <UserMessage key={item.id} item={item} />
+          return (
+            <UserMessage
+              key={item.id}
+              item={item}
+              index={index}
+              onRetry={onRetryUserMessage}
+              onResend={onResendUserMessage}
+            />
+          )
         }
 
         return (

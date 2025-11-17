@@ -1,4 +1,4 @@
-import { PlusCircleOutlined } from '@ant-design/icons'
+import { PaperClipOutlined } from '@ant-design/icons'
 import { Button, Upload } from 'antd'
 
 const ACCEPT = ['pdf', 'doc', 'docx', 'txt']
@@ -37,14 +37,11 @@ export default function Uploader(props: {
       }}
     >
       <Button
-        className="com-sender__action--contract"
-        variant="filled"
-        color="default"
-        shape="round"
-      >
-        <PlusCircleOutlined style={{ fontSize: 14 }} />
-        文档
-      </Button>
+        className="com-sender__action--document"
+        type="default"
+        shape="circle"
+        icon={<PaperClipOutlined />}
+      />
     </Upload>
   )
 }

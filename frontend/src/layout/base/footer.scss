@@ -1,65 +1,61 @@
 .base-layout-footer {
   flex-shrink: 0;
-  align-self: center;
+  background-color: #ffffff;
+  padding: 12px 16px;
   display: flex;
-  justify-content: center;
-  position: relative;
+  flex-direction: column;
+  gap: 0;
+  box-sizing: border-box;
+  min-width: 0;
 
-  .base-layout-footer__bg {
-    width: 170px;
-    height: 200px;
+  .base-layout-footer__content {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 0;
+    min-width: 0;
   }
 
-  .base-layout-footer__main {
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    padding: 12px;
+  .base-layout-footer__avatar {
+    flex-shrink: 0;
+    background-color: #4a6572;
+    color: #ffffff;
+    font-size: 14px;
+    font-weight: 500;
+    width: 36px;
+    height: 36px;
     display: flex;
-    flex-direction: column;
-    gap: 7px;
-    color: white;
+    align-items: center;
+    justify-content: center;
 
-    .header {
-      flex-shrink: 0;
-      display: flex;
-      justify-content: space-between;
-      align-items: flex-start;
-      gap: 12px;
-
-      .avatar {
-        background-color: #e9eff5;
-        border-color: white;
-        color: var(--ant-color-primary);
-
-        .ant-avatar-string {
-          font-size: 28px;
-          font-weight: bold;
-        }
-      }
-
-      .edit {
-        width: 16px;
-        height: 16px;
-        cursor: pointer;
-        &:hover {
-          background-color: rgba(white, 0.2);
-        }
-      }
+    .ant-avatar-string {
+      font-size: 16px;
+      line-height: 1;
     }
+  }
 
-    .body {
-      flex-grow: 1;
-      overflow: auto;
-    }
+  .base-layout-footer__username {
+    flex: 1;
+    font-size: 16px;
+    color: #4a5568;
+    font-weight: 400;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 
-    .footer {
-      flex-shrink: 0;
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
+  .base-layout-footer__more {
+    flex-shrink: 0;
+    font-size: 16px;
+    color: #718096;
+    cursor: pointer;
+    padding: 4px;
+    border-radius: 4px;
+    transition: all 0.2s;
+
+    &:hover {
+      background-color: #f7fafc;
+      color: #2d3748;
     }
   }
 }

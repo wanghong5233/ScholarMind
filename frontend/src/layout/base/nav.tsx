@@ -5,12 +5,14 @@ import { DeleteOutlined } from '@ant-design/icons'
 import { Button, Collapse, Popconfirm, message } from 'antd'
 import dayjs from 'dayjs'
 import { MouseEvent, useCallback, useMemo } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { useSnapshot } from 'valtio'
+import classNames from 'classnames'
 import './nav.scss'
 
 export function Nav() {
   const navigate = useNavigate()
+  const location = useLocation()
 
   const session = useSnapshot(sessionState)
 
@@ -72,45 +74,50 @@ export function Nav() {
     () => [
       {
         key: '1',
-        label: '历史',
+        label: '历史对话',
         children: (
           <div>
-            {session.list?.map((item) => (
-              <div
-                className="base-layout-nav__item"
-                key={item.session_id}
-              >
+            {session.list?.map((item) => {
+              const isActive = location.pathname === `/chat/${item.session_id}`
+              return (
                 <div
-                  className="base-layout-nav__item-main"
-                  onClick={() => handleEnterSession(item.session_id)}
+                  className={classNames('base-layout-nav__item', {
+                    'base-layout-nav__item--active': isActive,
+                  })}
+                  key={item.session_id}
                 >
-                  <div className="time">
-                    {dayjs(item.created_at).format('HH:mm YYYY/MM/DD')}
-                  </div>
-                  <div className="title">{item.session_name}</div>
-                </div>
-                <div className="base-layout-nav__item-actions">
-                  <Popconfirm
-                    title="确认删除该对话？"
-                    description="删除后不可恢复，将同时清空会话内消息。"
-                    onConfirm={() => handleDeleteSession(item.session_id)}
+                  <div
+                    className="base-layout-nav__item-main"
+                    onClick={() => handleEnterSession(item.session_id)}
                   >
-                    <Button
-                      type="text"
-                      danger
-                      size="small"
-                      onClick={stopPropagation}
-                      icon={<DeleteOutlined />}
-                    />
-                  </Popconfirm>
+                    <div className="time">
+                      {dayjs(item.created_at).format('HH:mm YYYY/MM/DD')}
+                    </div>
+                    <div className="title">{item.session_name}</div>
+                  </div>
+                  <div className="base-layout-nav__item-actions">
+                    <Popconfirm
+                      title="确认删除该对话？"
+                      description="删除后不可恢复，将同时清空会话内消息。"
+                      onConfirm={() => handleDeleteSession(item.session_id)}
+                    >
+                      <Button
+                        type="text"
+                        danger
+                        size="small"
+                        onClick={stopPropagation}
+                        icon={<DeleteOutlined />}
+                      />
+                    </Popconfirm>
+                  </div>
                 </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         ),
       },
     ],
-    [session.list, handleEnterSession, handleDeleteSession, stopPropagation],
+    [session.list, location.pathname, handleEnterSession, handleDeleteSession, stopPropagation],
   )
 
   return (

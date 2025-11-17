@@ -19,3 +19,27 @@
   }
 
 }
+
+.chat-page__editing-tip {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(8, 98, 254, 0.3);
+  background-color: rgba(8, 98, 254, 0.08);
+  color: #0b3ea4;
+  margin-bottom: 12px;
+  font-size: 13px;
+
+  .chat-page__editing-text {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .chat-page__editing-snippet {
+    color: rgba(0, 0, 0, 0.65);
+    font-size: 12px;
+  }
+}

@@ -39,6 +39,7 @@ declare namespace API {
     error?: string
     content?: string
     think?: string
+    message_id?: string
 
     documents?: Document[]
     reference?: Reference[]
@@ -59,10 +60,33 @@ declare namespace API {
   }
 
   interface Reference {
-    id: string
-    document_id: string
-    document_name: string
-    content_with_weight: string
-    positions: number[][]
+    id?: string
+    document_id?: string
+    document_name?: string
+    document_title?: string
+    doi?: string
+    content_with_weight?: string
+    snippet?: string
+    source_text?: string
+    page?: number
+    chunk_id?: string
+    score?: number
+    positions?: number[][]
+    page_range?: number[]
+    knowledge_base_id?: number
+    structure_title?: string
+    structure_path?: string
+    structure_chunk_index?: number
+    structure_chunk_total?: number
+    element_type?: string
+    logical_type?: string
+    bbox_list?: number[][] | number[][][]
+    offsets?: {
+      start?: number
+      end?: number
+    }
+    alignment_status?: string
+    source?: string
+    parser_engine?: string
   }
 }

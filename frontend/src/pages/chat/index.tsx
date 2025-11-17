@@ -21,6 +21,8 @@ import styles from './index.module.scss'
 import { createChatId, createChatIdText, transportToChatEnter } from './shared'
 import type { KnowledgeBase } from '@/api/repository'
 
+type ChatItemWithToken = API.ChatItem & { __openToken?: number }
+
 async function scrollToBottom() {
   await new Promise((resolve) => setTimeout(resolve))
 
@@ -49,17 +51,33 @@ export default function Index() {
   })
   const { list } = useSnapshot(chat) as { list: API.ChatItem[] }
   const [documents, setDocuments] = useState<API.Document[]>([])
-  const [currentChatItem, setCurrentChatItem] = useState<API.ChatItem | null>(
-    null,
-  )
+  const [currentChatItem, setCurrentChatItemState] =
+    useState<ChatItemWithToken | null>(null)
   const [pendingAttachments, setPendingAttachments] = useState<
     API.ChatAttachment[]
   >([])
   const [pendingFiles, setPendingFiles] = useState<File[]>([])
   const [sessionDefaults, setSessionDefaults] =
     useState<API.SessionDefaults | null>(null)
+  const [composerValue, setComposerValue] = useState('')
+  const [composerFocusKey, setComposerFocusKey] = useState(0)
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([])
   const [updatingDefaults, setUpdatingDefaults] = useState(false)
+  const [editingContext, setEditingContext] = useState<{
+    messageId: string
+  } | null>(null)
+  const abortControllerRef = useRef<AbortController | null>(null)
+  const readerRef = useRef<ReadableStreamDefaultReader<any> | null>(null)
+  const openCitationsPanel = useCallback(
+    (item: API.ChatItem | null) => {
+      if (!item) {
+        setCurrentChatItemState(null)
+        return
+      }
+      setCurrentChatItemState({ ...item, __openToken: Date.now() })
+    },
+    [],
+  )
 
   const history = useRequest(
     async () => {
@@ -76,19 +94,20 @@ export default function Index() {
           if (item.user_question) {
             // 尝试从 retrieval_content 中提取 context_files
             let attachments: API.ChatAttachment[] | undefined
+            let retrievalData: Record<string, any> | undefined
             if (item.retrieval_content) {
               try {
-                const retrievalData = JSON.parse(item.retrieval_content)
-                if (retrievalData.context_files && Array.isArray(retrievalData.context_files)) {
-                  attachments = retrievalData.context_files.map((file: any, idx: number) => ({
-                    id: idx,
-                    title: file.filename || '未知文件',
-                    knowledgeBaseId: 0,
-                  }))
-                }
+                retrievalData = JSON.parse(item.retrieval_content)
               } catch (error) {
                 console.error('Failed to parse retrieval_content:', error)
               }
+            }
+            if (retrievalData?.context_files && Array.isArray(retrievalData.context_files)) {
+              attachments = retrievalData.context_files.map((file: any, idx: number) => ({
+                id: idx,
+                title: file.filename || '未知文件',
+                knowledgeBaseId: 0,
+              }))
             }
             
             chat.list.push({
@@ -97,6 +116,7 @@ export default function Index() {
               type: ChatType.Text,
               content: item.user_question,
               attachments: attachments,
+              message_id: item.message_id,
             })
           }
 
@@ -104,8 +124,63 @@ export default function Index() {
             const map = new Map<string, API.Document>()
             let reference: API.Reference[] = []
             let recommended_questions: string[] = []
+            let retrievalData: Record<string, any> | undefined
+            let fallbackKbId: number | undefined
+            if (item.retrieval_content) {
+              try {
+                retrievalData = JSON.parse(item.retrieval_content)
+                const kbIdValue = retrievalData?.knowledge_base_id
+                if (
+                  typeof kbIdValue === 'number' ||
+                  (typeof kbIdValue === 'string' && kbIdValue)
+                ) {
+                  fallbackKbId = Number(kbIdValue)
+                }
+              } catch (error) {
+                console.error('Failed to parse retrieval_content:', error)
+              }
+            }
 
-            if (item.documents) {
+            if (Array.isArray(retrievalData?.citations)) {
+              reference = retrievalData.citations.map((c: any, idx: number) => {
+                const docId = String(c.document_id ?? '')
+                const positions = Array.isArray(c.positions)
+                  ? c.positions
+                  : c.page
+                  ? [[c.page, 0]]
+                  : []
+                return {
+                  id: c.id ?? `${docId}-${c.chunk_id ?? idx}`,
+                  document_id: docId,
+                  document_name: c.document_name || c.document_title || `文档 ${docId || idx + 1}`,
+                  document_title: c.document_title || c.document_name || '',
+                  doi: c.doi ?? undefined,
+                  content_with_weight: c.source_text || c.snippet || '',
+                  source_text: c.source_text || '',
+                  snippet: c.snippet || '',
+                  positions,
+                  page: c.page ?? null,
+                  score: c.score ?? null,
+                  chunk_id: c.chunk_id ?? undefined,
+                  knowledge_base_id:
+                    c.knowledge_base_id ??
+                    c.kb_id ??
+                    (fallbackKbId !== undefined ? fallbackKbId : undefined),
+                  page_range: c.page_range ?? null,
+                  structure_path: c.structure_path ?? '',
+                  structure_title: c.structure_title ?? '',
+                  logical_type: c.logical_type ?? '',
+                  element_type: c.element_type ?? '',
+                  structure_chunk_index: c.structure_chunk_index ?? null,
+                  structure_chunk_total: c.structure_chunk_total ?? null,
+                  bbox_list: c.bbox_list ?? null,
+                  offsets: c.offsets ?? undefined,
+                  alignment_status: c.alignment_status ?? undefined,
+                  source: c.source ?? undefined,
+                  parser_engine: c.parser_engine ?? undefined,
+                }
+              })
+            } else if (item.documents) {
               try {
                 reference = JSON.parse(item.documents) as API.Reference[]
               } catch (error) {
@@ -124,11 +199,20 @@ export default function Index() {
             }
 
             reference?.forEach((chunk) => {
-              map.set(chunk.document_id, {
-                document_id: chunk.document_id,
-                document_name: chunk.document_name,
-                content_with_weight: chunk.content_with_weight,
+              const docId = chunk.document_id ?? ''
+              map.set(docId, {
+                document_id: docId,
+                document_name: chunk.document_name ?? '',
+                content_with_weight:
+                  chunk.source_text || chunk.content_with_weight || '',
               })
+              if (
+                (chunk.knowledge_base_id === undefined ||
+                  chunk.knowledge_base_id === null) &&
+                fallbackKbId !== undefined
+              ) {
+                chunk.knowledge_base_id = fallbackKbId
+              }
             })
             const documents = Array.from(map.values())
 
@@ -143,9 +227,44 @@ export default function Index() {
               recommended_questions: recommended_questions?.length
                 ? recommended_questions
                 : undefined,
+              message_id: item.message_id,
             })
           }
         })
+
+        const latestWithReference = [...chat.list]
+          .reverse()
+          .find(
+            (chatItem) =>
+              chatItem.role === ChatRole.Assistant &&
+              Array.isArray(chatItem.reference) &&
+              chatItem.reference.length > 0,
+          )
+        if (latestWithReference) {
+          openCitationsPanel(latestWithReference)
+          if (latestWithReference.documents?.length) {
+            setDocuments(latestWithReference.documents)
+          } else if (latestWithReference.reference?.length) {
+            const map = new Map<string, API.Document>()
+            latestWithReference.reference.forEach((chunk) => {
+              const docId = chunk.document_id ?? ''
+              map.set(docId, {
+                document_id: docId,
+                document_name: chunk.document_name ?? '',
+                content_with_weight:
+                  chunk.source_text || chunk.content_with_weight || '',
+              })
+            })
+            const docs = Array.from(map.values())
+            if (docs.length) {
+              latestWithReference.documents = docs
+              setDocuments(docs)
+            }
+          }
+        } else {
+          openCitationsPanel(null)
+          setDocuments([])
+        }
 
         setTimeout(() => {
           window.scrollTo({
@@ -299,27 +418,64 @@ export default function Index() {
     [sessionDefaults, updatingDefaults, applyDefaults],
   )
 
+  const abortChat = useCallback(() => {
+    if (readerRef.current) {
+      readerRef.current.cancel().catch(() => {})
+      readerRef.current = null
+    }
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+      abortControllerRef.current = null
+    }
+    // 找到正在loading的item并停止loading
+    const loadingItem = chat.list.find((item) => item.loading)
+    if (loadingItem) {
+      const index = chat.list.indexOf(loadingItem)
+      if (index !== -1) {
+        chat.list[index] = { ...loadingItem, loading: false }
+      }
+    }
+  }, [chat])
+
   const sendChat = useCallback(
-    async (target: API.ChatItem, message: string) => {
-      setCurrentChatItem(target)
+    async (
+      target: API.ChatItem,
+      message: string,
+      extra?: { userItem?: API.ChatItem; replaceMessageId?: string },
+    ) => {
+      openCitationsPanel(target)
       target.loading = true
       let needReload = false
+      abortControllerRef.current = new AbortController()
       try {
         //后端接口
-        const res = await api.session.chat({
-          id: id!,
-          question: message,
-        })
+        const res = await api.session.chat(
+          {
+            id: id!,
+            question: message,
+            replaceFromMessageId: extra?.replaceMessageId,
+          },
+          {
+            signal: abortControllerRef.current.signal,
+          },
+        )
         sessionActions.updateKey()
 
         const reader = res.data.getReader()
         if (!reader) return
+        readerRef.current = reader
 
         await read(reader)
       } catch (error: any) {
+        if (error.name === 'AbortError' || abortControllerRef.current?.signal.aborted) {
+          // 用户主动中断，不显示错误
+          return
+        }
         target.error = error?.message ?? 'Unknown error'
         throw error
       } finally {
+        readerRef.current = null
+        abortControllerRef.current = null
         const index = chat.list.indexOf(target)
         if (index !== -1) {
           chat.list[index] = { ...target, loading: false }
@@ -335,8 +491,19 @@ export default function Index() {
         const decoder = new TextDecoder('utf-8')
         let currentEvent: string | null = null
         while (true) {
+          // 检查是否已中断
+          if (abortControllerRef.current?.signal.aborted) {
+            reader.cancel().catch(() => {})
+            return
+          }
           const { value, done } = await reader.read()
-          temp += decoder.decode(value)
+          // 再次检查中断状态
+          if (abortControllerRef.current?.signal.aborted) {
+            return
+          }
+          if (value) {
+            temp += decoder.decode(value)
+          }
 
           while (true) {
             const index = temp.indexOf('\n')
@@ -403,10 +570,11 @@ export default function Index() {
 
           const map = new Map<string, API.Document>()
           json.documents.forEach((chunk: API.Reference) => {
-            map.set(chunk.document_id, {
-              document_id: chunk.document_id,
-              document_name: chunk.document_name,
-              content_with_weight: chunk.content_with_weight,
+            const docId = chunk.document_id ?? ''
+            map.set(docId, {
+              document_id: docId,
+              document_name: chunk.document_name ?? '',
+              content_with_weight: chunk.content_with_weight ?? '',
             })
           })
           const docs = Array.from(map.values())
@@ -414,16 +582,52 @@ export default function Index() {
           setDocuments(docs)
         }
 
+        const fallbackKbId =
+          json?.debug?.kb_id ??
+          json?.debug?.kbId ??
+          sessionDefaults?.userKnowledgeBaseId
+
         if (Array.isArray(json?.citations) && json.citations.length) {
           const refs: API.Reference[] = json.citations.map(
             (item: any, idx: number) => {
               const docId = String(item.document_id ?? '')
+              const positions = Array.isArray(item.positions)
+                ? item.positions
+                : item.page
+                ? [[item.page, 0]]
+                : []
               return {
                 id: `${docId}-${item.chunk_id ?? idx}`,
                 document_id: docId,
-                document_name: item.document_title || `文档 ${docId || idx + 1}`,
-                content_with_weight: item.snippet ?? '',
-                positions: item.page ? [[item.page, 0]] : [],
+                document_name:
+                  item.document_name ||
+                  item.document_title ||
+                  `文档 ${docId || idx + 1}`,
+                document_title: item.document_title || item.document_name || '',
+                doi: item.doi ?? undefined,
+                content_with_weight: item.snippet ?? item.source_text ?? '',
+                source_text: item.source_text ?? '',
+                page: item.page ?? null,
+                score: item.score ?? null,
+                positions,
+                page_range: item.page_range ?? null,
+                structure_title: item.structure_title ?? '',
+                structure_path: item.structure_path ?? '',
+                structure_chunk_index: item.structure_chunk_index ?? null,
+                structure_chunk_total: item.structure_chunk_total ?? null,
+                element_type: item.element_type ?? '',
+                logical_type: item.logical_type ?? '',
+                bbox_list: item.bbox_list ?? null,
+                offsets: item.offsets ?? undefined,
+                alignment_status: item.alignment_status ?? undefined,
+                source: item.source ?? undefined,
+                parser_engine: item.parser_engine ?? undefined,
+                knowledge_base_id:
+                  item.knowledge_base_id ??
+                  item.kb_id ??
+                  (typeof fallbackKbId === 'number'
+                    ? fallbackKbId
+                    : undefined),
               }
             },
           )
@@ -431,10 +635,12 @@ export default function Index() {
           target.reference = refs
           const map = new Map<string, API.Document>()
           refs.forEach((chunk) => {
-            map.set(chunk.document_id, {
-              document_id: chunk.document_id,
-              document_name: chunk.document_name,
-              content_with_weight: chunk.content_with_weight,
+            const docId = chunk.document_id ?? ''
+            map.set(docId, {
+              document_id: docId,
+              document_name: chunk.document_name ?? '',
+              content_with_weight:
+                chunk.source_text || chunk.content_with_weight || '',
             })
           })
           const docs = Array.from(map.values())
@@ -445,9 +651,16 @@ export default function Index() {
         if (Array.isArray(json?.recommended_questions)) {
           target.recommended_questions = json.recommended_questions
         }
+
+        if (json?.message_id) {
+          target.message_id = json.message_id
+          if (extra?.userItem) {
+            extra.userItem.message_id = json.message_id
+          }
+        }
       }
     },
-    [chat, id, setCurrentChatItem, setDocuments, history],
+    [chat, id, openCitationsPanel, setDocuments, history, sessionDefaults],
   )
 
   const handleFileSelected = useCallback((file: File) => {
@@ -469,7 +682,7 @@ export default function Index() {
   }, [pendingFiles])
 
   const send = useCallback(
-    async (message: string) => {
+    async (message: string, options?: { replaceMessageId?: string }) => {
       if (loadingRef.current) return
       if (!message) return
 
@@ -477,6 +690,22 @@ export default function Index() {
         ...item,
       }))
       const filesSnapshot = [...pendingFiles]
+      const replaceMessageId =
+        options?.replaceMessageId ?? editingContext?.messageId
+      let insertIndex: number | undefined
+
+      if (replaceMessageId) {
+        const editIdx = chat.list.findIndex(
+          (item) => item.message_id === replaceMessageId,
+        )
+        if (editIdx !== -1) {
+          chat.list.splice(editIdx)
+          insertIndex = editIdx
+          openCitationsPanel(null)
+          setDocuments([])
+        }
+        setEditingContext(null)
+      }
 
       // 如果有待发送的文件，先上传
       if (filesSnapshot.length > 0) {
@@ -511,57 +740,104 @@ export default function Index() {
         }
       }
 
-      if (chat.list.length === 0) {
-        chat.list.push({
-          id: createChatId(),
-          role: ChatRole.User,
-          type: ChatType.Text,
-          content: message,
-          attachments: attachmentsSnapshot.length
-            ? attachmentsSnapshot
-            : undefined,
-        })
-
-        chat.list.push({
-          id: createChatId(),
-          role: ChatRole.Assistant,
-          type: ChatType.Document,
-          documents: [],
-        })
-
-        const target = chat.list[chat.list.length - 1]
-
-        await sendChat(target, message)
-        setPendingAttachments([])
-        setPendingFiles([])
-      } else {
-        chat.list.push({
-          id: createChatId(),
-          role: ChatRole.User,
-          type: ChatType.Text,
-          content: message,
-          attachments: attachmentsSnapshot.length
-            ? attachmentsSnapshot
-            : undefined,
-        })
-
-        chat.list.push({
-          id: createChatId(),
-          role: ChatRole.Assistant,
-          type: ChatType.Document,
-          content: '',
-        })
-        scrollToBottom()
-
-        const target = chat.list[chat.list.length - 1]
-
-        await sendChat(target, message)
-        setPendingAttachments([])
-        setPendingFiles([])
+      const appendAtTail = insertIndex === undefined || insertIndex < 0
+      const userMessage: API.ChatItem = {
+        id: createChatId(),
+        role: ChatRole.User,
+        type: ChatType.Text,
+        content: message,
+        attachments: attachmentsSnapshot.length
+          ? attachmentsSnapshot
+          : undefined,
       }
+      const assistantMessage: API.ChatItem = {
+        id: createChatId(),
+        role: ChatRole.Assistant,
+        type: ChatType.Document,
+        content: '',
+        documents: [] as API.Document[] | undefined,
+      }
+
+      if (appendAtTail && chat.list.length === 0) {
+        chat.list.push(userMessage)
+        chat.list.push(assistantMessage)
+      } else if (appendAtTail) {
+        chat.list.push(userMessage)
+        chat.list.push(assistantMessage)
+        scrollToBottom()
+      } else {
+        const insertionPoint =
+          typeof insertIndex === 'number' && insertIndex >= 0
+            ? insertIndex
+            : chat.list.length
+        chat.list.splice(insertionPoint, 0, userMessage, assistantMessage)
+      }
+
+      const target = assistantMessage
+
+      await sendChat(target, message, {
+        userItem: userMessage,
+        replaceMessageId,
+      })
+      setPendingAttachments([])
+      setPendingFiles([])
     },
-    [chat, sendChat, pendingAttachments, pendingFiles, id, sessionDefaults],
+    [
+      chat,
+      sendChat,
+      pendingAttachments,
+      pendingFiles,
+      id,
+      sessionDefaults,
+      editingContext,
+      openCitationsPanel,
+      setDocuments,
+    ],
   )
+
+  const handleRetryUserMessage = useCallback(
+    (item: API.ChatItem, _index: number) => {
+      if (!item.message_id) {
+        message.warning('消息尚未保存，暂无法编辑')
+        return
+      }
+      const text = item.content || ''
+      setComposerValue(text)
+      setComposerFocusKey((key) => key + 1)
+      setEditingContext({ messageId: item.message_id })
+    },
+    [],
+  )
+
+  const handleResendUserMessage = useCallback(
+    async (item: API.ChatItem, _index: number) => {
+      const text = item.content || ''
+      if (!text) return
+      if (!item.message_id) {
+        message.warning('消息尚未保存，暂无法重发')
+        return
+      }
+      await send(text, { replaceMessageId: item.message_id })
+      setComposerValue('')
+    },
+    [send],
+  )
+  const editingInfo = useMemo(() => {
+    if (!editingContext) return null
+    const idx = list.findIndex(
+      (item) => item.message_id === editingContext.messageId,
+    )
+    if (idx === -1) return null
+    return {
+      index: idx,
+      snippet: list[idx]?.content ?? '',
+    }
+  }, [editingContext, list])
+
+  const cancelEditing = useCallback(() => {
+    setEditingContext(null)
+    setComposerValue('')
+  }, [])
   useMount(async () => {
     if (ctx?.data.message) {
       send(ctx.data.message)
@@ -596,7 +872,7 @@ export default function Index() {
           curr.top > prev.top ? curr : prev,
         )
 
-        setCurrentChatItem(current.item)
+        openCitationsPanel(current.item)
       }
     }
 
@@ -674,16 +950,35 @@ export default function Index() {
       sender={
         <>
           {documents.length > 0 && <Source list={documents} />}
+          {editingInfo ? (
+            <div className={styles['chat-page__editing-tip']}>
+              <div className={styles['chat-page__editing-text']}>
+                正在编辑历史消息
+                {editingInfo.snippet ? (
+                  <span className={styles['chat-page__editing-snippet']}>
+                    {editingInfo.snippet}
+                  </span>
+                ) : null}
+              </div>
+              <Button type="link" size="small" onClick={cancelEditing}>
+                取消编辑
+              </Button>
+            </div>
+          ) : null}
           <ComSender
             loading={loading}
             sessionId={id}
             onSend={send}
-            onContract={() => setCurrentChatItem(null)}
+            onAbort={abortChat}
+            onContract={() => openCitationsPanel(null)}
             enableSessionKnowledgeBase={usingSessionKb}
             knowledgeControl={knowledgeControl}
             pendingAttachments={pendingAttachments}
             onRemovePendingAttachment={handleRemovePendingAttachment}
             onFileSelected={handleFileSelected}
+            value={composerValue}
+            onValueChange={setComposerValue}
+            focusKey={composerFocusKey}
           />
         </>
       }
@@ -712,8 +1007,10 @@ export default function Index() {
         <ChatMessage
           list={list}
           onSend={send}
-          onOpenCiations={setCurrentChatItem}
+          onOpenCiations={openCitationsPanel}
           onRefrence={setRead}
+          onRetryUserMessage={handleRetryUserMessage}
+          onResendUserMessage={handleResendUserMessage}
         />
 
         <Drawer
@@ -723,7 +1020,14 @@ export default function Index() {
           open={!!read}
           destroyOnClose
         >
-          <Markdown value={read?.content_with_weight ?? ''} />
+          <Markdown
+            value={
+              read?.source_text ||
+              read?.content_with_weight ||
+              read?.snippet ||
+              ''
+            }
+          />
         </Drawer>
       </div>
     </ComPageLayout>
