@@ -18,6 +18,8 @@ services: # 定义一系列的服务（容器）
       SM_MINERU_MODE: http
       SM_MINERU_ENDPOINT: http://mineru:8001
       SM_GROBID_ENDPOINT: http://grobid:8070
+      SM_RERANKER_ENDPOINT: http://reranker:8002  # 精排服务端点
+      PYTHONUNBUFFERED: 1
     extra_hosts: # 添加额外的主机名到IP地址的映射，类似于/etc/hosts文件
       - "host.docker.internal:host-gateway" # 允许容器连接到宿主机的特殊地址
     env_file: # 从文件加载环境变量
@@ -28,6 +30,7 @@ services: # 定义一系列的服务（容器）
       - ./app:/app # 挂载本地的 app 目录，实现代码热更新
       - D:/Anaconda/envs/llm-dev/nltk_data:/usr/local/nltk_data # 挂载本地NLTK数据目录到容器中
       - ./storage_root:/app/service/core/storage
+      - models_data:/models  # 共享模型目录（与reranker服务共享）
     command: ["uvicorn", "app_main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"] # 容器启动时执行的命令，并开启热重载
     restart: unless-stopped # 定义容器的重启策略，除非手动停止，否则容器会自动重启
     depends_on: # 定义服务间的依赖关系，确保依赖的服务先启动
@@ -36,6 +39,7 @@ services: # 定义一系列的服务（容器）
       - redis # 依赖Redis服务
       - mineru # 依赖MinerU解析服务
       - grobid # 依赖Grobid元数据服务
+      - reranker # 依赖精排服务
     networks: # 指定服务连接的网络
       - scholarmind_net # 连接到名为scholarmind_net的自定义网络
 
@@ -143,6 +147,40 @@ services: # 定义一系列的服务（容器）
     networks:
       - scholarmind_net
 
+  reranker: # BGE Reranker 精排服务（GPU 加速）
+    container_name: scholarmind_reranker
+    build:
+      context: ./services/reranker
+      dockerfile: Dockerfile.gpu  # 使用 GPU 版本的 Dockerfile
+    hostname: reranker
+    environment:
+      - PYTHONUNBUFFERED=1
+      - NVIDIA_VISIBLE_DEVICES=all  # 让容器看到所有 GPU
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}  # 默认使用第一块 GPU
+      - RERANKER_MODEL_PATH=/models/bge-reranker-large
+      - RERANKER_USE_QUANTIZATION=true  # 启用 INT8 量化（8GB 显存推荐）
+    ports:
+      - "8002:8002"  # 暴露端口供调试（可选）
+    volumes:
+      - models_data:/models  # 使用命名volume共享模型目录
+    # GPU 支持：使用 NVIDIA Container Toolkit
+    # 前提：宿主机已安装 NVIDIA 驱动 + NVIDIA Container Toolkit
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1  # 使用1个GPU，或设置为all使用所有GPU
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8002/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    networks:
+      - scholarmind_net
+
   # 可选：DeepSeek-OCR 服务占位（默认不启用）
   deepseek_ocr:
     image: nginx:alpine
@@ -171,6 +209,8 @@ volumes: # 定义全局的数据卷
   pg_data: # PostgreSQL数据卷
     driver: local # 使用本地驱动
   redis_data: # Redis数据卷
+    driver: local # 使用本地驱动
+  models_data: # 模型数据卷（共享给API和reranker服务）
     driver: local # 使用本地驱动
 
 networks: # 定义全局的网络

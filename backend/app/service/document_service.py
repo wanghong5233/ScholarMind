@@ -115,11 +115,15 @@ def delete_document(db: Session, doc_id: int, user_id: int, kb_id: int) -> Docum
     
     # 先删除本地文件（如果存在），失败容错，不阻塞整体删除
     try:
-        logger.info(f"Attempting local file removal for doc_id={doc_to_delete.id}: path={doc_to_delete.local_pdf_path}")
+        logger.info(
+            "Attempting local file removal for doc_id=%s: path=%s",
+            doc_to_delete.id,
+            doc_to_delete.local_pdf_path,
+        )
         if doc_to_delete.local_pdf_path and os.path.exists(doc_to_delete.local_pdf_path):
             os.remove(doc_to_delete.local_pdf_path)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Failed to remove local file for doc_id=%s: %s", doc_to_delete.id, exc)
 
     # 3) 从向量数据库中删除相关数据
     logger.info(f"Start ES deletion phase for doc_id={doc_to_delete.id}, kb_id={kb_id}")
@@ -128,6 +132,7 @@ def delete_document(db: Session, doc_id: int, user_id: int, kb_id: int) -> Docum
         es_prefix = settings.ES_DEFAULT_INDEX.split('_')[0]
         target_indices = _resolve_es_targets(es, es_prefix)
         total_removed = 0
+        residual_indices: Dict[str, int] = {}
         for idx in sorted(target_indices):
             removed = _delete_chunks_from_index(
                 es_conn=es,
@@ -136,12 +141,26 @@ def delete_document(db: Session, doc_id: int, user_id: int, kb_id: int) -> Docum
                 doc_id=str(doc_to_delete.id),
             )
             total_removed += removed
+            residual = _count_chunks_in_index(
+                es_conn=es,
+                index_name=idx,
+                kb_id=str(kb_id),
+                doc_id=str(doc_to_delete.id),
+            )
+            if residual > 0:
+                residual_indices[idx] = residual
         logger.info(
             f"ES deletion summary for doc_id={doc_to_delete.id}, kb_id={kb_id}: "
             f"indices_checked={len(target_indices)}, chunks_removed={total_removed}"
         )
+        if residual_indices:
+            raise APIException(
+                f"Detected {sum(residual_indices.values())} residual chunks for doc_id={doc_to_delete.id}: "
+                f"{residual_indices}. Deletion aborted to avoid inconsistent state."
+            )
     except Exception as e:
         logger.exception(f"An error occurred during ES deletion for doc_id={doc_to_delete.id}. Error: {e}")
+        raise
 
     # 4) 返回被删除的文档对象
     db.delete(doc_to_delete)
@@ -246,6 +265,32 @@ def _delete_chunks_from_index(es_conn: ESConnection, index_name: str, kb_id: str
     if total_removed > 0:
         logger.info(f"Removed {total_removed} chunks from index '{index_name}' for doc_id={doc_id}.")
     return total_removed
+
+
+def _count_chunks_in_index(es_conn: ESConnection, index_name: str, kb_id: str, doc_id: str) -> int:
+    try:
+        body = {
+            "query": {
+                "bool": {
+                    "must": [
+                        {"term": {"kb_id": kb_id}},
+                        {"term": {"document_id": doc_id}},
+                    ]
+                }
+            }
+        }
+        res = es_conn.es.count(index=index_name, body=body)
+        return int(res.get("count", 0))
+    except NotFoundError:
+        return 0
+    except Exception as exc:
+        logger.warning(
+            "Failed to count residual chunks in index '%s' for doc_id=%s: %s",
+            index_name,
+            doc_id,
+            exc,
+        )
+        return 0
 
 
 def create_documents_bulk_for_kb(

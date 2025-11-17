@@ -64,7 +64,8 @@ class Settings(BaseSettings):
 
     # 组件选择
     SM_EMBEDDER_TYPE: Literal["local", "dashscope"] = "local"
-    SM_RERANKER_TYPE: Literal["local", "dashscope"] = "local"
+    SM_RERANKER_TYPE: Literal["local", "dashscope"] = "local"  # local=本地独立服务（HTTP调用），dashscope=云端API
+    SM_RERANKER_ENDPOINT: Optional[str] = None  # 本地精排服务 HTTP 端点（如 http://reranker:8002），SM_RERANKER_TYPE="local" 时使用
     SM_LLM_TYPE: Literal["local", "dashscope", "openai"] = "local"
 
     # RAG 策略与特性开关（T2.2）
@@ -74,10 +75,12 @@ class Settings(BaseSettings):
     SM_STREAMING_ENABLED: bool = True                                            # SSE 流式开关
     SM_DEFAULT_LANGUAGE: Literal["zh", "en"] = "zh"                           # 默认语言
     SM_AUTO_TRANSLATE_TO_EN: bool = True                                          # 中文查询是否自动翻译为英文以提升检索命中
-    SM_MULTI_QUERY_NUM: int = 4                                                  # Multi-Query 子查询数
+    SM_MULTI_QUERY_NUM: int = 5                                                  # Multi-Query 子查询数（含 original）
+    SM_MULTI_QUERY_MAX: int = 6                                                  # Multi-Query 上限（含 original）
     SM_HYDE_ENABLED: bool = True                                                 # 是否启用 HyDE
     SM_HYDE_MAX_TOKENS: int = 256                                                # HyDE 生成内容长度上限
     SM_HYDE_TEMPERATURE: float = 0.2                                             # HyDE 采样温度
+    SM_HYDE_WORD_LIMIT: int = 90                                                 # HyDE 最多输出多少词
     # SM_RECALL_SOURCES: str = "bm25,vector,colbert" # 参与召回的通道集合 临时关闭 colbert
     SM_RECALL_SOURCES: str = "bm25,vector"                                      # 参与召回的通道集合（临时关闭 colbert）
     SM_BM25_FIELDS: str = "text^1.0,title^4.0,abstract^2.5,keywords^3.0,figure_caption^2.0"
@@ -139,7 +142,9 @@ class Settings(BaseSettings):
     SM_GROBID_ENABLED: bool = True                                                # 是否启用 Grobid 元数据增强
 
     # RAG 超参数
-    SM_RAG_TOPK: int = 5
+    SM_RAG_TOPK_MIN: int = 4                                           # RAG 最少 chunk 数
+    SM_RAG_TOPK_MAX: int = 8                                           # RAG 最多 chunk 数
+    SM_RAG_TOPK: int = 6                                               # 默认 chunk 数
     SM_RETRIEVE_PAGE_SIZE: int = 5
     SM_MAX_TOKENS: int = 4096  # LLM 生成的最大 token 数，支持长回答
     SM_TEMPERATURE: float = 0.3
@@ -176,11 +181,10 @@ class Settings(BaseSettings):
 
     # 本地模型路径与设备
     LOCAL_EMBEDDER_PATH: str = "/models/bge-large-zh-v1.5"
-    LOCAL_RERANKER_PATH: str = "/models/bge-reranker-large"
     LOCAL_LLM_PATH: str = "/models/Qwen1.5-14B-Chat"
     SM_LOCAL_EMBEDDER_DEVICE: str = "cpu"
     SM_LOCAL_EMBEDDER_BATCH_SIZE: int = 32
-    SM_LOCAL_RERANKER_DEVICE: str = "cpu"
+    # 注意：LOCAL_RERANKER_PATH 已删除，精排服务现在是独立微服务，模型路径在 reranker 服务中配置
 
     # 其他
     RAGFLOW_BASE_URL: Optional[str] = None

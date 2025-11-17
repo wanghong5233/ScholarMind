@@ -106,6 +106,7 @@ class RAGService:
         """
         if top_k is None:
             top_k = settings.SM_RAG_TOPK
+        top_k = max(settings.SM_RAG_TOPK_MIN, min(settings.SM_RAG_TOPK_MAX, top_k))
         
         log.info(f"Starting RAG query: '{query[:50]}...'")
         
@@ -159,6 +160,7 @@ class RAGService:
         """
         if top_k is None:
             top_k = settings.SM_RAG_TOPK
+        top_k = max(settings.SM_RAG_TOPK_MIN, min(settings.SM_RAG_TOPK_MAX, top_k))
         
         log.info(f"Starting streaming RAG query: '{query[:50]}...'")
         

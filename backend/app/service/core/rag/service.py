@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import List, Dict, Any, Generator, Optional
+from typing import List, Dict, Any, Generator, Optional, Tuple
 from dataclasses import dataclass
 import json
 import re
@@ -38,6 +38,52 @@ class RAGService:
         self._last_history_debug: Dict[str, Any] | None = None
         self._last_history_summary: str | None = None
         self._last_variant_meta: Dict[str, Any] | None = None
+
+    # ------------------------------------------------------------------ #
+    # Debug helpers
+    # ------------------------------------------------------------------ #
+    def _sanitize_metadata(self, metadata: Dict[str, Any] | None) -> Dict[str, Any]:
+        if not metadata:
+            return {}
+        sanitized: Dict[str, Any] = {}
+        for key, value in metadata.items():
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                sanitized[key] = value
+            elif isinstance(value, (list, dict)):
+                sanitized[key] = value
+            else:
+                sanitized[key] = str(value)
+        return sanitized
+
+    def _serialize_chunk_preview(self, chunk: RetrievedChunk, limit: int = 400) -> Dict[str, Any]:
+        metadata = self._sanitize_metadata(chunk.metadata or {})
+        text_preview = (chunk.text or "")[:limit]
+        return {
+            "chunk_id": chunk.chunk_id,
+            "score": float(chunk.score or 0.0),
+            "document_id": metadata.get("document_id"),
+            "page": metadata.get("page"),
+            "source": chunk.source,
+            "element_type": metadata.get("element_type"),
+            "logical_type": metadata.get("logical_type"),
+            "text_preview": text_preview,
+            "metadata": metadata,
+        }
+
+    def _serialize_payload_preview(self, payload: Dict[str, Any], limit: int = 400) -> Dict[str, Any]:
+        metadata = self._sanitize_metadata(payload.get("metadata") or {})
+        text_preview = (payload.get("text") or "")[:limit]
+        return {
+            "chunk_id": payload.get("chunk_id"),
+            "score": float(payload.get("score") or 0.0),
+            "document_id": metadata.get("document_id"),
+            "page": metadata.get("page"),
+            "source": metadata.get("retrieval_source"),
+            "element_type": metadata.get("element_type"),
+            "logical_type": metadata.get("logical_type"),
+            "text_preview": text_preview,
+            "metadata": metadata,
+        }
 
     def retrieve(
         self,
@@ -129,6 +175,7 @@ class RAGService:
         total_candidates = 0
         index_stats: Dict[str, int] = defaultdict(int)
         indices_used: set[str] = set()
+        sample_limit = max(int(getattr(settings, "SM_DEBUG_PATH_SAMPLE_LIMIT", 5) or 5), 1)
 
         for plan in index_plan:
             plan_label = plan.get("label", "global") or "global"
@@ -184,6 +231,23 @@ class RAGService:
                     pass
 
         ordered_chunks, fused_scores, path_summary = self._rrf_fuse(path_hits)
+        path_samples: List[Dict[str, Any]] = []
+        for path_id, hits in path_hits.items():
+            prefix, source = path_id.split("::", 1) if "::" in path_id else (path_id, "")
+            if ":" in prefix:
+                label, query_tag = prefix.split(":", 1)
+            else:
+                label, query_tag = prefix, "original"
+            path_samples.append(
+                {
+                    "path_id": path_id,
+                    "label": label,
+                    "query_tag": query_tag,
+                    "source": source or None,
+                    "hit_count": len(hits),
+                    "hits": [self._serialize_chunk_preview(hit) for hit in hits[:sample_limit]],
+                }
+            )
         if not ordered_chunks:
             try:
                 self.logger.warning("RAG.retrieve[multi_stage] fusion produced 0 candidates")
@@ -199,11 +263,19 @@ class RAGService:
         except Exception:
             pass
 
+        # 两阶段排序：MMR 输出更多候选给精排，而不是直接输出 top_k
+        # 阶段1（粗排）：MMR 输出 SM_L2_RERANK_TOPK 个候选（默认20-30个）
+        rerank_top_k = max(
+            top_k,
+            int(getattr(settings, "SM_L2_RERANK_TOPK", 20) or 20)
+        )
         mmr_selected = self._apply_mmr(
             ordered_chunks,
             fused_scores,
-            top_k=top_k,
+            top_k=rerank_top_k,  # MMR 输出更多候选给精排
         )
+        mmr_preview = [self._serialize_chunk_preview(chunk) for chunk in mmr_selected[:sample_limit]]
+        rrf_details = [self._serialize_chunk_preview(chunk) for chunk in ordered_chunks[:sample_limit]]
 
         try:
             mmr_preview = [chunk.chunk_id for chunk in mmr_selected[: min(10, len(mmr_selected))]]
@@ -240,19 +312,12 @@ class RAGService:
             context_only = [c for c in augmented if c.chunk_id not in base_ids]
         else:
             context_only = []
+        context_preview = [self._serialize_chunk_preview(chunk) for chunk in context_only[:sample_limit]]
 
-        final_payloads = self._apply_metadata_stage(mmr_selected, fused_scores)
-
-        try:
-            metadata_preview = [item.get("chunk_id") for item in final_payloads[: min(10, len(final_payloads))]]
-            self.logger.debug(
-                "RAG.retrieve[multi_stage] metadata_stage_preview=%s context_added=%s",
-                metadata_preview,
-                len(context_only),
-            )
-        except Exception:
-            pass
-
+        # 阶段2（精排）：在 MMR 输出的候选上进行元数据处理，准备给精排
+        # 注意：精排会在外部（session_rt.py/debug_rt.py）进行，这里只准备候选
+        metadata_stage_chunks = self._apply_metadata_stage(mmr_selected, fused_scores)
+        
         # 追加上下文块（保持原序，降低权重）
         for ctx in context_only:
             ctx_payload = {
@@ -264,17 +329,38 @@ class RAGService:
             if "retrieval_source" not in ctx_payload["metadata"]:
                 ctx_payload["metadata"]["retrieval_source"] = ctx.source
             ctx_payload["metadata"].setdefault("is_context", True)
-            final_payloads.append(ctx_payload)
+            metadata_stage_chunks.append(ctx_payload)
 
-        final_payloads = self._apply_rl_stage(question=query, payloads=final_payloads)
+        # RL 阶段（如果启用）
+        metadata_stage_chunks = self._apply_rl_stage(question=query, payloads=metadata_stage_chunks)
+        
+        # 最终输出：返回所有 MMR 输出的候选供精排
+        # 注意：精排后的 top_k 选择会在 session_rt.py/debug_rt.py 中进行
+        # 这里不取 top_k，而是返回所有候选（rerank_top_k 个）给精排
+        final_payloads = metadata_stage_chunks  # 返回所有候选供精排
+        final_preview = [self._serialize_payload_preview(payload) for payload in final_payloads]
+
+        try:
+            metadata_preview = [item.get("chunk_id") for item in metadata_stage_chunks[: min(10, len(metadata_stage_chunks))]]
+            self.logger.debug(
+                "RAG.retrieve[multi_stage] metadata_stage_preview=%s context_added=%s mmr_output=%s final_output=%s",
+                metadata_preview,
+                len(context_only),
+                len(mmr_selected),
+                len(final_payloads),
+            )
+        except Exception:
+            pass
 
         try:
             self.logger.info(
-                "RAG.retrieve[multi_stage] kb=%s variants=%s paths=%s candidates=%s final=%s index_mode=%s",
+                "RAG.retrieve[multi_stage] kb=%s variants=%s paths=%s candidates=%s rrf=%s mmr=%s final=%s index_mode=%s",
                 kb_id,
                 len(variants),
                 len(path_hits),
                 total_candidates,
+                len(ordered_chunks),
+                len(mmr_selected),
                 len(final_payloads),
                 normalized_mode,
             )
@@ -305,7 +391,15 @@ class RAGService:
                 "variants": variants,
                 "path_stats": {pth: len(hits) for pth, hits in path_hits.items()},
                 "rrf_candidates": preview,
+                "rrf_details": rrf_details,
+                "rrf_candidates_count": len(ordered_chunks),  # RRF 融合后的实际候选数
+                "path_samples": path_samples,
+                "mmr_chunks": mmr_preview,
+                "mmr_output_count": len(mmr_selected),  # MMR 输出的候选数（给精排的）
+                "context_chunks": context_preview,
+                "final_chunks": final_preview,
                 "top_k": top_k,
+                "rerank_top_k": rerank_top_k,  # 精排候选数（MMR输出数）
                 "index_mode": normalized_mode,
                 "index_plan": index_plan,
                 "indices_used": sorted(indices_used),
@@ -350,6 +444,8 @@ class RAGService:
         ]
 
         mq_num = max(int(getattr(settings, "SM_MULTI_QUERY_NUM", 1) or 1), 1)
+        mq_cap = max(int(getattr(settings, "SM_MULTI_QUERY_MAX", mq_num) or mq_num), mq_num)
+        mq_num = min(mq_num, mq_cap)
         if mq_num > 1:
             rewrites = self._rewrite_queries(effective_query, mq_num - 1)
             for idx, text in enumerate(rewrites, start=1):
@@ -378,6 +474,9 @@ class RAGService:
                 continue
             seen.add(key)
             dedup.append(item)
+
+        if len(dedup) > mq_cap:
+            dedup = dedup[:mq_cap]
         self._last_variant_meta = {
             "original_query": original_query,
             "effective_query": effective_query,
@@ -389,42 +488,81 @@ class RAGService:
     def _rewrite_queries(self, query: str, extra: int) -> List[str]:
         if extra <= 0:
             return []
-        prompts = [
-            {
-                "role": "system",
-                "content": "You rewrite the question into diverse academic search intents. Output one query per line, no numbering.",
-            },
-            {
-                "role": "user",
-                "content": f"Rewrite the question into {extra} diverse, concise search queries.\nQuestion: {query}",
-            },
-        ]
-        try:
-            resp = self.llm.generate(prompts, temperature=0.2, max_tokens=128, stream=False) or ""
-        except Exception:
-            resp = ""
-        results: List[str] = []
-        for line in resp.splitlines():
-            stripped = line.strip(" -•\t").strip()
-            if stripped:
-                results.append(stripped)
-        return results[:extra]
-
-    def _generate_hyde_document(self, query: str, *, language: Optional[str] = None) -> str | None:
-        target_language = (language or settings.SM_DEFAULT_LANGUAGE or "zh").lower()
+        focuses = self._build_rewrite_focuses(query, extra)
+        keywords = self._extract_keywords(query, limit=6)
+        focus_text = "\n".join(
+            f"- {item['id']}: {item['instruction']}" for item in focuses
+        )
+        user_prompt = (
+            "Original research question:\n"
+            f"{query}\n\n"
+            "Craft a concise English search query for each focus below. "
+            "Each query must explicitly reference the same domain and, when possible, reuse the key terms. "
+            "Return a JSON array where every element is {\"focus\": \"id\", \"query\": \"...\"}.\n"
+            f"Key terms to preserve: {', '.join(keywords) if keywords else 'use the existing technical terms from the question.'}\n"
+            f"Focus list:\n{focus_text}"
+        )
         prompts = [
             {
                 "role": "system",
                 "content": (
-                    "Generate a concise hypothetical abstract that would likely answer the research question. The abstract should be factual-sounding, 4-6 sentences."
-                    if target_language == "en"
-                    else "请生成一段 4-6 句的假设性摘要，仿佛已有论文可完整回答该问题。保持学术语气，避免露骨虚构提示。"
+                    "You rewrite research questions into diverse academic search queries. "
+                    "Respect the provided focus per query, output JSON only, no explanations."
                 ),
             },
-            {
-                "role": "user",
-                "content": query,
-            },
+            {"role": "user", "content": user_prompt},
+        ]
+        json_payload: Optional[str]
+        try:
+            json_payload = self.llm.generate(prompts, temperature=0.1, max_tokens=256, stream=False)
+        except Exception:
+            json_payload = None
+
+        results: List[str] = []
+        if json_payload:
+            try:
+                parsed = json.loads(json_payload)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, list):
+                for item in parsed:
+                    if not isinstance(item, dict):
+                        continue
+                    text = str(item.get("query") or "").strip()
+                    if text:
+                        results.append(text)
+
+        if not results:
+            # Fallback to simple line-based parsing
+            simple_resp = json_payload or ""
+            for line in simple_resp.splitlines():
+                stripped = line.strip(" -•\t").strip()
+                if stripped:
+                    results.append(stripped)
+
+        return results[:extra]
+
+    def _generate_hyde_document(self, query: str, *, language: Optional[str] = None) -> str | None:
+        target_language = (language or settings.SM_DEFAULT_LANGUAGE or "zh").lower()
+        key_terms = self._extract_keywords(query, limit=5)
+        instruction_terms = ", ".join(key_terms) if key_terms else "the same domain terminology from the question"
+        word_limit = max(int(getattr(settings, "SM_HYDE_WORD_LIMIT", 90) or 90), 40)
+        system_prompt = (
+            "You write hypothetical abstracts for academic search."
+            if target_language == "en"
+            else "你是一名学术摘要助手，负责在相同领域内生成假设性摘要。"
+        )
+        user_prompt = (
+            f"Research question: {query}\n"
+            f"Key terms that MUST appear verbatim: {instruction_terms}\n"
+            "Write 3 sentences describing (1) the type of solution/framework, (2) the technical components, "
+            "and (3) the concrete problems or constraints it addresses. "
+            "Stay strictly within the domain implied by the key terms. "
+            f"Limit the response to about {word_limit} words."
+        )
+        prompts = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
         ]
         try:
             hyde = self.llm.generate(
@@ -435,8 +573,105 @@ class RAGService:
             )
         except Exception:
             hyde = None
-        hyde = (hyde or "").strip()
-        return hyde or None
+        hyde = self._sanitize_hyde_text(hyde or "", word_limit=word_limit)
+        if not hyde:
+            return None
+        if not self._validate_hyde_text(hyde, key_terms):
+            return None
+        return hyde
+
+    def _build_rewrite_focuses(self, query: str, extra: int) -> List[Dict[str, str]]:
+        templates = [
+            {
+                "id": "methodology",
+                "instruction": "Highlight the solution family, architecture, or algorithm class proposed to answer the question.",
+            },
+            {
+                "id": "components",
+                "instruction": "Emphasize the core technical components, such as specific models, encoders, or optimization techniques.",
+            },
+            {
+                "id": "problems",
+                "instruction": "Target the concrete challenges, constraints, or objectives the solution addresses.",
+            },
+            {
+                "id": "scenario",
+                "instruction": "Mention the application scenario, dataset, or environment (e.g., IoV, edge computing, DAG scheduling).",
+            },
+            {
+                "id": "outcomes",
+                "instruction": "Focus on the measurable outcomes or benefits such as latency reduction, reliability, or accuracy.",
+            },
+        ]
+        return templates[: max(0, min(extra, len(templates)))]
+
+    def _extract_keywords(self, text: str, limit: int = 6) -> List[str]:
+        if not text:
+            return []
+        stopwords = {
+            "what",
+            "which",
+            "kind",
+            "type",
+            "does",
+            "do",
+            "and",
+            "the",
+            "a",
+            "an",
+            "of",
+            "in",
+            "is",
+            "are",
+            "for",
+            "primarily",
+            "primary",
+            "address",
+            "addresses",
+            "problem",
+            "problems",
+            "solution",
+            "solutions",
+            "main",
+            "major",
+            "task",
+            "tasks",
+        }
+        tokens = re.findall(r"[A-Za-z][A-Za-z0-9\-]+", text)
+        keywords: List[str] = []
+        seen: set[str] = set()
+        for token in tokens:
+            norm = token.lower()
+            if len(norm) < 3:
+                continue
+            if norm in stopwords:
+                continue
+            if norm in seen:
+                continue
+            seen.add(norm)
+            keywords.append(token)
+            if len(keywords) >= limit:
+                break
+        return keywords
+
+    def _sanitize_hyde_text(self, text: str, *, word_limit: int) -> str:
+        cleaned = re.sub(r"\s+", " ", text or "").strip()
+        if not cleaned:
+            return ""
+        words = cleaned.split()
+        if len(words) > word_limit:
+            cleaned = " ".join(words[:word_limit])
+        return cleaned
+
+    def _validate_hyde_text(self, text: str, required_terms: List[str]) -> bool:
+        if not text:
+            return False
+        lowered = text.lower()
+        checks = required_terms[:3]
+        for term in checks:
+            if term and term.lower() not in lowered:
+                return False
+        return True
 
     def _contains_cjk(self, text: str) -> bool:
         return bool(re.search(r"[\u4e00-\u9fff]", text or ""))
@@ -878,24 +1113,75 @@ class RAGService:
 
     # --- citations helper ---
     def build_citations(self, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Aggregate chunks into citation objects.
-        Structure: {document_id, page, chunk_id, score, snippet, offsets}
-        """
+        """Aggregate chunks into citation objects with sufficient metadata for UI navigation."""
         citations: List[Dict[str, Any]] = []
         for c in chunks:
             md = c.get("metadata", {}) or {}
             text = (c.get("text") or c.get("content") or "").strip()
-            citations.append({
-                "document_id": md.get("document_id"),
-                "page": md.get("page"),
-                "chunk_id": c.get("chunk_id"),
-                "score": c.get("score"),
-                "snippet": text[:300],
-                "offsets": {
-                    "start": md.get("offset_start", 0),
-                    "end": md.get("offset_end", 0),
-                },
-            })
+            doc_id = md.get("document_id")
+            doc_name = (
+                md.get("document_title")
+                or md.get("title")
+                or md.get("document_name")
+                or (f"文档 {doc_id}" if doc_id else "未命名文档")
+            )
+            
+            # 构建 positions 字段：从 bbox_list 或 page_range 推导
+            positions = md.get("positions")
+            if not positions:
+                bbox_list = md.get("bbox_list")
+                page = md.get("page")
+                page_range = md.get("page_range")
+                
+                if bbox_list and isinstance(bbox_list, list) and len(bbox_list) > 0:
+                    # 从 bbox_list 提取页内位置（使用第一个 bbox 的 y0 坐标）
+                    first_bbox = bbox_list[0]
+                    if isinstance(first_bbox, (list, tuple)) and len(first_bbox) >= 2:
+                        y_pos = int(first_bbox[1]) if isinstance(first_bbox[1], (int, float)) else 0
+                        if page is not None:
+                            positions = [[int(page), y_pos]]
+                        elif page_range and len(page_range) > 0:
+                            positions = [[int(page_range[0]), y_pos]]
+                elif page_range and isinstance(page_range, list) and len(page_range) > 0:
+                    # 使用 page_range 构建 positions
+                    positions = [[int(p)] for p in page_range if isinstance(p, (int, float))]
+                elif page is not None:
+                    # 只有 page，没有具体位置
+                    positions = [[int(page)]]
+                else:
+                    positions = []
+            
+            citations.append(
+                {
+                    "id": c.get("chunk_id") or md.get("chunk_id") or md.get("id"),
+                    "document_id": doc_id,
+                    "document_name": doc_name,
+                    "document_title": md.get("document_title"),
+                    "doi": md.get("doi"),
+                    "knowledge_base_id": md.get("knowledge_base_id") or md.get("kb_id"),
+                    "page": md.get("page"),
+                    "chunk_id": c.get("chunk_id"),
+                    "score": c.get("score"),
+                    "snippet": text[:300],
+                    "source_text": text,
+                    "positions": positions,
+                    "page_range": md.get("page_range"),
+                    "element_type": md.get("element_type") or md.get("type"),
+                    "logical_type": md.get("logical_type"),
+                    "structure_title": md.get("structure_title"),
+                    "structure_path": md.get("structure_path"),
+                    "structure_chunk_index": md.get("structure_chunk_index"),
+                    "structure_chunk_total": md.get("structure_chunk_total"),
+                    "bbox_list": md.get("bbox_list"),
+                    "offsets": {
+                        "start": md.get("offset_start", 0),
+                        "end": md.get("offset_end", 0),
+                    },
+                    "alignment_status": md.get("alignment_status"),
+                    "source": md.get("source"),
+                    "parser_engine": md.get("parser_engine"),
+                }
+            )
         return citations
 
     # --- compare documents helper ---

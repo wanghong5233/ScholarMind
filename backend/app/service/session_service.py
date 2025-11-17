@@ -5,6 +5,8 @@ from models.message import Message
 from models.knowledgebase import KnowledgeBase
 from service import knowledgebase_service
 from utils.get_logger import logger
+from service.core.rag.utils.es_conn import ESConnection
+from elasticsearch import NotFoundError
 
 
 class SessionService:
@@ -71,6 +73,8 @@ class SessionService:
         self.db.delete(session_obj)
         self.db.commit()
 
+        self._purge_session_indices(session_id=session_id)
+
         kb_deleted = False
         if kb_id and kb_is_ephemeral:
             try:
@@ -104,6 +108,27 @@ class SessionService:
             "kb_deleted": kb_deleted,
             "kb_id": kb_id if kb_deleted else None,
         }
+
+    def _purge_session_indices(self, *, session_id: str) -> None:
+        """Remove all Elasticsearch indices tied to this session."""
+        index_pattern = f"sm_sess_{session_id}*"
+        try:
+            es = ESConnection()
+            es.es.indices.delete(index=index_pattern, ignore_unavailable=True)
+            logger.info(
+                "Removed session ES indices '%s' for session_id=%s",
+                index_pattern,
+                session_id,
+            )
+        except NotFoundError:
+            logger.info("Session index '%s' already missing.", index_pattern)
+        except Exception as exc:
+            logger.error(
+                "Failed to remove session indices '%s' for session_id=%s: %s",
+                index_pattern,
+                session_id,
+                exc,
+            )
 
     def update_defaults_json(self, *, session_id: str, defaults_json: Optional[str]) -> None:
         s = self.get_session_by_id(session_id=session_id)

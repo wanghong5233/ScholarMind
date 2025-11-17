@@ -8,7 +8,7 @@ from exceptions.base import ModelNotFoundError
 # 导入具体的实现类
 from service.core.implementations.embedders.local_bge import LocalBgeEmbedder
 from service.core.implementations.embedders.dashscope import DashScopeEmbedder
-from service.core.implementations.rerankers.local_bge import LocalBgeReranker
+from service.core.implementations.rerankers.http_reranker import HttpReranker
 from service.core.implementations.rerankers.dashscope import DashScopeReranker
 from service.core.implementations.llms.local import LocalLlm
 from service.core.implementations.llms.dashscope import DashScopeLlm
@@ -38,11 +38,17 @@ def get_embedder() -> BaseEmbedder:
 def get_reranker() -> BaseReranker:
     """
     组件工厂函数：根据配置返回一个 BaseReranker 的单例。
+    
+    支持两种模式（微服务架构）：
+    - "local": 通过 HTTP API 调用本地部署的独立精排服务（默认，解耦部署）
+    - "dashscope": 使用阿里云 DashScope API（云端服务）
+    
+    注意：在微服务架构中，"local" 表示本地独立服务，通过 HTTP 调用，不是耦合部署。
     """
     global _reranker_instance
     if _reranker_instance is None:
         if settings.SM_RERANKER_TYPE == "local":
-            _reranker_instance = LocalBgeReranker()
+            _reranker_instance = HttpReranker()  # local = 本地独立服务（HTTP调用）
         elif settings.SM_RERANKER_TYPE == "dashscope":
             _reranker_instance = DashScopeReranker()
         else:

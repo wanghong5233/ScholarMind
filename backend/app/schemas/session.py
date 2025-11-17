@@ -1,6 +1,7 @@
 from typing import Optional, Literal
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any
+from core.config import settings
 
 
 class SessionDefaults(BaseModel):
@@ -8,7 +9,7 @@ class SessionDefaults(BaseModel):
 
     retrievalStrategy: Literal["multi_stage"] = Field("multi_stage")
     rerankerStrategy: Literal["none", "supervised", "rl"] = Field("none")
-    topK: int = Field(5, ge=1, le=50)
+    topK: int = Field(default_factory=lambda: getattr(settings, "SM_RAG_TOPK", 6), ge=1, le=50)
     language: Literal["zh", "en"] = Field("zh")
     streaming: bool = Field(True)
     useSessionKnowledgeBase: bool = Field(

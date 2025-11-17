@@ -21,7 +21,7 @@ import os
 import json
 
 import copy
-from elasticsearch import Elasticsearch
+from elasticsearch import Elasticsearch, NotFoundError
 from elasticsearch_dsl import UpdateByQuery, Q, Search, Index
 from service.core.rag.utils import singleton
 from service.core.api.utils.file_utils import get_project_base_directory
@@ -458,6 +458,12 @@ class ESConnection():
                     raise Exception("Es Timeout.")
                 logger.debug(f"ESConnection.search {str(indexNames)} res: " + str(res))
                 return res
+            except NotFoundError:
+                logger.warning(
+                    "ESConnection.search %s index not found, returning empty result.",
+                    str(indexNames),
+                )
+                return {"hits": {"hits": []}, "timed_out": False}
             except Exception as e:
                 logger.exception(f"ESConnection.search {str(indexNames)} query: " + str(q))
                 if str(e).find("Timeout") > 0:

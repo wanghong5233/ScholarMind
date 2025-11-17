@@ -73,19 +73,33 @@ def _produce_chunk(
     end: int,
     override_metadata: Dict[str, Any] | None = None,
 ) -> ParsedBlock:
+    """
+    生成 chunk 时，完整保留所有结构化元数据，确保数据管道完整性。
+    
+    保留的关键元数据：
+    - 结构信息: structure_path, structure_title, logical_type, element_type
+    - 位置信息: page_range, page, bbox_list
+    - 文档信息: document_title, document_name, doi
+    - 分块信息: structure_chunk_index, structure_chunk_total, offset_start, offset_end
+    - 其他: source, alignment_status, parser_engine, 等等
+    """
     md = dict(block.metadata or {})
     if override_metadata:
         md.update(override_metadata)
 
+    # 页码范围处理
     pages = _normalize_page_range(md.get("page_range"), md.get("page"))
     if pages:
         md["page_range"] = pages
         md.setdefault("page", pages[0])
 
-    md["structure_chunk_index"] = index
+    # 分块索引信息
+    md["structure_chunk_index"] = index - 1  # 从 0 开始，方便前端显示
     md["structure_chunk_total"] = total
     md["offset_start"] = start
     md["offset_end"] = end
+    
+    # 结构化元数据（确保存在）
     md.setdefault("logical_type", (block.metadata or {}).get("logical_type"))
     md.setdefault("element_type", md.get("logical_type") or (block.metadata or {}).get("element_type"))
     md.setdefault("structure_path", (block.metadata or {}).get("structure_path"))
@@ -93,6 +107,18 @@ def _produce_chunk(
         md.setdefault("structure_title", block.metadata.get("structure_title"))
     if block.metadata.get("title"):
         md.setdefault("title", block.metadata.get("title"))
+    
+    # 位置信息（bbox_list）- 关键！用于前端精确定位
+    if block.metadata.get("bbox_list"):
+        md.setdefault("bbox_list", block.metadata.get("bbox_list"))
+    
+    # 对齐状态和来源信息
+    if block.metadata.get("alignment_status"):
+        md.setdefault("alignment_status", block.metadata.get("alignment_status"))
+    if block.metadata.get("source"):
+        md.setdefault("source", block.metadata.get("source"))
+    if block.metadata.get("parser_engine"):
+        md.setdefault("parser_engine", block.metadata.get("parser_engine"))
 
     return ParsedBlock(text=text, metadata=md)
 

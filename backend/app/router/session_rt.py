@@ -36,6 +36,17 @@ from utils.quota import quota
 from utils.rate_limiter import rate_limiter
 
 router = APIRouter()
+
+
+def _normalize_top_k(value: Optional[int]) -> int:
+    min_k = max(1, getattr(settings, "SM_RAG_TOPK_MIN", 1))
+    max_k = max(min_k, getattr(settings, "SM_RAG_TOPK_MAX", min_k))
+    default_k = getattr(settings, "SM_RAG_TOPK", min_k)
+    try:
+        normalized = int(value) if value is not None else default_k
+    except (TypeError, ValueError):
+        normalized = default_k
+    return max(min_k, min(max_k, normalized))
 @router.get("/{session_id}/messages", summary="分页获取会话完整历史")
 def list_messages(
     session_id: str,
@@ -383,7 +394,7 @@ def upload_for_context(
 def retrieve_by_session(
     session_id: str,
     q: str = Query(..., description="查询文本"),
-    top_k: int = Query(5, ge=1, le=50),
+top_k: int = Query(settings.SM_RAG_TOPK, ge=1, le=50),
     focus_doc_ids: Optional[str] = Query(None, description="以逗号分隔的 document_id 列表"),
     use_session_index: bool = Query(False, description="是否使用会话级临时索引"),
     index_mode: Optional[str] = Query(None, description="索引检索模式: auto/session_only/global_only/hybrid"),
@@ -480,6 +491,23 @@ def ask(
     focus_ids = payload.get("focusDocIds") if isinstance(payload.get("focusDocIds"), list) else None
     raw_index_mode = payload.get("indexMode") if isinstance(payload.get("indexMode"), str) else None
     index_mode = raw_index_mode or "auto"
+    replace_from_message_id = payload.get("replaceFromMessageId")
+    replace_from_message = None
+    if replace_from_message_id:
+        try:
+            replace_uuid = uuid.UUID(str(replace_from_message_id))
+        except ValueError:
+            raise HTTPException(status_code=400, detail="replaceFromMessageId 无效")
+        replace_from_message = (
+            db.query(Message)
+            .filter(
+                Message.session_id == session_id,
+                Message.message_id == replace_uuid,
+            )
+            .first()
+        )
+        if not replace_from_message:
+            raise HTTPException(status_code=404, detail="待替换的历史消息不存在或已被删除")
 
     # basic rate limit: per (user, session) 60 req/min
     bucket = f"ask:{current_user.id}:{session_id}"
@@ -513,14 +541,19 @@ def ask(
             defaults_model = SessionDefaults()
 
     if defaults_raw:
-        if top_k is None and isinstance(defaults_raw.get("topK"), int):
-            top_k = defaults_raw.get("topK")
+        # 优先级：payload > 全局配置 > 会话配置
+        # 统一使用全局配置 SM_RAG_TOPK，除非用户在前端显式传递了 topK
+        # 如果 payload 没有传递 topK，忽略会话配置中的 topK，直接使用全局配置
+        if top_k is None:
+            # 不再使用会话配置中的 topK，直接使用全局配置
+            # 这样可以避免旧会话配置覆盖全局配置
+            top_k = None  # 让 _normalize_top_k 使用全局配置
         if temperature is None and isinstance(defaults_raw.get("temperature"), (int, float)):
             temperature = defaults_raw.get("temperature")
         if max_tokens is None and isinstance(defaults_raw.get("maxTokens"), int):
             max_tokens = defaults_raw.get("maxTokens")
 
-    top_k = top_k if isinstance(top_k, int) and 1 <= top_k <= 50 else settings.SM_RAG_TOPK
+    top_k = _normalize_top_k(top_k)
     temperature = temperature if isinstance(temperature, (int, float)) else settings.SM_TEMPERATURE
     max_tokens = max_tokens if isinstance(max_tokens, int) else settings.SM_MAX_TOKENS
 
@@ -606,10 +639,12 @@ def ask(
         latest_debug: dict[str, Any] = {}
         for label, kb_id_value in retrieval_plan:
             mode_override = "session_only" if label == "session" else "global_only"
+            # 注意：rag.retrieve 现在返回 MMR 输出的所有候选（SM_L2_RERANK_TOPK 个），而不是 top_k 个
+            # 这里传入 top_k 只是为了日志记录，实际返回的是所有 MMR 候选供精排
             subset = rag.retrieve(
                 query=question,
                 kb_id=kb_id_value,
-                top_k=top_k,
+                top_k=top_k,  # 这个参数用于日志，实际返回的是 MMR 输出的所有候选
                 focus_doc_ids=focus_ids,
                 boost_doc_ids=boost_ids,
                 session_index=session_index_name if label == "session" else None,
@@ -623,7 +658,19 @@ def ask(
             debug_snapshot = rag.get_last_retrieval_debug() or {}
             sources_debug[label] = debug_snapshot
             latest_debug = debug_snapshot
-        merged = merge_chunks(all_candidates, top_k)
+        # 注意：rag.retrieve 返回的是 MMR 输出的所有候选（SM_L2_RERANK_TOPK 个），不是 top_k 个
+        # 如果只有一个知识库，rag.retrieve 已经去重了，不需要再次去重
+        # 如果有多个知识库，需要合并去重（因为不同知识库可能返回相同的 chunk）
+        if len(retrieval_plan) == 1:
+            # 单个知识库：rag.retrieve 已经去重，直接返回所有候选供精排
+            merged = all_candidates
+        else:
+            # 多个知识库：需要合并去重
+            rerank_top_k = max(
+                top_k,
+                int(getattr(settings, "SM_L2_RERANK_TOPK", 20) or 20)
+            )
+            merged = merge_chunks(all_candidates, rerank_top_k * 2)  # 保留足够多的候选供精排（避免去重后数量不足）
         index_descriptor = " | ".join(f"{label}:{kb_id}" for label, kb_id in retrieval_plan) or "disabled"
         return merged, latest_debug, sources_debug, index_descriptor
 
@@ -674,8 +721,7 @@ def ask(
                     reranker_stream = None
                 if reranker_stream and chunks0:
                     try:
-                        top_stream = int(getattr(settings, "SM_L2_RERANK_TOPK", len(chunks0)) or len(chunks0))
-                        stream_candidates = chunks0[:top_stream]
+                        # 精排所有 MMR 输出的候选（rag.retrieve 已经返回了 MMR 输出的候选）
                         stream_models = [
                             RagChunk(
                                 chunk_id=item.get("chunk_id", ""),
@@ -683,15 +729,18 @@ def ask(
                                 content=item.get("text", ""),
                                 metadata=item.get("metadata", {}),
                             )
-                            for item in stream_candidates
+                            for item in chunks0
                         ]
+                        logger.info(f"[RERANK_START_STREAM] query='{question[:60]}...' chunks_count={len(stream_models)} top_k={top_k}")
                         reranked_stream = asyncio.run(reranker_stream.rerank(question, stream_models))  # type: ignore[arg-type]
                         chunk_stream_map = {item.get("chunk_id"): item for item in chunks0}
                         ordered_stream = [chunk_stream_map.get(model.chunk_id) for model in reranked_stream if model.chunk_id in chunk_stream_map]
                         remaining_stream = [item for item in chunks0 if item.get("chunk_id") not in {model.chunk_id for model in reranked_stream}]
-                        chunks0 = [item for item in ordered_stream if item is not None] + remaining_stream
+                        # 精排后取 top_k
+                        chunks0 = ([item for item in ordered_stream if item is not None] + remaining_stream)[:top_k]
+                        logger.info(f"[RERANK_COMPLETE_STREAM] reranked_count={len(reranked_stream)} final_chunks={len(chunks0)}")
                     except Exception as rerank_exc:
-                        logger.warning(f"Cross-encoder rerank failed (stream): {rerank_exc}")
+                        logger.warning(f"[RERANK_FAILED_STREAM] Cross-encoder rerank failed: {rerank_exc}", exc_info=True)
                 import json as _json
                 progress_payload = {
                     "stage": "retrieved",
@@ -777,7 +826,7 @@ def ask(
                         _SS(db).update_rolling_summary(session_id=session_id, rolling_summary=_summary)
                 except Exception:
                     pass
-                tail = _json.dumps({"citations": citations_tail, "usage": usage_tail, "debug": debug_tail, "variant": variant}, ensure_ascii=False)
+                completion_payload = {"citations": citations_tail, "usage": usage_tail, "debug": debug_tail, "variant": variant}
                 # 持久化本轮问答（聚合后的答案）
                 try:
                     full_answer = "".join(answer_accum)
@@ -792,12 +841,18 @@ def ask(
                         "citations": citations_tail,
                         "retrieval": retrieval_debug,
                         "memory": memory_debug_raw,
+                        "knowledge_base_id": s.knowledge_base_id,
                     }
                     if retrieval_sources:
                         retrieval_data["retrieval_sources"] = retrieval_sources
                     if context_files:
                         retrieval_data["context_files"] = context_files
                     
+                    if replace_from_message:
+                        db.query(Message).filter(
+                            Message.session_id == session_id,
+                            Message.create_time >= replace_from_message.create_time,
+                        ).delete(synchronize_session=False)
                     msg = Message(
                         session_id=session_id,
                         user_question=question,
@@ -807,6 +862,7 @@ def ask(
                     db.add(msg)
                     db.commit()
                     logger.info(f"[STREAM_SAVE_OK] session={session_id} question_len={len(question)} answer_len={len(full_answer)} msg_id={msg.message_id}")
+                    completion_payload["message_id"] = str(msg.message_id)
                     
                     # 清空 context_json 中的文件内容（避免影响后续消息）
                     if context_files:
@@ -820,6 +876,7 @@ def ask(
                 except Exception as save_err:
                     logger.error(f"[STREAM_SAVE_FAIL] session={session_id} error={save_err}")
                     db.rollback()
+                tail = _json.dumps(completion_payload, ensure_ascii=False)
                 yield f"event: completion\ndata: {tail}\n\n"
             except Exception as e:
                 try:
@@ -873,8 +930,7 @@ def ask(
         reranker = None
     if reranker and chunks:
         try:
-            top_for_rerank = int(getattr(settings, "SM_L2_RERANK_TOPK", len(chunks)) or len(chunks))
-            rerank_candidates = chunks[:top_for_rerank]
+            # 精排所有 MMR 输出的候选（rag.retrieve 已经返回了 MMR 输出的候选）
             chunk_models = [
                 RagChunk(
                     chunk_id=item.get("chunk_id", ""),
@@ -882,15 +938,18 @@ def ask(
                     content=item.get("text", ""),
                     metadata=item.get("metadata", {}),
                 )
-                for item in rerank_candidates
+                for item in chunks
             ]
+            logger.info(f"[RERANK_START] query='{question[:60]}...' chunks_count={len(chunk_models)} top_k={top_k}")
             reranked_models = asyncio.run(reranker.rerank(question, chunk_models))  # type: ignore[arg-type]
             chunk_map = {item.get("chunk_id"): item for item in chunks}
             ordered = [chunk_map.get(model.chunk_id) for model in reranked_models if model.chunk_id in chunk_map]
             remaining = [item for item in chunks if item.get("chunk_id") not in {model.chunk_id for model in reranked_models}]
-            chunks = [item for item in ordered if item is not None] + remaining
+            # 精排后取 top_k
+            chunks = ([item for item in ordered if item is not None] + remaining)[:top_k]
+            logger.info(f"[RERANK_COMPLETE] reranked_count={len(reranked_models)} final_chunks={len(chunks)}")
         except Exception as rerank_exc:
-            logger.warning(f"Cross-encoder rerank failed: {rerank_exc}")
+            logger.warning(f"[RERANK_FAILED] Cross-encoder rerank failed: {rerank_exc}", exc_info=True)
 
     try:
         # 如果有上下文文件且 RAG 关闭，将文件内容添加到 chunks
@@ -988,20 +1047,25 @@ def ask(
             "citations": citations,
             "retrieval": retrieval_debug,
             "memory": memory_debug_raw,
+            "knowledge_base_id": s.knowledge_base_id,
         }
         if retrieval_sources:
             retrieval_data_non_stream["retrieval_sources"] = retrieval_sources
         if context_files:
             retrieval_data_non_stream["context_files"] = context_files
         
-        db.add(
-            Message(
-                session_id=session_id,
-                user_question=question,
-                model_answer=content,
-                retrieval_content=json.dumps(retrieval_data_non_stream, ensure_ascii=False),
-            )
+        if replace_from_message:
+            db.query(Message).filter(
+                Message.session_id == session_id,
+                Message.create_time >= replace_from_message.create_time,
+            ).delete(synchronize_session=False)
+        msg = Message(
+            session_id=session_id,
+            user_question=question,
+            model_answer=content,
+            retrieval_content=json.dumps(retrieval_data_non_stream, ensure_ascii=False),
         )
+        db.add(msg)
         db.commit()
         
         # 清空 context_json 中的文件内容（避免影响后续消息）
@@ -1015,7 +1079,7 @@ def ask(
                 logger.warning(f"Failed to clear context_json: {clear_err}")
     except Exception:
         db.rollback()
-    return JSONResponse(content={"answer": content, "chunks": chunks, "citations": citations, "usage": usage, "debug": debug})
+    return JSONResponse(content={"answer": content, "chunks": chunks, "citations": citations, "usage": usage, "debug": debug, "message_id": str(msg.message_id)})
 
 
 @router.post("/{session_id}/compare", response_model=CompareResponse, summary="跨论文对比（生成 Markdown 表格 + citations）")
@@ -1044,7 +1108,7 @@ def compare_documents(
                 top_k = d.get("topK")
         except Exception:
             pass
-    top_k = top_k if isinstance(top_k, int) and 1 <= top_k <= 50 else settings.SM_RAG_TOPK
+    top_k = _normalize_top_k(top_k)
 
     rag = RAGService()
 

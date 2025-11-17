@@ -98,6 +98,29 @@ class ParseIndexHandler(BaseJobHandler):
                     log.info(f"[CHUNK_START] doc_id={doc_id} input_blocks={len(structured_blocks)}")
                     chunks = chunker.chunk(blocks=structured_blocks)
                     
+                    # 为每个 chunk 添加文档级别的元数据（标题、DOI等）
+                    for c in chunks:
+                        if not c.metadata:
+                            c.metadata = {}
+                        # 添加文档标题（用于引用显示）
+                        if doc.title:
+                            c.metadata.setdefault("document_title", doc.title)
+                        # 添加 DOI（用于引用追溯）
+                        if doc.doi:
+                            c.metadata.setdefault("doi", doc.doi)
+                        # 添加文档名称（fallback：原始文件名 or 标题）
+                        if "document_name" not in c.metadata:
+                            original_name = None
+                            doc_upload_name = getattr(doc, "document_name", None)
+                            if doc_upload_name:
+                                original_name = doc_upload_name
+                            elif doc.local_pdf_path:
+                                original_name = os.path.basename(doc.local_pdf_path)
+                            elif doc.title:
+                                original_name = doc.title
+                            if original_name:
+                                c.metadata["document_name"] = original_name
+                    
                     # 统计分块结果
                     total_chunks = len(chunks)
                     chunk_element_types = {}

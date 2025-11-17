@@ -45,6 +45,19 @@
         "type": "keyword",
         "store": true
       },
+      "document_title": {
+        "type": "text",
+        "analyzer": "standard",
+        "store": true
+      },
+      "document_name": {
+        "type": "keyword",
+        "store": true
+      },
+      "doi": {
+        "type": "keyword",
+        "store": true
+      },
       "table_json": {
         "type": "object",
         "enabled": false,

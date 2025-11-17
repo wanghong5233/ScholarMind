@@ -189,6 +189,20 @@ class ESVectoreStore(VectorStore):
             "section_type",
             "publication_year",
             "citation_count",
+            # 结构化元数据（用于前端精确定位和引用显示）
+            "logical_type",
+            "structure_path",
+            "structure_title",
+            "structure_chunk_index",
+            "structure_chunk_total",
+            "page_range",
+            "bbox_list",
+            "alignment_status",
+            "source",
+            "parser_engine",
+            "document_title",
+            "document_name",
+            "doi",
         ]
 
     def _parse_bm25_fields(self) -> List[str]:
@@ -240,6 +254,20 @@ class ESVectoreStore(VectorStore):
                 "publication_year": src.get("publication_year"),
                 "citation_count": src.get("citation_count"),
                 "retrieval_source": source,
+                # 结构化元数据（用于前端精确定位和引用显示）
+                "logical_type": src.get("logical_type"),
+                "structure_path": src.get("structure_path"),
+                "structure_title": src.get("structure_title"),
+                "structure_chunk_index": src.get("structure_chunk_index"),
+                "structure_chunk_total": src.get("structure_chunk_total"),
+                "page_range": src.get("page_range"),
+                "bbox_list": src.get("bbox_list"),
+                "alignment_status": src.get("alignment_status"),
+                "source": src.get("source"),
+                "parser_engine": src.get("parser_engine"),
+                "document_title": src.get("document_title"),
+                "document_name": src.get("document_name"),
+                "doi": src.get("doi"),
             }
             if index_name:
                 metadata["index_name"] = index_name
