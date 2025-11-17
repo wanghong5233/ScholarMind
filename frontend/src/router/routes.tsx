@@ -5,6 +5,7 @@ import Index from '@/pages/index'
 import Login from '@/pages/login'
 import Repository from '@/pages/repository'
 import ParseDebugPage from '@/pages/debug/parse'
+import RetrievalDebugPage from '@/pages/debug/retrieval'
 import RepositoryOnlineImport from '@/pages/repository/OnlineImport'
 import {
   Outlet,
@@ -42,6 +43,10 @@ export const routes: IRouteObject[] = [
   {
     path: '/debug/parse',
     Component: ParseDebugPage,
+  },
+  {
+    path: '/debug/retrieval',
+    Component: RetrievalDebugPage,
   },
 ]
 
