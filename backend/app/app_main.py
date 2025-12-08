@@ -11,6 +11,7 @@ from router import job_rt
 from router import session_rt
 from router import config_rt
 from router import debug_rt
+from router import internal_rt
 # from router import document_upload_rt
 import os
 import time
@@ -100,6 +101,7 @@ app.include_router(job_rt.router, prefix="/api/jobs", tags=["Jobs"])
 app.include_router(session_rt.router, prefix="/api/sessions", tags=["Sessions"])
 app.include_router(config_rt.router, prefix="/api/config", tags=["Config"])
 app.include_router(debug_rt.router, prefix="/api/debug", tags=["Debug"])
+app.include_router(internal_rt.router, prefix="/api", tags=["Internal Services"])
 
 
 if __name__=='__main__':

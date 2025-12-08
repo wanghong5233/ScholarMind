@@ -113,6 +113,8 @@ services: # 定义一系列的服务（容器）
       - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}  # 默认使用第一块 GPU
     ports:
       - "8001:8001"  # 暴露端口供调试（可选）
+    volumes:
+      - ./services/mineru:/app  # 代码热更新（开发环境）
     # GPU 支持：使用 NVIDIA Container Toolkit
     # 前提：宿主机已安装 NVIDIA 驱动 + NVIDIA Container Toolkit
     deploy:
@@ -181,6 +183,38 @@ services: # 定义一系列的服务（容器）
     networks:
       - scholarmind_net
 
+  latex_agent: # LaTeX 编辑 Agent 服务
+    container_name: scholarmind_latex_agent
+    build:
+      context: ./services/latex_agent
+      dockerfile: Dockerfile
+    hostname: latex_agent
+    env_file:
+      - .env  # 加载 .env 文件，包含 LLM_API_KEY 等配置
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/app
+      - PORT=8003
+      - RAG_SERVICE_URL=http://scholarmind_api:8000
+      - DATABASE_URL=postgresql://postgres:pg123456@scholarmind_db:5432/scholarmind
+    ports:
+      - "8003:8003"  # 暴露端口供调试
+    volumes:
+      - latex_workspaces:/app/workspaces  # 工作区文件存储
+      - ./services/latex_agent:/app  # 代码热更新（开发环境）
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8003", "--reload"]  # 开启热重载
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8003/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    depends_on:
+      - scholarmind_api  # 依赖主应用服务
+      - scholarmind_db   # 依赖数据库服务
+    networks:
+      - scholarmind_net
+
   # 可选：DeepSeek-OCR 服务占位（默认不启用）
   deepseek_ocr:
     image: nginx:alpine
@@ -211,6 +245,8 @@ volumes: # 定义全局的数据卷
   redis_data: # Redis数据卷
     driver: local # 使用本地驱动
   models_data: # 模型数据卷（共享给API和reranker服务）
+    driver: local # 使用本地驱动
+  latex_workspaces: # LaTeX 工作区数据卷
     driver: local # 使用本地驱动
 
 networks: # 定义全局的网络

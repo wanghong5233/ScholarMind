@@ -1,4 +1,3 @@
-import { router } from '@/router/routes'
 import { userActions, userState } from '@/store/user'
 import { ResponseError } from '../error'
 import { IRequestPlugin } from './plugin'
@@ -20,6 +19,11 @@ const blackList = [
   '/api/users/sts-token',
 ]
 
+// 延迟导入 router 以避免循环依赖
+function getRouter() {
+  return import('@/router/routes').then(module => module.router)
+}
+
 export const authPlugin: IRequestPlugin = {
   install(instance) {
     instance.interceptors.request.use((config) => {
@@ -32,7 +36,7 @@ export const authPlugin: IRequestPlugin = {
 
     instance.interceptors.response.use(
       (response) => response,
-      (error) => {
+      async (error) => {
         const response = error.response
         if (!response) return Promise.reject(error)
         const url = response.config.url as string
@@ -46,6 +50,7 @@ export const authPlugin: IRequestPlugin = {
           case 401:
             // token 失效
             userActions.setToken('')
+            const router = await getRouter()
             router.navigate('/login')
 
             message =
@@ -57,7 +62,8 @@ export const authPlugin: IRequestPlugin = {
           case 461:
             // 知识库中没有文档
             message = '请先上传文档'
-            router.navigate('/repository')
+            const router461 = await getRouter()
+            router461.navigate('/repository')
 
             return Promise.reject(new ResponseError(message, response))
           default:

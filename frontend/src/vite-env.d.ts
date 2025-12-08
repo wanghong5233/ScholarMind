@@ -6,3 +6,14 @@ interface Window {
   $showLoading: (options?: { title?: string }) => void
   $hideLoading: () => void
 }
+
+interface ImportMetaEnv {
+  readonly VITE_LATEX_AGENT_BASE?: string
+  readonly VITE_LATEX_DEFAULT_USER_ID?: string
+}
+
+interface ImportMeta {
+  readonly env: ImportMetaEnv
+}
+
+declare module '@monaco-editor/react'

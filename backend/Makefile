@@ -13,13 +13,25 @@ help:
 	@echo "  build     - 仅构建或重新构建服务的镜像"
 	@echo "  logs      - 实时查看所有服务的日志输出"
 	@echo "  logs-api  - (推荐) 仅实时查看后端API服务的日志"
+	@echo "  logs-agent - 实时查看 LaTeX Agent 服务日志"
 	@echo "  logs-mineru - 实时查看 MinerU 服务日志"
 	@echo "  ps        - 查看当前服务的容器状态"
 	@echo ""
 	@echo "调试命令:"
 	@echo "  shell     - 进入后端服务 (backend) 的容器"
+	@echo "  shell-agent - 进入 LaTeX Agent 服务容器"
 	@echo "  db-shell  - 进入 PostgreSQL 数据库容器并连接到 scholarmind_db"
 	@echo "  redis-cli - 进入 Redis 容器并启动 redis-cli"
+	@echo ""
+	@echo "LaTeX Agent 安全命令（只操作 latex_agent，不影响其它服务）:"
+	@echo "  restart-agent       - 仅重启 LaTeX Agent 容器（不重新构建镜像）"
+	@echo "  build-agent-image   - 在 services/latex_agent 目录下重新构建镜像"
+	@echo "  up-agent            - 仅启动/更新 LaTeX Agent 服务"
+	@echo "  rebuild-agent       - 先 build-agent-image 再 up-agent，安全重建 Agent"
+	@echo ""
+	@echo "磁盘清理命令（请在确认无重要数据后使用）:"
+	@echo "  docker-prune-soft   - 清理未使用的容器/网络/镜像缓存（相对安全）"
+	@echo "  docker-prune-hard   - 在 soft 基础上删除所有未被使用的镜像（回收更多空间）"
 	@echo ""
 	@echo "数据库命令:"
 	@echo "  migrate   - 在后端容器内执行数据库迁移 (alembic upgrade head)"
@@ -55,20 +67,30 @@ build:
 	docker compose build
 
 # 实时查看服务日志
+# --tail=0: 只显示新日志，不显示历史
 # -f: 持续跟踪日志输出
 .PHONY: logs
 logs:
-	docker compose logs -f
+	docker compose logs --tail=0 -f
 
 # (推荐) 仅实时查看后端API服务的日志
+# --tail=0: 只显示新日志，不显示历史
 .PHONY: logs-api
 logs-api:
-	docker compose logs -f scholarmind_api
+	docker compose logs scholarmind_api --tail=0 -f
+
+# 实时查看 LaTeX Agent 服务日志
+# 默认只从当前时刻开始看（不展示历史），方便区分“本轮”测试产生的日志
+# docker compose logs latex_agent --tail=0 -f
+.PHONY: logs-agent
+logs-agent:
+	docker compose logs latex_agent --tail=0 -f
 
 # 实时查看 MinerU 日志
+# --tail=0: 只显示新日志，不显示历史
 .PHONY: logs-mineru
 logs-mineru:
-	docker compose logs -f mineru
+	docker compose logs mineru --tail=0 -f
 
 # 查看服务容器状态
 .PHONY: ps
@@ -78,7 +100,12 @@ ps:
 # 进入后端服务的容器
 .PHONY: shell
 shell:
-	docker compose exec backend bash
+	docker compose exec scholarmind_api bash
+
+# 进入 LaTeX Agent 服务容器
+.PHONY: shell-agent
+shell-agent:
+	docker compose exec latex_agent bash
 
 # 进入PostgreSQL数据库容器
 # psql -U [用户名] -d [数据库名]
@@ -95,3 +122,55 @@ redis-cli:
 .PHONY: migrate
 migrate:
 	docker compose exec backend alembic upgrade head
+
+# =========================
+# LaTeX Agent 安全操作命令
+# =========================
+
+# 仅重启 LaTeX Agent 服务容器（快速重启）
+# 使用场景：只改了 Python 代码或配置，不需要重新构建镜像
+.PHONY: restart-agent
+restart-agent:
+	docker compose restart latex_agent
+
+# 强制重启 LaTeX Agent（彻底重启，清除 Python 缓存）
+# 使用场景：restart-agent 后代码未生效时使用
+.PHONY: force-restart-agent
+force-restart-agent:
+	docker compose stop latex_agent
+	docker compose start latex_agent
+
+# 仅重新构建 LaTeX Agent 镜像
+# 注意：这里使用 docker build + 指定路径，完全绕过 compose 的自动 build 计划
+# 优点：不会意外触发 mineru / reranker 等其它大镜像的构建
+.PHONY: build-agent-image
+build-agent-image:
+	cd services/latex_agent && docker build -t backend-latex_agent .
+
+# 仅启动/更新 LaTeX Agent 服务
+# 前提：镜像已经存在（例如刚刚执行过 build-agent-image）
+.PHONY: up-agent
+up-agent:
+	docker compose up -d latex_agent
+
+# 安全重建 LaTeX Agent：先构建镜像，再启动服务
+# 推荐习惯：需要重建 Agent 时只调用这个目标
+.PHONY: rebuild-agent
+rebuild-agent: build-agent-image up-agent
+
+# =========================
+# Docker 磁盘空间清理命令
+# =========================
+
+# 相对安全的清理：删除未使用的容器 / 网络 / 镜像缓存（不删除正在使用的镜像）
+.PHONY: docker-prune-soft
+docker-prune-soft:
+	docker system prune -f
+
+# 更激进的清理：在 soft 的基础上，删除所有“未被容器使用”的镜像
+# 使用前请确认没有特别难以重新构建的镜像
+.PHONY: docker-prune-hard
+docker-prune-hard:
+	docker system prune -f
+	docker image prune -a -f
+

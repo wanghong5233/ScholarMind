@@ -8,6 +8,7 @@ import { MouseEvent, useCallback, useMemo } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { useSnapshot } from 'valtio'
 import classNames from 'classnames'
+import iconHistory from '@/assets/layout/history.svg'
 import './nav.scss'
 
 export function Nav() {
@@ -74,7 +75,12 @@ export function Nav() {
     () => [
       {
         key: '1',
-        label: '历史对话',
+        label: (
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <img src={iconHistory} alt="历史对话" style={{ width: '16px', height: '16px' }} />
+            <span>历史对话</span>
+          </div>
+        ),
         children: (
           <div>
             {session.list?.map((item) => {

@@ -1,0 +1,392 @@
+.latex-editor-page {
+  height: calc(100vh - 64px);
+  padding: 16px;
+  background: #f5f7fb;
+  display: flex;
+  flex-direction: column;
+}
+
+.latex-editor {
+  flex: 1;
+  min-height: 0;
+  background: #fff;
+  border: 1px solid #e5e8ef;
+  border-radius: 12px;
+  overflow: hidden;
+  display: flex;
+
+  .ant-layout {
+  height: 100%;
+    min-height: 0;
+  }
+
+  &__sider {
+    background: #f8f9fb;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    border-right: 1px solid #e5e8ef;
+    height: 100%;
+    min-height: 0;
+  }
+
+  &__workspace {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  &__workspace-select {
+    flex: 1;
+  }
+  
+  &__knowledge {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+
+  &__knowledge-select {
+    flex: 1;
+  }
+
+  &__knowledge-manual {
+    margin-top: 8px;
+  }
+
+  &__file-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  &__tree-wrapper {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding-right: 8px;
+
+    .ant-tree {
+      background: transparent;
+
+      .ant-tree-switcher {
+        color: #8c8c8c;
+      }
+
+      .ant-tree-node-content-wrapper {
+        color: #333;
+      }
+    }
+  }
+
+  &__header {
+    background: #fafbff;
+    border-bottom: 1px solid #e5e8ef;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 24px;
+  }
+
+  &__header-info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: #333;
+  }
+
+  &__file-path {
+    max-width: 420px;
+  }
+
+  &__content {
+    background: #fff;
+    padding: 0;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  
+  &__editor-wrapper {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+  }
+
+  &__textarea {
+    width: 100%;
+    height: 100%;
+    min-height: 520px;
+    background: #fff;
+    color: #1f1f1f;
+    border: 1px solid #dfe3ea;
+    border-radius: 8px;
+    padding: 16px;
+    font-family: 'Fira Code', 'Consolas', Menlo, monospace;
+    font-size: 14px;
+    line-height: 1.5;
+    resize: none;
+  }
+
+  &__right {
+    background: #f9fafc;
+    border-left: 1px solid #e5e8ef;
+    display: flex;
+    flex-direction: column;
+    padding: 16px;
+    height: 100%;
+    min-height: 0;
+  }
+
+  &__tabs {
+    flex: 1;
+    min-height: 0;
+
+    .ant-tabs-content-holder {
+      height: calc(100% - 48px);
+    }
+
+    .ant-tabs-content {
+      height: 100%;
+    }
+  }
+
+  &__chat-panel {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
+
+  &__mode-switch {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+
+  &__quick-prompts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  &__chat-messages {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding-right: 8px;
+  }
+
+  &__chat-message {
+    padding: 12px;
+    border-radius: 8px;
+    background: #fff;
+    border: 1px solid #e5e8ef;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+
+    &--user {
+      align-self: flex-end;
+      background: #e6f1ff;
+      border-color: #b6d4fe;
+    }
+  }
+
+  &__chat-meta {
+    display: flex;
+    justify-content: space-between;
+    font-size: 12px;
+  }
+
+  &__chat-content {
+    white-space: pre-wrap;
+    font-size: 13px;
+  }
+
+  &__chat-feedback {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+  }
+
+  &__chat-input {
+    margin-top: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  &__chat-actions {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  &__agent-status {
+    margin-bottom: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  &__agent-status-tags {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  &__agent-plan {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  &__selection-preview {
+    background: #fff;
+    border: 1px solid #e5e8ef;
+    padding: 8px;
+    border-radius: 6px;
+    font-size: 12px;
+    color: #555;
+  }
+
+  &__history,
+  &__compile {
+    max-height: 100%;
+    overflow: auto;
+    padding-right: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  &__history-card {
+    border: 1px solid #e5e8ef;
+    border-radius: 8px;
+    padding: 12px;
+    background: #fff;
+  }
+
+  &__history-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 6px;
+  }
+
+  &__history-summary {
+    display: block;
+    margin-top: 4px;
+  }
+
+  &__compile-section {
+    margin-top: 8px;
+
+    ul {
+      padding-left: 18px;
+      margin: 4px 0;
+    }
+  }
+
+  &__compile-logs {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  &__compile-log-block {
+    border: 1px solid #e5e8ef;
+    border-radius: 6px;
+    padding: 8px;
+    background: #fff;
+  }
+
+  &__compile-log-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+    flex-wrap: wrap;
+  }
+
+  &__compile-log {
+    margin: 0;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+    font-size: 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    max-height: 240px;
+    overflow: auto;
+    background: #111827;
+    color: #f5f5f5;
+    padding: 8px;
+    border-radius: 4px;
+  }
+
+  &__compile-actions {
+    display: flex;
+    gap: 8px;
+    margin: 12px 0;
+  }
+
+  &__diff-toolbar {
+    display: flex;
+    justify-content: flex-end;
+    margin-bottom: 12px;
+  }
+
+  &__diff-wrapper {
+    display: flex;
+    gap: 16px;
+    height: 70vh;
+  }
+
+  &__diff-files {
+    width: 220px;
+    border: 1px solid #e5e8ef;
+    border-radius: 6px;
+    background: #fff;
+    overflow: auto;
+  }
+
+  &__diff-file {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 12px;
+    border-bottom: 1px solid #f3f4f7;
+    cursor: pointer;
+
+    &--active {
+      background: #e6f1ff;
+    }
+  }
+
+  &__diff-file-name {
+    flex: 1;
+    margin-right: 8px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  &__diff-view {
+    flex: 1;
+    min-width: 0;
+  }
+
+}
+

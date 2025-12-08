@@ -1,6 +1,7 @@
 import iconNewchat from '@/assets/layout/newchat.svg'
 import iconRepository from '@/assets/layout/repository.svg'
 import iconDebug from '@/assets/layout/debug.svg'
+import iconEdit from '@/assets/layout/edit.svg'
 import logo from '@/assets/logo.svg'
 import { deviceState } from '@/store/device'
 import { useLocation, useNavigate } from 'react-router-dom'
@@ -52,6 +53,17 @@ export function BaseLayout({ children }: { children?: React.ReactNode }) {
                 src={iconRepository}
               />
               <span className="base-layout__nav-header-title">知识库</span>
+            </div>
+
+          <div
+            className={`base-layout__nav-header ${isActive('/latex-editor') ? 'is-active' : ''}`}
+            onClick={() => (device.chatting ? null : navigate('/latex-editor'))}
+          >
+              <img
+                className="base-layout__nav-header-icon"
+                src={iconEdit}
+              />
+              <span className="base-layout__nav-header-title">LaTeX 编辑器</span>
             </div>
 
           <div

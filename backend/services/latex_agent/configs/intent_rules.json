@@ -1,0 +1,127 @@
+{
+  "version": "1.0",
+  "rules": [
+    {
+      "intent": "qa",
+      "description": "用户提出知识性/背景性问题，不涉及修改文件",
+      "keywords": [
+        "什么是",
+        "why",
+        "how",
+        "解释",
+        "meaning",
+        "区别",
+        "difference",
+        "??",
+        "？"
+      ],
+      "patterns": [
+        ".*是什么.*",
+        ".*什么意思.*",
+        ".*为什么.*",
+        ".*\\?$"
+      ],
+      "examples": [
+        "什么是图神经网络？",
+        "Why should we use reinforcement learning?"
+      ]
+    },
+    {
+      "intent": "suggest",
+      "description": "用户希望得到建议/检查/评价",
+      "keywords": [
+        "检查",
+        "review",
+        "有没有问题",
+        "是否合理",
+        "给建议",
+        "帮我看看",
+        "evaluate",
+        "analysis"
+      ],
+      "patterns": [
+        ".*检查.*",
+        ".*有没有.*问题.*",
+        ".*有没有.*建议.*"
+      ],
+      "examples": [
+        "帮我检查这段摘要有没有问题",
+        "请给出一些可以优化的建议"
+      ]
+    },
+    {
+      "intent": "edit",
+      "description": "用户明确要求修改/优化/重写，或提供了选区",
+      "keywords": [
+        "优化",
+        "改进",
+        "修改",
+        "润色",
+        "重写",
+        "rewrite",
+        "improve",
+        "refine",
+        "提升",
+        "调整",
+        "rewrite",
+        "polish"
+      ],
+      "patterns": [
+        ".*优化.*",
+        ".*修改.*",
+        ".*重写.*"
+      ],
+      "examples": [
+        "帮我优化这段摘要",
+        "请把下面的段落重写得更自然"
+      ]
+    },
+    {
+      "intent": "citation",
+      "description": "用户处理引用/参考文献",
+      "keywords": [
+        "引用",
+        "reference",
+        "cite",
+        "citation",
+        "bib",
+        "\\cite"
+      ],
+      "patterns": [
+        ".*引用.*",
+        ".*cite.*"
+      ],
+      "examples": [
+        "给这一段添加引用",
+        "帮我在这里插入 \\cite{}"
+      ]
+    },
+    {
+      "intent": "file_op",
+      "description": "用户希望对文件进行操作（新建/删除/移动等）",
+      "keywords": [
+        "新建文件",
+        "创建文件",
+        "删除文件",
+        "rename file",
+        "move file",
+        "copy file",
+        "文件夹"
+      ],
+      "patterns": [
+        ".*新建.*文件.*",
+        ".*删除.*文件.*",
+        ".*创建.*目录.*"
+      ],
+      "examples": [
+        "新建一个 related_work.tex 文件",
+        "删除 figures 目录"
+      ]
+    }
+  ],
+  "fallback": {
+    "intent": "edit",
+    "reason": "低置信度时默认进入编辑流程，后续由 LLM 决定下一步"
+  }
+}
+

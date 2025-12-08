@@ -1,0 +1,107 @@
+{
+  "version": "1.0",
+  "strategies": {
+    "qa": {
+      "description": "回答知识性问题，不修改文件",
+      "max_iterations": 4,
+      "tool_sequence": [
+        {
+          "tool": "search_papers_tool",
+          "optional": true,
+          "condition": "has_kb"
+        },
+        {
+          "tool": "answer_without_edit_tool",
+          "optional": false
+        },
+        {
+          "tool": "reply_to_user_tool",
+          "optional": false
+        }
+      ],
+      "notes": "如果绑定了知识库，优先检索再回答"
+    },
+    "suggest": {
+      "description": "提供建议/检查结果，不直接修改文件",
+      "max_iterations": 5,
+      "tool_sequence": [
+        {
+          "tool": "analyze_document_tool",
+          "optional": true,
+          "condition": "has_selection"
+        },
+        {
+          "tool": "answer_without_edit_tool",
+          "optional": false
+        },
+        {
+          "tool": "reply_to_user_tool",
+          "optional": false
+        }
+      ],
+      "notes": "重点在于给出建议，避免直接更改文件"
+    },
+    "edit": {
+      "description": "根据用户请求修改/重写内容",
+      "max_iterations": 8,
+      "tool_sequence": [
+        {
+          "tool": "analyze_document_tool",
+          "optional": true,
+          "condition": "selection_length>200"
+        },
+        {
+          "tool": "search_papers_tool",
+          "optional": true,
+          "condition": "has_kb"
+        },
+        {
+          "tool": "rewrite_selection_tool",
+          "optional": false,
+          "condition": "has_selection"
+        },
+        {
+          "tool": "insert_text_tool",
+          "optional": false,
+          "condition": "!has_selection"
+        },
+        {
+          "tool": "reply_to_user_tool",
+          "optional": false
+        }
+      ],
+      "notes": "有选区则重写选区，否则插入新内容"
+    },
+    "citation": {
+      "description": "处理引用/参考文献",
+      "max_iterations": 6,
+      "tool_sequence": [
+        {
+          "tool": "analyze_document_tool",
+          "optional": true
+        },
+        {
+          "tool": "insert_citation_tool",
+          "optional": false
+        },
+        {
+          "tool": "reply_to_user_tool",
+          "optional": false
+        }
+      ],
+      "notes": "优先确保定位引用位置，再执行引用操作"
+    },
+    "file_op": {
+      "description": "执行文件创建/删除等操作",
+      "max_iterations": 4,
+      "tool_sequence": [
+        {
+          "tool": "reply_to_user_tool",
+          "optional": false
+        }
+      ],
+      "notes": "文件操作由系统直接执行，完成后立即回复"
+    }
+  }
+}
+

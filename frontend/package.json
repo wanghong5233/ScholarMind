@@ -24,6 +24,8 @@
     "dayjs": "^1.11.13",
     "katex": "^0.16.25",
     "lodash-es": "^4.17.21",
+    "@monaco-editor/react": "^4.6.0",
+    "monaco-editor": "^0.52.0",
     "marked": "^15.0.7",
     "normalize.css": "^8.0.1",
     "prettier": "^3.5.3",
