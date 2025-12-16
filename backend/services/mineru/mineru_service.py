@@ -248,13 +248,13 @@ async def health():
         }
     else:
         # 模型未就绪，返回degraded状态（但HTTP 200，避免容器被kill）
-    return {
+        return {
             "status": "degraded",
-        "service": "mineru",
+            "service": "mineru",
             "gpu_available": gpu_available,
             "models_ready": False,
             "message": "Models still loading or incomplete"
-    }
+        }
 
 
 @app.post("/parse")
