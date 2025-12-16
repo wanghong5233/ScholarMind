@@ -179,10 +179,17 @@ backend/services/latex_agent/
 ### 文档
 ```
 backend/services/latex_agent/
-├── AGENT_LOGIC_REVIEW.md  # 📖 完整的逻辑审查
-├── TEST_GUIDE.md          # 🧪 详细的测试用例
-└── QUICK_START.md         # 🚀 本文件
+├── README.md                       # 📖 服务入口说明
+├── ARCHITECTURE_OVERVIEW_12_7.md  # 🏗️ 当前架构概览
+├── COMPREHENSIVE_UPGRADE_PLAN.md  # 🚀 完整升级方案
+├── QUICK_START.md                 # ⚡ 本文件（快速启动）
+└── docs/
+    ├── DOCUMENTATION_INDEX.md     # 📚 完整文档索引
+    ├── future/                    # 未来规划
+    └── archived/                  # 历史归档
 ```
+
+**详细文档请查看**：[docs/DOCUMENTATION_INDEX.md](docs/DOCUMENTATION_INDEX.md)
 
 ---
 

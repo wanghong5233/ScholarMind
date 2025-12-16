@@ -1,5 +1,13 @@
 # LaTeX Agent RL 后训练技术方案
 
+> **文档类型**：未来技术规划  
+> **更新日期**：2025-11-XX  
+> **状态**：⏸️ 未实施（技术储备，面试加分）  
+> **推荐阅读顺序**：3-可选（RL技术深度展示）  
+> **文档位置**：`backend/services/latex_agent/docs/future/RL_TRAINING_DESIGN.md`
+
+---
+
 > **技术深度提升**：使用强化学习（RL）后训练，优化 Agent 的决策能力和任务执行效率
 
 ---

@@ -82,5 +82,46 @@ docker run -p 8003:8003 latex-agent
 
 ## 开发状态
 
-当前处于框架搭建阶段，核心功能正在开发中。
+核心功能已完成，正在按照 `COMPREHENSIVE_UPGRADE_PLAN.md` 进行系统优化。
+
+**当前完成**：
+- ✅ ReAct Agent 核心循环（Planner → Executor → Reflector）
+- ✅ 意图识别 + 动态计划构建（配置驱动）
+- ✅ 工具系统（10+ 工具：分析/检索/编辑/验证）
+- ✅ Prometheus 监控 + Trace ID 全链路追踪
+- ✅ 安全防护（Prompt Injection + 速率限制）
+- ✅ 工作区缓存（LRU+TTL）
+- ✅ 用户反馈闭环（点赞/点踩）
+- ✅ 增量 Diff 生成
+
+**正在优化**：
+- 🟡 LLM 调用缓存（性能优化）
+- 🟡 Grafana 监控面板（可观测性）
+- 🟡 端到端集成测试（测试覆盖）
+
+**未来规划**：
+- ⏸️ RL 后训练优化（详见 `docs/future/RL_TRAINING_DESIGN.md`）
+
+## 📚 文档导航
+
+### 核心文档（必读）
+
+| 文档 | 说明 | 阅读时间 | 何时阅读 |
+|------|------|----------|----------|
+| **README.md** (本文档) | 服务入口说明 | 5分钟 | 快速了解功能和运行方式 |
+| **ARCHITECTURE_OVERVIEW_12_7.md** | 当前架构概览 | 30分钟 | 理解系统设计、调试问题 |
+| **COMPREHENSIVE_UPGRADE_PLAN.md** | 完整升级方案 | 60分钟 | 了解优化方向、准备面试 |
+| **docs/DOCUMENTATION_INDEX.md** | 📖 完整文档索引 | - | 查找所有文档、推荐阅读路线 |
+
+### 其他文档
+
+- **docs/future/RL_TRAINING_DESIGN.md** - RL后训练技术方案（未来规划，面试加分）
+- **docs/archived/** - 历史文档归档（了解设计演变）
+
+**推荐阅读路线**：
+- 🚀 **快速上手**：README → ARCHITECTURE_OVERVIEW（第1-2章）
+- 💻 **开发人员**：README → ARCHITECTURE_OVERVIEW → COMPREHENSIVE_UPGRADE_PLAN
+- 🎯 **面试准备**：README → ARCHITECTURE_OVERVIEW → COMPREHENSIVE_UPGRADE_PLAN → RL_TRAINING_DESIGN
+
+**详细阅读指南请查看**：[docs/DOCUMENTATION_INDEX.md](docs/DOCUMENTATION_INDEX.md)
 

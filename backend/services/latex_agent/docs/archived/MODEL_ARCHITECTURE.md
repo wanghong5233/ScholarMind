@@ -1,5 +1,23 @@
 # Agent 模型架构说明
 
+> **⚠️ 历史文档 - 内容已被覆盖**
+> 
+> **文档类型**：模型架构说明  
+> **创建日期**：2025-XX-XX  
+> **状态**：⚠️ 内容已被 RL_TRAINING_DESIGN.md 完整覆盖  
+> **推荐阅读顺序**：4-可跳过（已有更详细版本）  
+> **文档位置**：`backend/services/latex_agent/docs/archived/MODEL_ARCHITECTURE.md`
+> 
+> **为什么归档**：
+> - ❌ 本文档的核心内容（Planner/Executor/Reflector 架构、微调策略）已被 `../future/RL_TRAINING_DESIGN.md` 完整包含
+> - ❌ RL_TRAINING_DESIGN.md 提供了更详细的技术方案，包括混合架构、量化技术等
+> 
+> **推荐阅读**：
+> - 📖 详细RL方案：`../future/RL_TRAINING_DESIGN.md`
+> - 📖 当前架构：`../../ARCHITECTURE_OVERVIEW_12_7.md`
+
+---
+
 > **核心问题**：Agent 的哪些部分需要 LLM？哪些可以微调？
 
 ---
