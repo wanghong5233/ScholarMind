@@ -3,7 +3,7 @@
   "strategies": {
     "qa": {
       "description": "回答知识性问题，不修改文件",
-      "max_iterations": 4,
+      "max_iterations": 3,
       "tool_sequence": [
         {
           "tool": "search_papers_tool",
@@ -11,35 +11,27 @@
           "condition": "has_kb"
         },
         {
-          "tool": "answer_without_edit_tool",
-          "optional": false
-        },
-        {
           "tool": "reply_to_user_tool",
           "optional": false
         }
       ],
-      "notes": "如果绑定了知识库，优先检索再回答"
+      "notes": "如果绑定了知识库，优先检索再回答。建议直接在 reply_to_user_tool 中生成，不需要额外工具"
     },
     "suggest": {
       "description": "提供建议/检查结果，不直接修改文件",
-      "max_iterations": 5,
+      "max_iterations": 3,
       "tool_sequence": [
         {
-          "tool": "analyze_document_tool",
+          "tool": "analyze_context_tool",
           "optional": true,
           "condition": "has_selection"
         },
         {
-          "tool": "answer_without_edit_tool",
-          "optional": false
-        },
-        {
           "tool": "reply_to_user_tool",
           "optional": false
         }
       ],
-      "notes": "重点在于给出建议，避免直接更改文件"
+      "notes": "建议类任务：分析选中内容 → 直接在 reply 中给出建议，不修改文件"
     },
     "edit": {
       "description": "根据用户请求修改/重写内容",

@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-from ..config_loader import config_loader
+from config_loader import config_loader
 from .intent_classifier import IntentType
 
 

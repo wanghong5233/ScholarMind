@@ -24,24 +24,53 @@ class TraceIdFilter(logging.Filter):
     """为日志注入 trace_id 字段"""
 
     def filter(self, record: logging.LogRecord) -> bool:  # type: ignore[override]
-        record.trace_id = get_trace_id() or "-"
+        # 确保 trace_id 字段存在，即使 get_trace_id() 返回 None
+        if not hasattr(record, 'trace_id'):
+            record.trace_id = get_trace_id() or "-"
         return True
 
 
 # 配置业务日志
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] [trace_id=%(trace_id)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[logging.StreamHandler()],
+# 使用自定义 Formatter 来处理可能缺失的 trace_id
+class SafeTraceIdFormatter(logging.Formatter):
+    """安全的日志格式化器，处理缺失的 trace_id 字段"""
+    
+    def format(self, record: logging.LogRecord) -> str:
+        # 确保 trace_id 字段存在
+        if not hasattr(record, 'trace_id'):
+            record.trace_id = get_trace_id() or "-"
+        return super().format(record)
+
+
+# 创建 handler 并添加 formatter
+handler = logging.StreamHandler()
+formatter = SafeTraceIdFormatter(
+    fmt="%(asctime)s [%(levelname)s] [trace_id=%(trace_id)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
 )
+handler.setFormatter(formatter)
+
+# 配置根 logger
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+root_logger.addHandler(handler)
+root_logger.addFilter(TraceIdFilter())
+
+# 确保所有子 logger 也使用相同的配置
 logger = logging.getLogger("latex_agent_service")
-logging.getLogger().addFilter(TraceIdFilter())
 
 # 单独降低 uvicorn.access 对 /health 的噪音
 uvicorn_access = logging.getLogger("uvicorn.access")
 uvicorn_access.setLevel(logging.INFO)
 uvicorn_access.addFilter(HealthFilter())
+uvicorn_access.addFilter(TraceIdFilter())  # 也添加 trace_id filter
+
+# 为第三方库的 logger 也添加 filter（如 httpx）
+httpx_logger = logging.getLogger("httpx")
+httpx_logger.addFilter(TraceIdFilter())
+
+openai_logger = logging.getLogger("openai")
+openai_logger.addFilter(TraceIdFilter())
 
 app = FastAPI(
     title="LaTeX Agent Service",

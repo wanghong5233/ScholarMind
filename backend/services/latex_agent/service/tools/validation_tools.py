@@ -47,6 +47,44 @@ class CompileLaTeXTool(BaseTool):
             "required": []
         }
     
+    def _detect_unicode_content(self, file_path: Path) -> bool:
+        """检测文件是否包含 Unicode 字符（如中文）"""
+        try:
+            content = file_path.read_text(encoding='utf-8', errors='ignore')
+            # 检查是否包含中文字符（CJK 统一表意文字范围）
+            for char in content:
+                if '\u4e00' <= char <= '\u9fff':  # 中文字符范围
+                    return True
+            return False
+        except Exception:
+            return False
+    
+    def _detect_ieeetran_template(self, file_path: Path) -> bool:
+        """检测文件是否使用 IEEEtran 模板"""
+        try:
+            content = file_path.read_text(encoding='utf-8', errors='ignore')
+            # 检查文档类是否为 IEEEtran
+            if '\\documentclass' in content and 'IEEEtran' in content:
+                return True
+            return False
+        except Exception:
+            return False
+    
+    def _has_chinese_support_package(self, file_path: Path) -> bool:
+        """检测 LaTeX 文件是否包含中文支持包"""
+        try:
+            content = file_path.read_text(encoding='utf-8', errors='ignore')
+            # 检查是否包含常见的中文支持包
+            chinese_packages = [
+                '\\usepackage{ctex}',
+                '\\usepackage{xeCJK}',
+                '\\usepackage{CJK}',
+                '\\usepackage[utf8]{inputenc}',  # 虽然不完全支持中文，但至少尝试了
+            ]
+            return any(pkg in content for pkg in chinese_packages)
+        except Exception:
+            return False
+    
     async def execute(
         self,
         agent_state: Any,
@@ -66,11 +104,35 @@ class CompileLaTeXTool(BaseTool):
             or (getattr(agent_state, "workspace_config", {}) or {}).get("main_file")
             or "main.tex"
         )
-        compiler = (
-            parameters.get("compiler")
-            or (getattr(agent_state, "workspace_config", {}) or {}).get("compiler")
-            or "pdflatex"
-        )
+        
+        # 如果没有指定编译器，先检测文件内容
+        default_compiler = "pdflatex"
+        if not parameters.get("compiler"):
+            try:
+                workspace_path = get_workspace_path(agent_state, workspace_id) if workspace_id else None
+                if workspace_path:
+                    resolved_main = resolve_path_within_workspace(workspace_path, main_file)
+                    if resolved_main.exists():
+                        # 优先检测 IEEEtran 模板，强制使用 pdflatex
+                        if self._detect_ieeetran_template(resolved_main):
+                            default_compiler = "pdflatex"
+                            logger.info(f"检测到 IEEEtran 模板，强制使用 pdflatex 编译器（最佳兼容性）")
+                        # 然后检测中文内容
+                        elif self._detect_unicode_content(resolved_main):
+                            # 检测到中文，优先使用 xelatex（对中文支持最好）
+                            if shutil.which("xelatex"):
+                                default_compiler = "xelatex"
+                                logger.info(f"检测到中文内容，自动选择编译器: xelatex")
+                            elif shutil.which("lualatex"):
+                                default_compiler = "lualatex"
+                                logger.warning(f"检测到中文内容，但 xelatex 不可用，使用 lualatex（可能需要安装 luaotfload）")
+                            else:
+                                logger.warning(f"检测到中文内容，但 xelatex 和 lualatex 都不可用，使用 pdflatex（可能无法正确显示中文）")
+            except Exception as e:
+                logger.debug(f"编译器自动检测失败: {e}")  # 如果检测失败，使用默认的 pdflatex
+        
+        # 注意：不再从 workspace_config 中读取 compiler，始终使用自动检测
+        compiler = parameters.get("compiler") or default_compiler
         bibliography_file = (
             parameters.get("bibliography_file")
             or (getattr(agent_state, "workspace_config", {}) or {}).get("bibliography_file")
@@ -102,6 +164,35 @@ class CompileLaTeXTool(BaseTool):
         except Exception as exc:
             logger.error("LaTeX 编译异常: %s", exc, exc_info=True)
             return ToolResult(success=False, error=f"LaTeX 编译失败: {exc}")
+        
+        # 检查是否有中文缺失字符的错误
+        has_chinese_missing = False
+        if compile_result.get("errors"):
+            for error in compile_result["errors"]:
+                if "Missing character" in error and "U+" in error:
+                    has_chinese_missing = True
+                    break
+        
+        # 检查 LaTeX 文件是否包含中文支持包
+        resolved_main = resolve_path_within_workspace(workspace_path, main_file)
+        has_chinese_package = self._has_chinese_support_package(resolved_main) if resolved_main.exists() else False
+        
+        # 如果检测到中文缺失字符，提供更好的错误提示
+        if has_chinese_missing:
+            suggestions = []
+            if compiler == "pdflatex":
+                suggestions.append("当前使用 pdflatex 编译器，不支持 Unicode 字符")
+                suggestions.append("解决方案：1) 在文档开头添加 \\usepackage{ctex}，或 2) 使用 xelatex 编译器")
+            elif compiler == "lualatex":
+                suggestions.append("当前使用 lualatex 编译器，但缺少 luaotfload 模块")
+                suggestions.append("解决方案：1) 在文档开头添加 \\usepackage{ctex}，或 2) 使用 xelatex 编译器，或 3) 安装 luaotfload 包")
+            elif compiler == "xelatex":
+                if not has_chinese_package:
+                    suggestions.append("当前使用 xelatex 编译器，但文档缺少中文支持包")
+                    suggestions.append("解决方案：在文档开头添加 \\usepackage{ctex} 或 \\usepackage{xeCJK}")
+            
+            if suggestions:
+                compile_result["errors"].insert(0, "提示: " + " | ".join(suggestions))
         
         summary = "LaTeX 编译成功" if compile_result["compiled"] else "LaTeX 编译失败"
         return ToolResult(
@@ -149,7 +240,18 @@ class CompileLaTeXTool(BaseTool):
             }
         
         aux_path = resolved_main.with_suffix(".aux")
+        bbl_path = resolved_main.with_suffix(".bbl")
         bib_path = resolve_path_within_workspace(workspace_path, bibliography_file)
+        
+        # 在运行 BibTeX 之前，强制删除旧的 .bbl 文件，确保使用最新的 .bib 文件重新生成
+        # 这样可以避免旧的 .bbl 文件格式错误导致的问题
+        if bbl_path.exists():
+            try:
+                bbl_path.unlink()
+                logger.info(f"已删除旧的 .bbl 文件，将使用最新的 .bib 文件重新生成: {bbl_path}")
+            except Exception as e:
+                logger.warning(f"无法删除旧的 .bbl 文件: {e}")
+        
         if (
             bib_path.exists()
             and aux_path.exists()
@@ -169,13 +271,87 @@ class CompileLaTeXTool(BaseTool):
                 warnings.extend(self._extract_warnings(bib_result["log"]))
                 if bib_result["returncode"] != 0:
                     compiled = False
+                    # BibTeX 失败时删除可能损坏的 .bbl 文件，防止后续编译报错
+                    if bbl_path.exists():
+                        try:
+                            bbl_path.unlink()
+                            logger.info(f"BibTeX 失败，已删除损坏的 .bbl 文件: {bbl_path}")
+                        except Exception as e:
+                            logger.warning(f"无法删除 .bbl 文件: {e}")
+                else:
+                    # BibTeX 成功运行后，再次验证生成的 .bbl 文件
+                    if bbl_path.exists() and not self._is_bbl_file_valid(bbl_path):
+                        try:
+                            bbl_path.unlink()
+                            logger.warning(f"BibTeX 生成的 .bbl 文件格式无效，已删除: {bbl_path}")
+                            compiled = False
+                        except Exception as e:
+                            logger.warning(f"无法删除无效的 .bbl 文件: {e}")
+        elif bbl_path.exists() and not bib_path.exists():
+            # 如果 .bib 文件不存在但有旧的 .bbl 文件，删除它防止冲突
+            try:
+                bbl_path.unlink()
+                logger.info(f"检测到缺少 .bib 文件，已删除旧的 .bbl 文件: {bbl_path}")
+            except Exception as e:
+                logger.warning(f"无法删除 .bbl 文件: {e}")
         
         if compiled:
-            for _ in range(max_runs):
+            for run_idx in range(max_runs):
+                # 在每次 rerun 前检查 .bbl 文件有效性（如果存在）
+                if bbl_path.exists() and not self._is_bbl_file_valid(bbl_path):
+                    try:
+                        bbl_path.unlink()
+                        logger.warning(f"Rerun {run_idx + 1} 前检测到无效的 .bbl 文件，已删除: {bbl_path}")
+                        # 如果 .bbl 文件无效，可能需要重新运行 BibTeX
+                        if bib_path.exists() and aux_path.exists() and self._aux_requires_bibtex(aux_path):
+                            bibtex_path = shutil.which("bibtex")
+                            if bibtex_path:
+                                logger.info(f"重新运行 BibTeX 以生成有效的 .bbl 文件")
+                                bib_result = self._run_compiler(
+                                    bibtex_path,
+                                    main_stem,
+                                    workspace_path,
+                                    use_standard_flags=False
+                                )
+                                logs.append(bib_result)
+                                errors.extend(self._extract_errors(bib_result["log"]))
+                                warnings.extend(self._extract_warnings(bib_result["log"]))
+                    except Exception as e:
+                        logger.warning(f"无法删除无效的 .bbl 文件: {e}")
+                
                 rerun_result = self._run_compiler(compiler_path, relative_main, workspace_path)
                 logs.append(rerun_result)
-                errors.extend(self._extract_errors(rerun_result["log"]))
+                rerun_errors = self._extract_errors(rerun_result["log"])
+                errors.extend(rerun_errors)
                 warnings.extend(self._extract_warnings(rerun_result["log"]))
+                
+                # 检查是否有 "missing \item" 错误，这通常表示 .bbl 文件格式错误
+                if any("missing \\item" in err.lower() or "missing \\item" in err for err in rerun_errors):
+                    logger.warning(f"检测到 'missing \\item' 错误，删除 .bbl 文件并重新运行 BibTeX")
+                    if bbl_path.exists():
+                        try:
+                            bbl_path.unlink()
+                            logger.info(f"已删除导致错误的 .bbl 文件: {bbl_path}")
+                            # 重新运行 BibTeX
+                            if bib_path.exists() and aux_path.exists() and self._aux_requires_bibtex(aux_path):
+                                bibtex_path = shutil.which("bibtex")
+                                if bibtex_path:
+                                    logger.info(f"重新运行 BibTeX 以修复 .bbl 文件")
+                                    bib_result = self._run_compiler(
+                                        bibtex_path,
+                                        main_stem,
+                                        workspace_path,
+                                        use_standard_flags=False
+                                    )
+                                    logs.append(bib_result)
+                                    errors.extend(self._extract_errors(bib_result["log"]))
+                                    warnings.extend(self._extract_warnings(bib_result["log"]))
+                                    # 如果 BibTeX 成功，继续下一次 rerun
+                                    if bib_result["returncode"] == 0:
+                                        continue
+                        except Exception as e:
+                            logger.warning(f"无法删除导致错误的 .bbl 文件: {e}")
+                
                 if rerun_result["returncode"] != 0:
                     compiled = False
                     break
@@ -239,13 +415,85 @@ class CompileLaTeXTool(BaseTool):
         tokens = ("\\citation", "\\bibdata", "\\bibstyle")
         return any(token in content for token in tokens)
     
+    def _is_bbl_file_valid(self, bbl_path: Path) -> bool:
+        """检查 .bbl 文件格式是否有效"""
+        if not bbl_path.exists():
+            return False
+        try:
+            content = bbl_path.read_text(encoding="utf-8", errors="ignore")
+            # 必须包含 thebibliography 环境
+            if "\\begin{thebibliography}" not in content or "\\end{thebibliography}" not in content:
+                return False
+            
+            # 提取 thebibliography 环境的内容
+            begin_idx = content.find("\\begin{thebibliography}")
+            end_idx = content.find("\\end{thebibliography}")
+            if begin_idx == -1 or end_idx == -1 or end_idx <= begin_idx:
+                return False
+            
+            # 提取环境内的内容
+            env_content = content[begin_idx:end_idx]
+            
+            # 检查是否有有效的 \bibitem 条目
+            # \bibitem 必须在 \begin{thebibliography} 之后
+            if "\\bibitem" not in env_content:
+                # 如果环境内没有 \bibitem，会导致 "missing \item" 错误
+                logger.warning(f".bbl 文件 {bbl_path} 缺少 \\bibitem 条目")
+                return False
+            
+            # 进一步检查：确保 \bibitem 在 \begin{thebibliography} 之后
+            # 查找第一个 \bibitem 的位置
+            bibitem_idx = env_content.find("\\bibitem")
+            if bibitem_idx == -1:
+                return False
+            
+            # 检查 \begin{thebibliography} 和第一个 \bibitem 之间是否有非空白内容
+            # 如果有非空白内容（除了注释），可能导致问题
+            between_content = env_content[:bibitem_idx].strip()
+            # 移除 LaTeX 注释（以 % 开头的行）
+            lines = between_content.split('\n')
+            non_comment_lines = [line for line in lines if line.strip() and not line.strip().startswith('%')]
+            if non_comment_lines:
+                # 如果 \begin{thebibliography} 和第一个 \bibitem 之间有非注释内容，可能有问题
+                logger.warning(f".bbl 文件 {bbl_path} 在 \\begin{{thebibliography}} 和第一个 \\bibitem 之间有内容: {non_comment_lines[:3]}")
+                # 但这种情况不一定导致错误，所以先不返回 False
+            
+            return True
+        except Exception as e:
+            logger.warning(f"无法读取 .bbl 文件 {bbl_path}: {e}")
+            return False
+    
     def _extract_errors(self, log_text: str) -> List[str]:
         """从日志提取错误信息"""
-        return [
-            line.strip()
-            for line in log_text.splitlines()
-            if line.strip().startswith("!") or "Error" in line
-        ]
+        errors = []
+        lines = log_text.splitlines()
+        
+        for i, line in enumerate(lines):
+            line_stripped = line.strip()
+            # 标准错误行
+            if line_stripped.startswith("!") or "Error" in line:
+                errors.append(line_stripped)
+            # 文件未找到错误（更友好的格式）
+            elif "File `" in line and "not found" in line:
+                # 提取文件名
+                import re
+                match = re.search(r"File `([^']+)' not found", line)
+                if match:
+                    missing_file = match.group(1)
+                    errors.append(f"文件未找到: {missing_file}")
+                else:
+                    errors.append(line_stripped)
+            # LaTeX Error 行
+            elif "LaTeX Error:" in line:
+                error_msg = line_stripped
+                # 尝试获取下一行的详细信息
+                if i + 1 < len(lines):
+                    next_line = lines[i + 1].strip()
+                    if next_line and not next_line.startswith("See the"):
+                        error_msg += f" {next_line}"
+                errors.append(error_msg)
+        
+        return errors
     
     def _extract_warnings(self, log_text: str) -> List[str]:
         """从日志提取警告信息"""

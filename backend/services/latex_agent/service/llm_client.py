@@ -196,6 +196,26 @@ class LLMClient:
         
         # 构造 ReAct prompt
         prompt = self._build_react_prompt(observation, available_tools, history)
+
+        if settings.LOG_FULL_PROMPT:
+            divider = "=" * 80
+            logger.info(
+                "\n%s\n📤 完整的 LLM Prompt (发送给大模型)\n%s\n%s\n%s",
+                divider,
+                divider,
+                prompt,
+                divider,
+            )
+            tool_params_note = ""
+            if not settings.LOG_PROMPT_INCLUDE_TOOL_PARAMS:
+                tool_params_note = " (工具参数详情已省略，如需查看请设置 LOG_PROMPT_INCLUDE_TOOL_PARAMS=True)"
+            logger.info(
+                "🔧 Prompt 元信息: tools=%s, temperature=%s, model=%s%s",
+                len(available_tools),
+                self.temperature,
+                getattr(self, "model", "unknown"),
+                tool_params_note,
+            )
         
         # 调用 LLM Tool Calling API
         try:
@@ -205,6 +225,20 @@ class LLMClient:
                 temperature=self.temperature
             )
             
+            if settings.LOG_FULL_PROMPT:
+                divider = "=" * 80
+                try:
+                    response_dump = json.dumps(response, ensure_ascii=False, indent=2)
+                except TypeError:
+                    response_dump = str(response)
+                logger.info(
+                    "\n%s\n📥 LLM 响应结果\n%s\n%s\n%s",
+                    divider,
+                    divider,
+                    response_dump,
+                    divider,
+                )
+
             # 解析工具调用结果
             tool_calls = response.get("tool_calls")
             content = response.get("content", "")
@@ -280,6 +314,15 @@ class LLMClient:
 - 灵活组合多个工具完成复杂任务
 - 给出清晰的回复和操作总结
 
+## 用户选中片段的处理
+
+当用户在编辑器中选中了一个或多个文本片段时：
+- Observation 会显示所有片段的完整内容，格式为：`@selectionX (文件名, 位置): 完整文本`
+- 用户的指令（User Intent）中会用 `【片段1】`、`【片段2】` 等自然语言引用这些片段
+- 你应该理解这些引用对应 Observation 中的 `@selection1`、`@selection2` 等片段
+- 例如：用户说"请优化【片段1】"，你应该查看 Observation 中 `@selection1` 的完整内容
+- 如果需要修改选中的内容，优先使用 `rewrite_selection_tool`（会自动使用 selection.start/end）
+
 ## 工作原则
 
 1. **快速决策，避免过度分析**：
@@ -299,7 +342,7 @@ class LLMClient:
 4. **精确编辑**：
    - 使用 `insert_text_tool` 时，必须提供足够的上下文（3-5行）
    - 当需要替换现有选区时，优先使用 `rewrite_selection_tool`（selection.start/end 来自 Observation）
-   - 只需回答/给建议时，可调用 `answer_without_edit_tool` 生成内容，再用 `reply_to_user_tool` 汇报
+   - **建议/回答类任务：直接在 `reply_to_user_tool` 的 reply 参数中生成内容，不需要其他工具**
 
 5. **严格的执行流程**：
    - 分析类工具（analyze_*）：最多调用 1 次
@@ -308,9 +351,17 @@ class LLMClient:
    - 回复工具（reply_to_user_tool）：必须调用 1 次（作为最后一步）
 
 6. **没有检索结果也要继续**：
-   - 如果知识库返回 0 条结果或网络超时，仍然要根据已有文本完成“优化/重写/润色”
+   - 如果知识库返回 0 条结果或网络超时，仍然要根据已有文本完成"优化/重写/润色"
    - 可以引用当前文档中的信息，切勿因为缺少文献而停止执行
-   - 当提示“未绑定知识库”时，检索工具会自动跳过，你必须依靠现有上下文完成任务
+   - 当提示"未绑定知识库"时，检索工具会自动跳过，你必须依靠现有上下文完成任务
+
+7. **⚠️ 语言一致性要求（非常重要）**：
+   - **必须严格保持文档语言的一致性**
+   - 如果文档是英文论文，生成的所有内容必须使用英文，禁止在英文文档中插入中文内容
+   - 如果文档是中文论文，生成的内容应使用中文（除非是英文摘要等特殊部分）
+   - 在编辑文档前，先观察文档的主要语言（通过 Observation 中的文档内容判断）
+   - 如果用户用中文指令修改英文文档，你仍然必须用英文生成内容
+   - 如果检测到语言不一致，编辑工具会拒绝执行，导致任务失败
 
 ## 执行流程示例（严格遵守）
 
@@ -338,6 +389,7 @@ class LLMClient:
 - ❌ 重复调用 analyze_context_tool
 - ❌ 重复调用 analyze_document_tool
 - ❌ 用户只是询问建议时调用 analyze_document_tool
+- ❌ **建议/检查类任务调用 answer_without_edit_tool**（建议应直接写在 reply_to_user_tool 的 reply 参数中）
 - ❌ 不调用 reply_to_user_tool 就结束
 - ❌ 超过 3 个工具调用还不回复
 
@@ -368,7 +420,10 @@ class LLMClient:
             tool_params = tool.get("function", {}).get("parameters", {})
             
             prompt_parts.append(f"\n- **{tool_name}**: {tool_desc}")
-            if tool_params:
+            
+            # 根据配置决定是否输出工具参数详情
+            # 注意：这只影响日志输出，不影响发送给 LLM 的实际内容（LLM 通过 tools 参数接收完整定义）
+            if settings.LOG_PROMPT_INCLUDE_TOOL_PARAMS and tool_params:
                 params_desc = json.dumps(tool_params, ensure_ascii=False, indent=2)
                 prompt_parts.append(f"  参数: {params_desc}")
         

@@ -540,15 +540,33 @@ class LaTeXEditAgent:
             file_path = context.get("file_path")
             if file_path:
                 obs_parts.append(f"Target File: {file_path}")
-            selection = context.get("selection")
-            if selection and selection.get("text"):
+            
+            # 优先处理多个 selections（数组）
+            selections = context.get("selections")
+            if selections and isinstance(selections, list) and len(selections) > 0:
+                obs_parts.append(f"\n用户选中了 {len(selections)} 个片段：")
+                for sel in selections:
+                    snippet = sel.get("text", "")
+                    start = sel.get("start")
+                    end = sel.get("end")
+                    sel_file = sel.get("file_path", file_path)
+                    placeholder = sel.get("placeholder", f"@selection{sel.get('id', '')}")
+                    
+                    # 显示片段信息：占位符、文件、位置、内容预览
+                    obs_parts.append(
+                        f"\n{placeholder} ({sel_file}, 位置{start}:{end}, {len(snippet)}字符):\n"
+                        f"```\n{snippet[:500]}{'...' if len(snippet) > 500 else ''}\n```"
+                    )
+            # 向后兼容：处理单个 selection
+            elif context.get("selection") and context["selection"].get("text"):
+                selection = context["selection"]
                 snippet = selection["text"]
                 start = selection.get("start")
                 end = selection.get("end")
                 obs_parts.append(
                     f"Selection [{start}:{end}] (len={len(snippet)}): {snippet[:400]}{'...' if len(snippet) > 400 else ''}"
                 )
-            else:
+            elif context:
                 obs_parts.append(f"Context: {context}")
 
         if state.plan_steps:

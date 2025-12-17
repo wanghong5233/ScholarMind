@@ -1,7 +1,7 @@
 """
 LaTeX Agent API 路由
 """
-from fastapi import APIRouter, HTTPException, Depends, Header, UploadFile, File
+from fastapi import APIRouter, HTTPException, Depends, Header, UploadFile, File, Form
 from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 from typing import Dict, Any, Optional, List, Literal
@@ -171,8 +171,11 @@ class UpdateWorkspaceRequest(BaseModel):
 
 class CompileRequest(BaseModel):
     """编译请求"""
-    main_file: Optional[str] = None
+    main_file: Optional[str] = Field(None, alias="mainFile")
     compiler: Optional[str] = None
+    
+    class Config:
+        populate_by_name = True  # 允许同时接受 main_file 和 mainFile
 
 
 class CompileResponse(BaseModel):
@@ -547,17 +550,38 @@ async def delete_file(
 async def upload_file(
     workspace_id: str,
     file: UploadFile = File(...),
-    directory: Optional[str] = None,
+    directory: Optional[str] = Form(None),
     user_id: int = Depends(get_user_id)
 ):
     workspace_path = _workspace_path(user_id, workspace_id)
     _ensure_workspace(workspace_path)
-    dir_path = workspace_path if not directory else _safe_join(workspace_path, directory)
+    
+    # 处理目录路径
+    if directory:
+        # 清理路径，移除前导/尾随斜杠
+        directory = directory.strip().strip('/')
+        dir_path = _safe_join(workspace_path, directory)
+    else:
+        dir_path = workspace_path
+    
     dir_path.mkdir(parents=True, exist_ok=True)
     target = dir_path / file.filename
     content = await file.read()
     target.write_bytes(content)
-    return {"path": target.relative_to(workspace_path).as_posix(), "size": len(content)}
+    
+    relative_path = target.relative_to(workspace_path).as_posix()
+    logger.info(
+        f"📤 文件上传成功: workspace={workspace_id}, "
+        f"directory={directory}, filename={file.filename}, "
+        f"size={len(content)} bytes, path={relative_path}"
+    )
+    
+    # 验证文件确实已保存
+    if not target.exists():
+        logger.error(f"❌ 文件保存失败: {target}")
+        raise HTTPException(status_code=500, detail="文件保存失败")
+    
+    return {"path": relative_path, "size": len(content)}
 
 
 @router.get("/{workspace_id}/download")
@@ -583,19 +607,41 @@ async def get_compiled_pdf(
     workspace_path = _workspace_path(user_id, workspace_id)
     _ensure_workspace(workspace_path)
     config = _load_workspace_config(workspace_path)
-    default_pdf_name = Path(config.get("main_file", "main.tex")).with_suffix(".pdf").as_posix()
-    if pdf_path:
-        relative_path = pdf_path
-    elif config.get("output_pdf"):
-        relative_path = config["output_pdf"]
-    elif (workspace_path / "output" / default_pdf_name).exists():
-        relative_path = Path("output") / default_pdf_name
+    
+    # 优先使用编译结果中记录的 PDF 路径
+    compile_result = _load_compile_result(workspace_path)
+    if compile_result and compile_result.get("result", {}).get("data", {}).get("pdf_path"):
+        relative_path = compile_result["result"]["data"]["pdf_path"]
+        logger.info(f"使用编译结果中的 PDF 路径: {relative_path}")
     else:
-        relative_path = default_pdf_name
+        # 回退到默认逻辑
+        default_pdf_name = Path(config.get("main_file", "main.tex")).with_suffix(".pdf").as_posix()
+        if pdf_path:
+            relative_path = pdf_path
+        elif config.get("output_pdf"):
+            relative_path = config["output_pdf"]
+        elif (workspace_path / "output" / default_pdf_name).exists():
+            relative_path = Path("output") / default_pdf_name
+        else:
+            relative_path = default_pdf_name
+    
     target = _safe_join(workspace_path, relative_path)
     if not target.exists():
-        raise HTTPException(status_code=404, detail="PDF file not found")
-    return FileResponse(target, filename=target.name, media_type="application/pdf")
+        raise HTTPException(status_code=404, detail=f"PDF file not found: {relative_path}")
+    
+    # 添加缓存控制头，确保浏览器获取最新版本
+    from fastapi.responses import Response
+    headers = {
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Pragma": "no-cache",
+        "Expires": "0"
+    }
+    return FileResponse(
+        target,
+        filename=target.name,
+        media_type="application/pdf",
+        headers=headers
+    )
 
 
 @router.get("/{workspace_id}/compile-status")
@@ -621,6 +667,9 @@ async def compile_workspace(
     """
     编译 LaTeX 工作区
     """
+    # 调试日志：显示接收到的编译参数
+    logger.info(f"🔨 编译请求: workspace={workspace_id}, payload.main_file={payload.main_file}, payload.compiler={payload.compiler}")
+    
     workspace_state = AgentState(workspace_id=workspace_id, user_id=user_id)
     await agent._load_workspace_context(workspace_state)
     
@@ -632,6 +681,8 @@ async def compile_workspace(
         tool_params["main_file"] = payload.main_file
     if payload.compiler:
         tool_params["compiler"] = payload.compiler
+    
+    logger.info(f"🔨 编译工具参数: {tool_params}")
     
     tool_result = await compile_tool.execute(workspace_state, tool_params)
     
@@ -652,12 +703,22 @@ async def compile_workspace(
 
 @general_router.get("/knowledge-bases", response_model=List[KnowledgeBaseSummary])
 async def list_knowledge_bases(user_id: int = Depends(get_user_id)):
-    """列出当前用户可用的知识库"""
+    """
+    列出当前用户可用的知识库
+    
+    注意：只返回永久知识库，不包含临时知识库（ephemeral）
+    """
     rag_client = get_rag_api_client()
     
     try:
         data = await rag_client.list_knowledge_bases(user_id=user_id)
-        return data
+        # 过滤掉临时知识库（ephemeral），只返回永久知识库
+        permanent_bases = [
+            kb for kb in data 
+            if isinstance(kb, dict) and not kb.get("is_ephemeral", False)
+        ]
+        logger.info(f"返回 {len(permanent_bases)} 个永久知识库（已过滤临时知识库）")
+        return permanent_bases
     
     except ValueError as exc:
         # 数据格式异常

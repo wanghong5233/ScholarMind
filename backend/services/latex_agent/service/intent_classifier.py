@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Dict, List, Optional
 
-from ..config_loader import config_loader
+from config_loader import config_loader
 
 logger = logging.getLogger(__name__)
 

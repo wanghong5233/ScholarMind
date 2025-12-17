@@ -7,7 +7,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from .config_validator import validate_intent_rules, validate_plan_strategy
+from config_validator import validate_intent_rules, validate_plan_strategy
 
 logger = logging.getLogger(__name__)
 

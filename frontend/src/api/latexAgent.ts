@@ -384,12 +384,20 @@ export async function downloadPdf(
   params: { workspaceId: string; pdfPath?: string },
   options?: AxiosRequestConfig,
 ) {
-  const query = params.pdfPath ? `?pdf_path=${encodeURIComponent(params.pdfPath)}` : ''
+  // 添加时间戳参数防止缓存
+  const timestamp = Date.now()
+  const query = params.pdfPath 
+    ? `?pdf_path=${encodeURIComponent(params.pdfPath)}&_t=${timestamp}`
+    : `?_t=${timestamp}`
   const response = await request.get(
     `/workspaces/${params.workspaceId}/pdf${query}`,
     withLatexConfig({
       ...options,
       responseType: 'blob',
+      headers: {
+        'Cache-Control': 'no-cache',
+        ...options?.headers,
+      },
     }),
   )
   return response.data as Blob

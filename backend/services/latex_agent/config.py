@@ -53,6 +53,23 @@ class Settings(BaseSettings):
     
     # 日志配置
     LOG_LEVEL: str = "INFO"
+    
+    # ==================== LLM Prompt 日志配置 ====================
+    # 用于调试 Agent 决策流程，查看发送给 LLM 的完整上下文
+    LOG_FULL_PROMPT: bool = True  # 是否在日志中输出完整 Prompt/响应
+    
+    # 工具参数详情日志配置（影响日志大小）
+    # - True: 输出每个工具的完整 JSON Schema（参数类型、描述、required 等）
+    #   优点：可以看到 LLM 接收到的完整工具定义
+    #   缺点：日志量大（13个工具 × ~20行 = ~260行），且这些 Schema 是固定的，调试价值低
+    # - False: 只输出工具名称和简短描述
+    #   优点：日志简洁（13个工具 × 1行 = 13行），减少 60-70% 的日志量
+    #   缺点：看不到参数定义细节（但可以在代码中查看）
+    # 
+    # 🎯 推荐设置：
+    # - 开发/调试工具问题时：True
+    # - 正常使用/生产环境：False（默认）
+    LOG_PROMPT_INCLUDE_TOOL_PARAMS: bool = False  # 是否在 Prompt 日志中包含工具参数详情
 
     # Auth / JWT（用于调用主 RAG 服务需要认证的接口）
     JWT_SECRET_KEY: Optional[str] = None

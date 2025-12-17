@@ -1,10 +1,11 @@
 """
 编辑类工具
 """
-from typing import Dict, Any
+from typing import Dict, Any, Optional, Literal, Tuple
 from pathlib import Path
 import asyncio
 import logging
+import re
 
 from .base_tool import BaseTool, ToolResult
 from .workspace_utils import (
@@ -14,6 +15,133 @@ from .workspace_utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def detect_document_language(content: str) -> Literal["chinese", "english", "mixed"]:
+    """
+    检测文档的主要语言
+    
+    Args:
+        content: 文档内容
+        
+    Returns:
+        "chinese": 主要是中文
+        "english": 主要是英文
+        "mixed": 混合语言
+    """
+    # 移除 LaTeX 命令和注释，只分析实际文本内容
+    # 移除 LaTeX 命令（\command{...}）
+    text_only = re.sub(r'\\[a-zA-Z]+\{([^}]*)\}', r'\1', content)
+    # 移除注释
+    text_only = re.sub(r'%.*', '', text_only)
+    # 移除 LaTeX 环境标记
+    text_only = re.sub(r'\\begin\{[^}]+\}.*?\\end\{[^}]+\}', '', text_only, flags=re.DOTALL)
+    # 移除其他 LaTeX 特殊字符
+    text_only = re.sub(r'[\\{}]', '', text_only)
+    
+    # 统计中文字符
+    chinese_chars = re.findall(r'[\u4e00-\u9fff]', text_only)
+    chinese_count = len(chinese_chars)
+    
+    # 统计英文单词（至少2个字母）
+    english_words = re.findall(r'\b[a-zA-Z]{2,}\b', text_only)
+    english_count = len(english_words)
+    
+    # 计算总字符数（用于判断比例）
+    total_chars = len(re.findall(r'[\u4e00-\u9fff]', text_only)) + len(re.findall(r'[a-zA-Z]', text_only))
+    
+    if total_chars == 0:
+        return "english"  # 默认英文（LaTeX 命令不算）
+    
+    chinese_ratio = chinese_count / total_chars if total_chars > 0 else 0
+    
+    # 如果中文字符占比超过 30%，认为是中文文档
+    if chinese_ratio > 0.3:
+        return "chinese"
+    # 如果英文单词数量远大于中文字符，认为是英文文档
+    elif english_count > chinese_count * 3:
+        return "english"
+    # 否则认为是混合语言
+    else:
+        return "mixed"
+
+
+def detect_text_language(text: str) -> Literal["chinese", "english", "mixed"]:
+    """
+    检测文本的主要语言（用于检查要插入的文本）
+    
+    Args:
+        text: 要检测的文本
+        
+    Returns:
+        "chinese": 主要是中文
+        "english": 主要是英文
+        "mixed": 混合语言
+    """
+    # 移除 LaTeX 命令和特殊字符
+    text_only = re.sub(r'\\[a-zA-Z]+\{([^}]*)\}', r'\1', text)
+    text_only = re.sub(r'%.*', '', text_only)
+    text_only = re.sub(r'[\\{}]', '', text_only)
+    
+    chinese_chars = re.findall(r'[\u4e00-\u9fff]', text_only)
+    chinese_count = len(chinese_chars)
+    
+    english_words = re.findall(r'\b[a-zA-Z]{2,}\b', text_only)
+    english_count = len(english_words)
+    
+    total_chars = len(re.findall(r'[\u4e00-\u9fff]', text_only)) + len(re.findall(r'[a-zA-Z]', text_only))
+    
+    if total_chars == 0:
+        return "english"
+    
+    chinese_ratio = chinese_count / total_chars if total_chars > 0 else 0
+    
+    if chinese_ratio > 0.3:
+        return "chinese"
+    elif english_count > chinese_count * 3:
+        return "english"
+    else:
+        return "mixed"
+
+
+def check_language_consistency(
+    document_content: str,
+    new_text: str,
+    file_path: str
+) -> Tuple[bool, Optional[str]]:
+    """
+    检查新文本与文档的语言一致性
+    
+    Args:
+        document_content: 文档内容
+        new_text: 要插入/替换的新文本
+        file_path: 文件路径（用于错误信息）
+        
+    Returns:
+        (is_consistent, error_message)
+    """
+    doc_lang = detect_document_language(document_content)
+    text_lang = detect_text_language(new_text)
+    
+    # 如果文档是英文，但新文本包含中文，则不一致
+    if doc_lang == "english" and text_lang in ("chinese", "mixed"):
+        chinese_chars = re.findall(r'[\u4e00-\u9fff]', new_text)
+        if chinese_chars:
+            return False, (
+                f"语言不一致错误：检测到文档 {file_path} 是英文文档，"
+                f"但生成的内容包含中文字符。请确保生成的内容使用英文，"
+                f"与文档的语言保持一致。"
+            )
+    
+    # 如果文档是中文，但新文本主要是英文（且没有中文），则警告（但不阻止）
+    # 因为中文文档中可能包含英文摘要等部分
+    if doc_lang == "chinese" and text_lang == "english":
+        logger.warning(
+            f"语言提示：文档 {file_path} 是中文文档，但生成的内容主要是英文。"
+            f"请确认这是否符合预期（如英文摘要部分）。"
+        )
+    
+    return True, None
 
 
 class InsertCitationTool(BaseTool):
@@ -253,6 +381,15 @@ class RewriteSelectionTool(BaseTool):
 
         if end_offset > len(original_content):
             return ToolResult(success=False, error="end_offset 超出文件长度")
+
+        # 检查语言一致性
+        is_consistent, lang_error = check_language_consistency(
+            original_content,
+            replacement_text,
+            file_path
+        )
+        if not is_consistent:
+            return ToolResult(success=False, error=lang_error)
 
         new_content = original_content[:start_offset] + replacement_text + original_content[end_offset:]
 
@@ -546,7 +683,23 @@ class InsertTextTool(BaseTool):
         
         if not target_file.exists():
             return ToolResult(success=False, error=f"文件不存在: {file_path}")
+
+        # 读取文件内容以检查语言一致性
+        try:
+            file_content = await asyncio.to_thread(target_file.read_text, "utf-8")
+        except Exception as exc:
+            logger.error("读取文件失败: %s", exc, exc_info=True)
+            return ToolResult(success=False, error=f"读取文件失败: {exc}")
         
+        # 检查语言一致性
+        is_consistent, lang_error = check_language_consistency(
+            file_content,
+            text_to_insert,
+            file_path
+        )
+        if not is_consistent:
+            return ToolResult(success=False, error=lang_error)
+
         try:
             result = await asyncio.to_thread(
                 self._insert_text_with_context,
