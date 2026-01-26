@@ -215,6 +215,37 @@ services: # 定义一系列的服务（容器）
     networks:
       - scholarmind_net
 
+  deep_research: # DeepResearch 服务
+    container_name: scholarmind_deep_research
+    build:
+      context: ./services/deep_research
+      dockerfile: Dockerfile
+    hostname: deep_research
+    env_file:
+      - .env
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/app
+      - PORT=8004
+      - RAG_SERVICE_URL=http://scholarmind_api:8000
+      - DATA_ROOT=/app/data/deep_research
+    ports:
+      - "8004:8004"  # 暴露端口供调试
+    volumes:
+      - deep_research_data:/app/data/deep_research
+      - ./services/deep_research:/app  # 代码热更新（开发环境）
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8004", "--reload"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8004/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    depends_on:
+      - scholarmind_api
+    networks:
+      - scholarmind_net
+
   # 可选：DeepSeek-OCR 服务占位（默认不启用）
   deepseek_ocr:
     image: nginx:alpine
@@ -248,6 +279,8 @@ volumes: # 定义全局的数据卷
     driver: local # 使用本地驱动
   latex_workspaces: # LaTeX 工作区数据卷
     driver: local # 使用本地驱动
+  deep_research_data: # DeepResearch 数据卷
+    driver: local
 
 networks: # 定义全局的网络
   scholarmind_net: # 自定义网络名称

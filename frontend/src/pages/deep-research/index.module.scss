@@ -1,0 +1,286 @@
+.container {
+  display: grid;
+  grid-template-columns: 360px 1fr;
+  gap: 16px;
+  height: 100%;
+}
+
+.side {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  overflow: auto;
+}
+
+.section {
+  width: 100%;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.textarea {
+  min-height: 120px;
+}
+
+.report {
+  background: #fff;
+  padding: 12px;
+  border-radius: 8px;
+}
+
+.statRow {
+  margin: 8px 0 12px;
+}
+
+.filterRow {
+  margin-bottom: 12px;
+}
+
+.summaryGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.tagWrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.toolWrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.taskGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 12px;
+}
+
+.taskSplit {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 0.9fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.taskDetailSticky {
+  position: sticky;
+  top: 12px;
+  align-self: start;
+}
+
+.taskCard {
+  cursor: pointer;
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fff;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.taskCard:hover {
+  border-color: #d9d9d9;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.taskCardActive {
+  border-color: #91caff;
+  background: #f5faff;
+}
+
+.taskCardSelected {
+  border-color: #4096ff;
+  box-shadow: 0 0 0 2px rgba(64, 150, 255, 0.15);
+}
+
+.taskHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.taskTitle {
+  font-weight: 600;
+}
+
+.taskMeta {
+  font-size: 12px;
+  color: #8c8c8c;
+  margin-bottom: 6px;
+}
+
+.taskSummary {
+  font-size: 12px;
+  color: #595959;
+  background: #fafafa;
+  padding: 8px;
+  border-radius: 6px;
+  border: 1px solid #f0f0f0;
+  margin-bottom: 8px;
+}
+
+.thoughtStream {
+  max-height: 360px;
+  overflow: auto;
+  background: #fafafa;
+  border: 1px solid #f0f0f0;
+  border-radius: 8px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.thoughtControls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 8px;
+}
+
+.thoughtMatchStats {
+  font-size: 12px;
+  align-self: center;
+}
+
+.thoughtHint {
+  font-size: 12px;
+  color: #8c8c8c;
+  align-self: center;
+}
+
+.thoughtItem {
+  position: relative;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 8px;
+  background: #fff;
+  border: 1px solid #f0f0f0;
+  border-radius: 10px;
+  padding: 8px;
+}
+
+.thoughtItemActive {
+  border-color: #ffd666;
+  background: #fffbe6;
+  box-shadow: 0 0 0 2px rgba(250, 173, 20, 0.12);
+}
+
+.thoughtHeader {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.thoughtBody {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.thoughtIcon {
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #fff;
+  border: 1px solid #f0f0f0;
+}
+
+.thoughtLine {
+  position: absolute;
+  left: 19px;
+  top: 28px;
+  bottom: -10px;
+  width: 1px;
+  background: #f0f0f0;
+  content: '';
+}
+
+.thoughtItemLast .thoughtLine {
+  display: none;
+}
+
+.thoughtMeta {
+  font-size: 12px;
+}
+
+.thoughtContent {
+  margin-bottom: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.thoughtHighlight {
+  background: #fff1b8;
+  border-radius: 2px;
+  padding: 0 2px;
+}
+
+.reportPreview {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.traceJson {
+  display: block;
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  background: #f6f6f6;
+  padding: 12px;
+  border-radius: 8px;
+}
+
+.clickableRow {
+  cursor: pointer;
+}
+
+.clickableRow:hover {
+  background: #fafafa;
+}
+
+.errorRow {
+  background: #fff1f0;
+}
+
+.errorRow:hover {
+  background: #ffe7e6;
+}
+
+@media (max-width: 1200px) {
+  .container {
+    grid-template-columns: 1fr;
+  }
+
+  .grid {
+    grid-template-columns: 1fr;
+  }
+
+  .taskSplit {
+    grid-template-columns: 1fr;
+  }
+
+  .taskDetailSticky {
+    position: static;
+  }
+}
