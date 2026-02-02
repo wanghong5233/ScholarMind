@@ -3,18 +3,25 @@
   margin: 0 auto;
 
   .chat-page__header {
-    text-align: center;
     font-weight: bold;
     font-size: 18px;
     display: flex;
-    gap: 8px;
-    justify-content: center;
+    gap: 12px;
+    justify-content: space-between;
     align-items: center;
 
     .chat-page__header-title {
+      flex: 1;
+      text-align: center;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+    }
+
+    .chat-page__header-actions {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
     }
   }
 
@@ -41,5 +48,25 @@
   .chat-page__editing-snippet {
     color: rgba(0, 0, 0, 0.65);
     font-size: 12px;
+  }
+}
+
+.chat-page__research-suggestion {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  background-color: rgba(99, 102, 241, 0.08);
+  color: #3730a3;
+  margin-bottom: 12px;
+  font-size: 13px;
+
+  .chat-page__research-suggestion-text {
+    display: flex;
+    align-items: center;
+    gap: 6px;
   }
 }

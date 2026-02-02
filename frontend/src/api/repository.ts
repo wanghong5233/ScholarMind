@@ -5,6 +5,8 @@ export interface KnowledgeBase {
   id: number
   name: string
   description?: string | null
+  rag_provider?: string | null
+  rag_config?: Record<string, any> | null
   is_ephemeral: boolean
   created_at: string
   updated_at: string
@@ -37,6 +39,8 @@ export interface OnlineSearchParams {
   query: string
   limit?: number
   year?: string
+  providers?: string[]
+  rank_by?: string
 }
 
 export interface OnlineDocumentCandidate {
@@ -127,7 +131,12 @@ export function listKnowledgeBases(options?: AxiosRequestConfig) {
 }
 
 export function createKnowledgeBase(
-  payload: { name: string; description?: string },
+  payload: {
+    name: string
+    description?: string
+    rag_provider?: string | null
+    rag_config?: Record<string, any> | null
+  },
   options?: AxiosRequestConfig,
 ) {
   return request.post<KnowledgeBase>('knowledgebases', payload, {
@@ -136,7 +145,15 @@ export function createKnowledgeBase(
 }
 
 export function updateKnowledgeBase(
-  params: { kbId: number; payload: { name?: string; description?: string } },
+  params: {
+    kbId: number
+    payload: {
+      name?: string
+      description?: string
+      rag_provider?: string | null
+      rag_config?: Record<string, any> | null
+    }
+  },
   options?: AxiosRequestConfig,
 ) {
   const { kbId, payload } = params
@@ -210,6 +227,18 @@ export function addOnlineDocuments(
     {
       documents,
     },
+    options,
+  )
+}
+
+export function parseIndexDocuments(
+  params: { kbId: number; payload?: { doc_ids?: number[]; session_id?: string } },
+  options?: AxiosRequestConfig,
+) {
+  const { kbId, payload } = params
+  return request.post<JobInfo>(
+    `knowledgebases/${kbId}/documents/parse-index`,
+    payload ?? {},
     options,
   )
 }

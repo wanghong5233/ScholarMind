@@ -29,6 +29,9 @@ class ResearchResult:
     web_search_summary: Optional[str] = None
     web_search_citations: List[ScholarCitation] = field(default_factory=list)
     web_search_trace: Optional[ToolTrace] = None
+    paper_search_summary: Optional[str] = None
+    paper_search_citations: List[ScholarCitation] = field(default_factory=list)
+    paper_search_trace: Optional[ToolTrace] = None
     code_exec_outputs: List[str] = field(default_factory=list)
     code_exec_raw: List[Dict[str, Any]] = field(default_factory=list)
     code_exec_traces: List[ToolTrace] = field(default_factory=list)
@@ -85,7 +88,9 @@ class ResearchAgent:
         top_k: Optional[int] = None,
         index_mode: Optional[str] = None,
         language: Optional[str] = None,
+        context_text: Optional[str] = None,
         use_web_search: bool = False,
+        use_paper_search: bool = False,
         use_code_exec: bool = False,
         code_exec_snippets: Optional[List[str]] = None,
     ) -> ResearchResult:
@@ -98,7 +103,9 @@ class ResearchAgent:
             top_k (Optional[int]): Retrieval top_k override.
             index_mode (Optional[str]): Retrieval index mode.
             language (Optional[str]): Language hint.
+            context_text (Optional[str]): Optional conversation context.
             use_web_search (bool): Whether to run web search.
+            use_paper_search (bool): Whether to run paper search.
             code_exec_snippets (Optional[List[str]]): Optional code snippets.
 
         Returns:
@@ -140,11 +147,18 @@ class ResearchAgent:
             summary=summary,
             citations_count=len(citations),
             language=language,
+            context_text=context_text,
         )
 
         web_summary, web_citations, web_trace = await self._maybe_web_search(
             context=context,
             use_web_search=use_web_search,
+            decision=decision,
+        )
+
+        paper_summary, paper_citations, paper_trace = await self._maybe_paper_search(
+            context=context,
+            use_paper_search=use_paper_search,
             decision=decision,
         )
 
@@ -182,6 +196,9 @@ class ResearchAgent:
             web_search_summary=web_summary,
             web_search_citations=web_citations,
             web_search_trace=web_trace,
+            paper_search_summary=paper_summary,
+            paper_search_citations=paper_citations,
+            paper_search_trace=paper_trace,
             code_exec_outputs=code_exec_outputs,
             code_exec_raw=code_exec_raw,
             code_exec_traces=code_exec_traces,
@@ -203,6 +220,28 @@ class ResearchAgent:
         if not web_calls:
             web_calls = [ToolCall(name="web.search", parameters={"query": context.block.question}, purpose="web")]
         call = web_calls[0]
+        result = await self._tool_router.execute(call, context)
+        if not result.success:
+            return None, [], result.trace
+        return result.summary, result.citations, result.trace
+
+    async def _maybe_paper_search(
+        self,
+        context: ToolContext,
+        use_paper_search: bool,
+        decision: ResearchDecision,
+    ) -> tuple[Optional[str], List[ScholarCitation], Optional[ToolTrace]]:
+        """Run optional academic paper search tool."""
+
+        if not use_paper_search:
+            return None, [], None
+
+        paper_calls = self._filter_tool_calls(decision.tool_calls, tool_name="paper.search")
+        if not paper_calls:
+            paper_calls = [
+                ToolCall(name="paper.search", parameters={"query": context.block.question}, purpose="paper")
+            ]
+        call = paper_calls[0]
         result = await self._tool_router.execute(call, context)
         if not result.success:
             return None, [], result.trace

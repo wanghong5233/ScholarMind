@@ -1,0 +1,64 @@
+.drawer {
+  :global(.ant-drawer-body) {
+    padding: 16px;
+  }
+}
+
+.headerActions {
+  margin-bottom: 12px;
+}
+
+.filters {
+  display: grid;
+  grid-template-columns: 1fr 160px;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.selectionBar {
+  margin-bottom: 8px;
+}
+
+.listContainer {
+  max-height: calc(100vh - 320px);
+  overflow: auto;
+}
+
+.loading {
+  display: flex;
+  justify-content: center;
+  padding: 32px 0;
+}
+
+.noteItem {
+  align-items: flex-start;
+}
+
+.noteRow {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 12px;
+  width: 100%;
+}
+
+.noteContent {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.noteTitle {
+  font-weight: 600;
+}
+
+.noteSummary {
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.noteMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}

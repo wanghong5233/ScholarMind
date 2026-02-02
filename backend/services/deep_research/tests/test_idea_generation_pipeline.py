@@ -1,17 +1,14 @@
-"""Tests for IdeaGenerationPipeline prompt building."""
+"""Tests for IdeaGenerationPipeline prompt bundles."""
 
-from service.idea_generation_pipeline import IdeaGenerationPipeline
-from schemas.idea_generation import IdeaGenerationRequest
+from utils.prompt_loader import load_prompt_bundle
 
 
-def test_idea_prompt_language_detection() -> None:
-    """Ensure prompt switches language based on topic."""
+def test_ideagen_prompt_bundle_keys() -> None:
+    """Ensure prompt bundles contain required keys."""
 
-    pipeline = IdeaGenerationPipeline("http://example", "/tmp", 30)
-    request = IdeaGenerationRequest(topic="Transformer", idea_count=3)
-    prompt = pipeline._build_prompt(request)
-    assert "Generate 3 research ideas" in prompt
-
-    zh_request = IdeaGenerationRequest(topic="注意力机制", idea_count=3)
-    zh_prompt = pipeline._build_prompt(zh_request)
-    assert "生成 3 个研究想法" in zh_prompt
+    zh_prompts = load_prompt_bundle("ideagen", "zh")
+    en_prompts = load_prompt_bundle("ideagen", "en")
+    assert "extract_knowledge_system" in zh_prompts
+    assert "explore_ideas_system" in zh_prompts
+    assert "extract_knowledge_system" in en_prompts
+    assert "explore_ideas_system" in en_prompts

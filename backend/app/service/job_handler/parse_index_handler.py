@@ -10,6 +10,9 @@ from service.core.ingestion.interfaces import ParsedBlock
 from core.config import settings
 from service.core.ingestion.embedder import SimpleAPIEmbedder
 from service.core.ingestion.indexer import ESIndexer
+from service.core.rag.graph.graph_service import KnowledgeGraphService
+from service.core.rag.providers.registry import resolve_provider
+from service import knowledgebase_service
 from service.core.ingestion.metadata_extractor import DefaultMetadataExtractor
 from service.core.ingestion.structured_doc_builder import StructuredDocumentBuilder
 from service import document_service
@@ -28,6 +31,7 @@ class ParseIndexHandler(BaseJobHandler):
         chunker = RecursiveCharacterChunker()
         embedder = SimpleAPIEmbedder()
         indexer = ESIndexer()
+        graph_service = KnowledgeGraphService(db=db)
         metadata_extractor = DefaultMetadataExtractor()
         structured_builder = StructuredDocumentBuilder()
 
@@ -38,6 +42,22 @@ class ParseIndexHandler(BaseJobHandler):
                 session_index = f"sm_sess_{sess_id}"
         except Exception:
             session_index = None
+
+        kb_provider = None
+        kb_config = None
+        try:
+            kb_obj = knowledgebase_service.get_kb_by_id(db, kb_id, user_id)
+            kb_provider = resolve_provider(getattr(kb_obj, "rag_provider", None))
+            kb_config = getattr(kb_obj, "rag_config", None)
+        except Exception:
+            kb_provider = None
+            kb_config = None
+
+        enable_multimodal = bool(settings.SM_ENABLE_MULTIMODAL_CHUNKS)
+        if isinstance(kb_config, dict):
+            enable_multimodal = bool(kb_config.get("enable_multimodal"))
+        if str(kb_provider or "").lower() in {"multimodal_graph"}:
+            enable_multimodal = True
 
         for doc_id in doc_ids:
             try:
@@ -144,13 +164,21 @@ class ParseIndexHandler(BaseJobHandler):
                     log.error(f"[EMBED_FAIL] doc_id={doc_id} error={e}")
                     raise
                 
-                for rec in records:
+                for idx, rec in enumerate(records):
                     md = rec.setdefault("metadata", {})
                     md.setdefault("kb_id", str(kb_id))
                     md.setdefault("document_id", str(doc_id))
                     md.setdefault("page", md.get("page", 1))
                     md.setdefault("offset_start", md.get("offset_start", 0))
                     md.setdefault("offset_end", md.get("offset_end", 0))
+                    if "chunk_id" not in md:
+                        md["chunk_id"] = ESIndexer.build_chunk_id(
+                            kb_id=kb_id,
+                            document_id=doc_id,
+                            chunk_index=idx,
+                            text=rec.get("text", "") or "",
+                            base_id=md.get("id"),
+                        )
                     if doc.title:
                         md.setdefault("title", doc.title)
                     if doc.doi:
@@ -183,11 +211,32 @@ class ParseIndexHandler(BaseJobHandler):
                         f"[INDEX_START] doc_id={doc_id} records={len(records)} "
                         f"multimodal={multimodal_stats} index={session_index or 'default'}"
                     )
-                    indexer.index(records=records, kb_id=kb_id, document_id=doc_id, session_index=session_index)
+                    indexer.index(
+                        records=records,
+                        kb_id=kb_id,
+                        document_id=doc_id,
+                        session_index=session_index,
+                        enable_multimodal_chunks=enable_multimodal,
+                    )
                     log.info(f"[INDEX_OK] doc_id={doc_id}")
                 except Exception as e:
                     log.error(f"[INDEX_FAIL] doc_id={doc_id} error={e}")
                     raise
+
+                # 知识图谱构建（可选）
+                try:
+                    created = graph_service.build_from_records(
+                        kb_id=kb_id,
+                        document_id=doc_id,
+                        records=records,
+                        provider=kb_provider,
+                        rag_config=kb_config,
+                    )
+                    if created > 0:
+                        db.commit()
+                        log.info(f"[GRAPH_OK] doc_id={doc_id} chunks_used={created}")
+                except Exception as e:
+                    log.warning(f"[GRAPH_FAIL] doc_id={doc_id} error={e}")
                 
                 log.info(f"[DOC_COMPLETE] doc_id={doc_id} chunks={len(records)}")
                 result.details.append({"doc_id": doc_id, "status": "ok", "chunks": len(records)})

@@ -2,10 +2,12 @@ import * as api from '@/api'
 import type {
   DeepResearchCitation,
   IdeaGenerationRequest,
+  IdeaGenerationNoteInput,
   IdeaGenerationResponse,
   IdeaGenerationRunMeta,
 } from '@/api/deepResearch'
 import Markdown from '@/components/markdown'
+import { NOTEBOOK_WORKSPACE_ID, createNotebookNoteFile } from '@/utils/notebook'
 import { useRequest } from 'ahooks'
 import {
   Button,
@@ -15,13 +17,15 @@ import {
   Input,
   InputNumber,
   List,
+  Modal,
   Space,
   Tag,
   Typography,
   message,
 } from 'antd'
 import dayjs from 'dayjs'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import styles from './index.module.scss'
 
 const { Text } = Typography
@@ -32,12 +36,46 @@ const STATUS_COLORS: Record<string, string> = {
   failed: 'red',
 }
 
+const FRONT_MATTER_REGEX = /^---\s*[\r\n]+[\s\S]*?\r?\n---\s*/m
+
+type IdeaGenLocationState = {
+  prefill?: {
+    sessionId?: string
+    topic?: string
+  }
+  notes?: Array<{
+    id?: string
+    title?: string
+    content?: string
+    tags?: string[]
+    source?: string
+  }>
+  selection?: string
+}
+
+type NoteInput = IdeaGenerationNoteInput & { id: string }
+
+type DeepResearchIdeaContext = {
+  ideaKey?: string
+  ideaTitle?: string
+  ideaDescription?: string
+  knowledgePoint?: string
+  pointDescription?: string
+  dimension?: string
+  novelty?: string
+  feasibility?: string
+  reason?: string
+}
+
 function getStatusColor(status?: string) {
   if (!status) return 'default'
   return STATUS_COLORS[status.toLowerCase()] || 'default'
 }
 
 export default function IdeaGenerationPage() {
+  const navigate = useNavigate()
+  const location = useLocation()
+  const prefillHandledRef = useRef(false)
   const [topic, setTopic] = useState('')
   const [ideaCount, setIdeaCount] = useState<number | null>(5)
   const [language, setLanguage] = useState('')
@@ -46,6 +84,20 @@ export default function IdeaGenerationPage() {
   const [sessionId, setSessionId] = useState('')
   const [topK, setTopK] = useState<number | null>(null)
   const [indexMode, setIndexMode] = useState('')
+  const [noteInputs, setNoteInputs] = useState<NoteInput[]>([])
+  const [editingIdea, setEditingIdea] = useState<{
+    key: string
+    ideaTitle: string
+    ideaDescription?: string
+    knowledgePoint?: string
+    pointDescription?: string
+    dimension?: string
+    novelty?: string
+    feasibility?: string
+    reason?: string
+  } | null>(null)
+  const [editingIdeaTitle, setEditingIdeaTitle] = useState('')
+  const [savingNoteIds, setSavingNoteIds] = useState<Record<string, boolean>>({})
 
   const [result, setResult] = useState<IdeaGenerationResponse | null>(null)
   const [selectedMeta, setSelectedMeta] = useState<IdeaGenerationRunMeta | null>(null)
@@ -114,6 +166,55 @@ export default function IdeaGenerationPage() {
     refreshRuns()
   }, [refreshRuns])
 
+  useEffect(() => {
+    if (prefillHandledRef.current) return
+    const state = location.state as IdeaGenLocationState | null
+    if (!state) return
+    prefillHandledRef.current = true
+
+    if (state.prefill?.sessionId) {
+      setSessionId(state.prefill.sessionId)
+    }
+    if (state.prefill?.topic && !topic) {
+      setTopic(state.prefill.topic)
+    }
+
+    const nextNotes: NoteInput[] = []
+    const buildId = () =>
+      window.crypto?.randomUUID?.() ?? `note-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
+
+    const selection = state.selection?.trim()
+    if (selection) {
+      const title = selection.split(/\r?\n/)[0]?.slice(0, 24) || '对话选段'
+      nextNotes.push({
+        id: buildId(),
+        title,
+        content: selection,
+        source: 'chat_selection',
+      })
+    }
+    if (Array.isArray(state.notes)) {
+      state.notes.forEach((note) => {
+        const rawContent = (note.content || '').trim()
+        const content = rawContent.replace(FRONT_MATTER_REGEX, '').trim()
+        if (!content) return
+        nextNotes.push({
+          id: note.id || buildId(),
+          title: (note.title || '').trim() || '笔记条目',
+          content,
+          source: note.source || 'notebook',
+          tags: note.tags,
+        })
+      })
+    }
+    if (nextNotes.length) {
+      setNoteInputs(nextNotes)
+      if (!topic) {
+        setTopic(nextNotes[0].title || '')
+      }
+    }
+  }, [location.state, topic])
+
   const sortedRuns = useMemo(() => {
     return [...runList].sort((a, b) => {
       const left = a.started_at || a.finished_at || ''
@@ -143,25 +244,284 @@ export default function IdeaGenerationPage() {
     setConstraints((prev) => prev.filter((item) => item !== value))
   }, [])
 
+  const handleRemoveNote = useCallback((id: string) => {
+    setNoteInputs((prev) => prev.filter((note) => note.id !== id))
+  }, [])
+
+  const buildNoteContextText = useCallback(() => {
+    if (!noteInputs.length) return ''
+    const lines: string[] = ['## 笔记上下文']
+    noteInputs.forEach((note, index) => {
+      const title = note.title?.trim() || `笔记 ${index + 1}`
+      lines.push(`### ${title}`)
+      if (note.tags?.length) {
+        lines.push(`标签：${note.tags.join(', ')}`)
+      }
+      if (note.source) {
+        lines.push(`来源：${note.source}`)
+      }
+      const content = (note.content || '').trim()
+      if (content) {
+        const excerpt = content.length > 1200 ? `${content.slice(0, 1200)}...` : content
+        lines.push(excerpt)
+      }
+    })
+    return lines.join('\n').trim()
+  }, [noteInputs])
+
+  const buildIdeaContextText = useCallback(
+    (context?: DeepResearchIdeaContext) => {
+      const sections: string[] = []
+      const ideaLines: string[] = []
+      const ideaTitle = context?.ideaTitle?.trim()
+      if (ideaTitle) {
+        ideaLines.push('## IdeaGen 结果')
+        ideaLines.push(`想法标题：${ideaTitle}`)
+      }
+      if (context?.ideaDescription) {
+        ideaLines.push(`想法描述：${context.ideaDescription}`)
+      }
+      if (context?.knowledgePoint) {
+        ideaLines.push(`关联知识点：${context.knowledgePoint}`)
+      }
+      if (context?.pointDescription) {
+        ideaLines.push(`知识点说明：${context.pointDescription}`)
+      }
+      if (context?.dimension) {
+        ideaLines.push(`维度：${context.dimension}`)
+      }
+      if (context?.novelty) {
+        ideaLines.push(`创新点：${context.novelty}`)
+      }
+      if (context?.feasibility) {
+        ideaLines.push(`可行性：${context.feasibility}`)
+      }
+      if (context?.reason) {
+        ideaLines.push(`筛选原因：${context.reason}`)
+      }
+      if (ideaLines.length) {
+        sections.push(ideaLines.join('\n'))
+      }
+      const noteContext = buildNoteContextText()
+      if (noteContext) {
+        sections.push(noteContext)
+      }
+      return sections.join('\n\n').trim()
+    },
+    [buildNoteContextText],
+  )
+
+  const handleStartDeepResearch = useCallback(
+    (value: string, context?: DeepResearchIdeaContext) => {
+      if (!sessionId.trim()) {
+        message.warning('需要会话 ID 才能发起 DeepResearch')
+        return
+      }
+      const topicValue = value.trim()
+      if (!topicValue) {
+        message.warning('请输入研究主题')
+        return
+      }
+      const contextText = buildIdeaContextText({
+        ...context,
+        ideaTitle: context?.ideaTitle || topicValue,
+      })
+      const state =
+        contextText && contextText.length
+          ? {
+              noteContext: {
+                title: topicValue,
+                content: contextText,
+                source: 'ideagen',
+                noteId: context?.ideaKey,
+                sessionId,
+              },
+            }
+          : undefined
+      navigate(
+        `/deep-research?topic=${encodeURIComponent(topicValue)}&sessionId=${encodeURIComponent(
+          sessionId,
+        )}`,
+        state ? { state } : undefined,
+      )
+    },
+    [buildIdeaContextText, navigate, sessionId],
+  )
+
+  const handleEditIdea = useCallback((payload: {
+    key: string
+    ideaTitle: string
+    ideaDescription?: string
+    knowledgePoint?: string
+    pointDescription?: string
+    dimension?: string
+    novelty?: string
+    feasibility?: string
+    reason?: string
+  }) => {
+    setEditingIdea(payload)
+    setEditingIdeaTitle(payload.ideaTitle)
+  }, [])
+
+  const handleConfirmEditIdea = useCallback(() => {
+    if (!editingIdea) return
+    handleStartDeepResearch(editingIdeaTitle, {
+      ...editingIdea,
+      ideaTitle: editingIdeaTitle,
+    })
+    setEditingIdea(null)
+  }, [editingIdea, editingIdeaTitle, handleStartDeepResearch])
+
+  const escapeYaml = useCallback((value: string) => {
+    return (value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+  }, [])
+
+  const buildIdeaNoteMarkdown = useCallback(
+    (payload: {
+      ideaTitle: string
+      ideaDescription?: string
+      knowledgePoint?: string
+      pointDescription?: string
+      dimension?: string
+      novelty?: string
+      feasibility?: string
+    }) => {
+      const createdAt = dayjs().toISOString()
+      const summary =
+        payload.ideaDescription ||
+        payload.pointDescription ||
+        payload.knowledgePoint ||
+        payload.ideaTitle
+      const tags = [
+        'ideagen',
+        payload.dimension,
+        payload.knowledgePoint,
+      ].filter(Boolean) as string[]
+      const tagsYaml = tags.map((tag) => `"${escapeYaml(tag)}"`).join(', ')
+      const frontMatter = [
+        '---',
+        `title: "${escapeYaml(payload.ideaTitle)}"`,
+        `summary: "${escapeYaml(summary || payload.ideaTitle)}"`,
+        `tags: [${tagsYaml}]`,
+        `session_id: "${escapeYaml(sessionId || '')}"`,
+        `created_at: "${createdAt}"`,
+        `source_excerpt: "${escapeYaml(summary || payload.ideaTitle)}"`,
+        '---',
+      ].join('\n')
+
+      const lines = [
+        `# ${payload.ideaTitle}`,
+        '',
+        '## 想法概述',
+        payload.ideaDescription || '待补充',
+        '',
+        '## 关联知识点',
+        payload.knowledgePoint ? `- ${payload.knowledgePoint}` : '- 待补充',
+      ]
+      if (payload.pointDescription) {
+        lines.push(`- ${payload.pointDescription}`)
+      }
+      lines.push('', '## 评估')
+      if (payload.dimension) {
+        lines.push(`- 维度：${payload.dimension}`)
+      }
+      if (payload.novelty) {
+        lines.push(`- 创新点：${payload.novelty}`)
+      }
+      if (payload.feasibility) {
+        lines.push(`- 可行性：${payload.feasibility}`)
+      }
+      return `${frontMatter}\n\n${lines.join('\n')}`.trim()
+    },
+    [escapeYaml, sessionId],
+  )
+
+  const openNotebookInLatex = useCallback((path: string) => {
+    if (typeof window === 'undefined') return
+    const url = new URL(
+      `${import.meta.env.BASE_URL || '/'}latex-editor/${NOTEBOOK_WORKSPACE_ID}`,
+      window.location.origin,
+    )
+    url.searchParams.set('file', path)
+    window.open(url.toString(), '_blank', 'noopener')
+  }, [])
+
+  const handleSaveIdeaToNotebook = useCallback(
+    async (
+      key: string,
+      payload: Parameters<typeof buildIdeaNoteMarkdown>[0],
+      options?: { openAfterSave?: boolean },
+    ) => {
+      try {
+        setSavingNoteIds((prev) => ({ ...prev, [key]: true }))
+        const markdown = buildIdeaNoteMarkdown(payload)
+        const savedPath = await createNotebookNoteFile(markdown, payload.ideaTitle)
+        message.success('已保存到笔记本')
+        if (options?.openAfterSave && savedPath) {
+          openNotebookInLatex(savedPath)
+        }
+      } catch (error: any) {
+        const detail =
+          error?.response?.data?.detail || error?.response?.data?.message || error?.message
+        message.error(detail ? `保存失败：${detail}` : '保存笔记失败')
+      } finally {
+        setSavingNoteIds((prev) => ({ ...prev, [key]: false }))
+      }
+    },
+    [buildIdeaNoteMarkdown, openNotebookInLatex],
+  )
+
   const handleSubmit = useCallback(async () => {
     const trimmedTopic = topic.trim()
-    if (!trimmedTopic) {
-      message.warning('请输入研究主题')
+    const hasNotes = noteInputs.length > 0
+    if (!trimmedTopic && !hasNotes) {
+      message.warning('请输入研究主题或添加笔记上下文')
       return
+    }
+    if (!sessionId.trim()) {
+      message.warning('请输入会话 ID')
+      return
+    }
+    let resolvedTopic = trimmedTopic
+    if (!resolvedTopic && hasNotes) {
+      const firstNote = noteInputs[0]
+      resolvedTopic =
+        firstNote?.title?.trim() ||
+        firstNote?.content?.trim().split(/\r?\n/)[0]?.slice(0, 40) ||
+        '研究方向提炼'
+      setTopic(resolvedTopic)
     }
 
     const payload: IdeaGenerationRequest = {
-      topic: trimmedTopic,
+      topic: resolvedTopic || undefined,
       idea_count: ideaCount ?? undefined,
       language: language.trim() || undefined,
       constraints,
-      session_id: sessionId.trim() || undefined,
+      notes: noteInputs.length
+        ? noteInputs.map((note) => ({
+            title: note.title,
+            content: note.content,
+            tags: note.tags,
+            source: note.source,
+          }))
+        : undefined,
+      session_id: sessionId.trim(),
       top_k: topK ?? undefined,
       index_mode: indexMode.trim() || undefined,
     }
 
     await runIdeaGeneration(payload)
-  }, [constraints, ideaCount, indexMode, language, runIdeaGeneration, sessionId, topK, topic])
+  }, [
+    constraints,
+    ideaCount,
+    indexMode,
+    language,
+    noteInputs,
+    runIdeaGeneration,
+    sessionId,
+    topK,
+    topic,
+  ])
 
   const renderCitations = useCallback((items: DeepResearchCitation[] = []) => {
     if (!items.length) {
@@ -200,7 +560,7 @@ export default function IdeaGenerationPage() {
             <Input.TextArea
               value={topic}
               onChange={(event) => setTopic(event.target.value)}
-              placeholder="输入研究主题"
+              placeholder="研究主题（可选，或使用笔记上下文）"
               autoSize={{ minRows: 2, maxRows: 4 }}
             />
             <Space wrap>
@@ -221,7 +581,7 @@ export default function IdeaGenerationPage() {
               <Input
                 value={sessionId}
                 onChange={(event) => setSessionId(event.target.value)}
-                placeholder="会话 ID（可选）"
+                placeholder="会话 ID（必填）"
               />
               <InputNumber
                 min={1}
@@ -256,6 +616,29 @@ export default function IdeaGenerationPage() {
             ) : (
               <Text type="secondary">暂无约束条件</Text>
             )}
+            <div className={styles.noteSection}>
+              <Text strong>笔记/选段上下文</Text>
+              {noteInputs.length ? (
+                <div className={styles.noteList}>
+                  {noteInputs.map((note) => (
+                    <div key={note.id} className={styles.noteItem}>
+                      <div className={styles.noteHeader}>
+                        <Text strong>{note.title || '笔记条目'}</Text>
+                        <Button type="link" size="small" onClick={() => handleRemoveNote(note.id)}>
+                          移除
+                        </Button>
+                      </div>
+                      <Text type="secondary" className={styles.noteExcerpt}>
+                        {note.content.slice(0, 120)}
+                        {note.content.length > 120 ? '…' : ''}
+                      </Text>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <Text type="secondary">暂无笔记上下文</Text>
+              )}
+            </div>
             <Button type="primary" onClick={handleSubmit} loading={runLoading}>
               生成想法
             </Button>
@@ -328,6 +711,153 @@ export default function IdeaGenerationPage() {
                   </Text>
                 ) : null}
               </div>
+              {result.ideas?.length ? (
+                <>
+                  <div className={styles.structuredHeader}>
+                    <Text strong>结构化想法</Text>
+                  </div>
+                  <div className={styles.structuredIdeas}>
+                    {result.ideas.map((item, index) => {
+                      const groupKey = `${index}-${item.knowledge_point}`
+                      return (
+                        <Card key={groupKey} size="small" className={styles.ideaGroup}>
+                          <div className={styles.ideaGroupHeader}>
+                            <Text strong>{item.knowledge_point}</Text>
+                            {item.description ? (
+                              <Text type="secondary">{item.description}</Text>
+                            ) : null}
+                          </div>
+                          <List
+                            size="small"
+                            dataSource={item.research_ideas || []}
+                            locale={{ emptyText: '暂无想法条目' }}
+                            renderItem={(idea) => {
+                              const ideaKey = `${groupKey}-${idea.title}`
+                              const isKept = item.kept_ideas?.includes(idea.title)
+                              const isRejected = item.rejected_ideas?.includes(idea.title)
+                              const reason = item.reasons?.[idea.title]
+                              return (
+                                <List.Item
+                                  className={styles.ideaItem}
+                                  actions={[
+                                    <Button
+                                      key="research"
+                                      type="link"
+                                      onClick={() =>
+                                        handleStartDeepResearch(idea.title, {
+                                          ideaKey,
+                                          ideaTitle: idea.title,
+                                          ideaDescription: idea.description,
+                                          knowledgePoint: item.knowledge_point,
+                                          pointDescription: item.description,
+                                          dimension: idea.dimension,
+                                          novelty: idea.novelty,
+                                          feasibility: idea.feasibility,
+                                          reason,
+                                        })
+                                      }
+                                    >
+                                      深入调研
+                                    </Button>,
+                                    <Button
+                                      key="edit"
+                                      type="link"
+                                      onClick={() =>
+                                        handleEditIdea({
+                                          key: ideaKey,
+                                          ideaTitle: idea.title,
+                                          ideaDescription: idea.description,
+                                          knowledgePoint: item.knowledge_point,
+                                          pointDescription: item.description,
+                                          dimension: idea.dimension,
+                                          novelty: idea.novelty,
+                                          feasibility: idea.feasibility,
+                                          reason,
+                                        })
+                                      }
+                                    >
+                                      编辑后调研
+                                    </Button>,
+                                    <Button
+                                      key="save"
+                                      type="link"
+                                      loading={!!savingNoteIds[ideaKey]}
+                                      onClick={() =>
+                                        handleSaveIdeaToNotebook(ideaKey, {
+                                          ideaTitle: idea.title,
+                                          ideaDescription: idea.description,
+                                          knowledgePoint: item.knowledge_point,
+                                          pointDescription: item.description,
+                                          dimension: idea.dimension,
+                                          novelty: idea.novelty,
+                                          feasibility: idea.feasibility,
+                                        })
+                                      }
+                                    >
+                                      保存到笔记
+                                    </Button>,
+                                    <Button
+                                      key="save-edit"
+                                      type="link"
+                                      loading={!!savingNoteIds[ideaKey]}
+                                      onClick={() =>
+                                        handleSaveIdeaToNotebook(
+                                          ideaKey,
+                                          {
+                                            ideaTitle: idea.title,
+                                            ideaDescription: idea.description,
+                                            knowledgePoint: item.knowledge_point,
+                                            pointDescription: item.description,
+                                            dimension: idea.dimension,
+                                            novelty: idea.novelty,
+                                            feasibility: idea.feasibility,
+                                          },
+                                          { openAfterSave: true },
+                                        )
+                                      }
+                                    >
+                                      保存并编辑
+                                    </Button>,
+                                  ]}
+                                >
+                                  <div className={styles.ideaMeta}>
+                                    <div className={styles.ideaTitleRow}>
+                                      <Text strong>{idea.title}</Text>
+                                      {isKept ? <Tag color="green">保留</Tag> : null}
+                                      {isRejected ? <Tag color="red">淘汰</Tag> : null}
+                                      {idea.dimension ? <Tag>{idea.dimension}</Tag> : null}
+                                    </div>
+                                    {idea.description ? (
+                                      <Text type="secondary">{idea.description}</Text>
+                                    ) : null}
+                                    <div className={styles.ideaInsights}>
+                                      {idea.novelty ? (
+                                        <Text type="secondary">创新点：{idea.novelty}</Text>
+                                      ) : null}
+                                      {idea.feasibility ? (
+                                        <Text type="secondary">可行性：{idea.feasibility}</Text>
+                                      ) : null}
+                                      {reason ? (
+                                        <Text type="secondary">筛选原因：{reason}</Text>
+                                      ) : null}
+                                    </div>
+                                  </div>
+                                </List.Item>
+                              )
+                            }}
+                          />
+                          {item.statement_markdown ? (
+                            <div className={styles.ideaStatement}>
+                              <Markdown value={item.statement_markdown} />
+                            </div>
+                          ) : null}
+                        </Card>
+                      )
+                    })}
+                  </div>
+                  <Divider />
+                </>
+              ) : null}
               <Markdown value={result.ideas_markdown} />
               <Divider />
               <div>
@@ -345,6 +875,27 @@ export default function IdeaGenerationPage() {
           )}
         </Card>
       </div>
+
+      <Modal
+        title="编辑研究主题"
+        open={!!editingIdea}
+        onCancel={() => setEditingIdea(null)}
+        onOk={handleConfirmEditIdea}
+        okText="开始调研"
+        cancelText="取消"
+        destroyOnClose
+      >
+        <Space direction="vertical" size={8} style={{ width: '100%' }}>
+          <Input
+            value={editingIdeaTitle}
+            onChange={(event) => setEditingIdeaTitle(event.target.value)}
+            placeholder="输入研究主题"
+          />
+          {editingIdea?.ideaDescription ? (
+            <Text type="secondary">原始描述：{editingIdea.ideaDescription}</Text>
+          ) : null}
+        </Space>
+      </Modal>
     </div>
   )
 }

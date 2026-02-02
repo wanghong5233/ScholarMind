@@ -1,24 +1,27 @@
 """
 LaTeX Agent API 路由
 """
-from fastapi import APIRouter, HTTPException, Depends, Header, UploadFile, File, Form
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi import APIRouter, HTTPException, Depends, Header, UploadFile, File, Form, Request
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Dict, Any, Optional, List, Literal
 from pathlib import Path
+import asyncio
 import logging
 import json
 import uuid
 import shutil
 import time
 
-from dependencies import get_agent
+from dependencies import get_agent, refresh_llm_client, get_llm_client
 from config import settings
 from service.agent_service import LaTeXEditAgent, AgentState
 from service.tools.validation_tools import CompileLaTeXTool
 from service.rag_api_client import get_rag_api_client
-from metrics import format_prometheus_metrics, record_user_feedback
+from service.async_run_manager import get_async_run_manager
+from metrics import collect_metrics_summary, format_prometheus_metrics, record_user_feedback
 from utils.trace import get_trace_id
+from utils.prompt_loader import clear_prompt_cache
 from security import sanitize_user_input, UserRateLimiter
 
 logger = logging.getLogger(__name__)
@@ -34,7 +37,10 @@ class LaTeXEditRequest(BaseModel):
     """编辑文档请求"""
     user_intent: str
     target_location: Optional[Dict[str, Any]] = None
-    options: Optional[Dict[str, Any]] = None
+    options: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Optional overrides (llm_provider/llm_model/llm_temperature/llm_max_tokens)"
+    )
     collect_training_data: bool = False  # 是否收集训练数据（用于 RL 训练）
     knowledge_base_id: Optional[int] = Field(
         default=None,
@@ -94,6 +100,40 @@ class LaTeXEditResponse(BaseModel):
     plan: Optional[Dict[str, Any]] = None
     warnings: Optional[List[str]] = None
     trace_id: Optional[str] = None
+    operation_id: Optional[str] = None
+    history_path: Optional[str] = None
+    episode_id: Optional[str] = None
+
+
+class OperationSummary(BaseModel):
+    """操作历史摘要"""
+    operation_id: str
+    trace_id: Optional[str] = None
+    workspace_id: str
+    user_id: int
+    timestamp: str
+    success: bool
+    intent_type: Optional[str] = None
+    user_intent: str
+    modified_files: List[str] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    snapshot: Optional[Dict[str, Any]] = None
+
+
+class RevertOperationRequest(BaseModel):
+    """回滚操作请求"""
+    files: Optional[List[str]] = Field(
+        default=None,
+        description="仅回滚指定文件；不传则回滚该操作的全部文件",
+    )
+
+
+class RevertOperationResponse(BaseModel):
+    """回滚操作响应"""
+    operation_id: str
+    reverted_files: List[str]
+    deleted_files: List[str]
+    skipped_files: List[str]
 
 
 class AgentFeedbackRequest(BaseModel):
@@ -169,6 +209,14 @@ class UpdateWorkspaceRequest(BaseModel):
     config: Optional[Dict[str, Any]] = None
 
 
+class WorkspaceSessionRequest(BaseModel):
+    """绑定或解绑 workspace 的 session_id"""
+    session_id: Optional[str] = Field(
+        default=None,
+        description="绑定的 session_id，传空则解绑",
+    )
+
+
 class CompileRequest(BaseModel):
     """编译请求"""
     main_file: Optional[str] = Field(None, alias="mainFile")
@@ -223,21 +271,194 @@ def _safe_join(base: Path, relative_path: str) -> Path:
     return target
 
 
+def _history_root(workspace_path: Path) -> Path:
+    return workspace_path / ".agent_history"
+
+
+def _load_operation_snapshot(workspace_path: Path, operation_id: str) -> Dict[str, Any]:
+    history_root = _history_root(workspace_path)
+    snapshot_path = history_root / "operations" / operation_id / "snapshot.json"
+    if not snapshot_path.exists():
+        raise HTTPException(status_code=404, detail="Operation snapshot not found")
+    try:
+        return json.loads(snapshot_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Failed to read snapshot %s: %s", snapshot_path, exc)
+        raise HTTPException(status_code=500, detail="Failed to read operation snapshot")
+
+
+def _cleanup_empty_parents(target: Path, workspace_root: Path) -> None:
+    current = target.parent
+    while current != workspace_root and current.exists():
+        try:
+            if any(current.iterdir()):
+                break
+            current.rmdir()
+        except Exception:
+            break
+        current = current.parent
+
+
+def _lock_root(workspace_path: Path) -> Path:
+    return _history_root(workspace_path) / "locks"
+
+
+def _lock_path(workspace_path: Path) -> Path:
+    return _lock_root(workspace_path) / "workspace.lock"
+
+
+def _read_workspace_lock(workspace_path: Path, prune_stale: bool = True) -> Optional[Dict[str, Any]]:
+    lock_path = _lock_path(workspace_path)
+    if not lock_path.exists():
+        return None
+    try:
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Failed to parse lock file %s: %s", lock_path, exc)
+        return None
+
+    if prune_stale:
+        ttl = settings.AGENT_WORKSPACE_LOCK_TTL or settings.AGENT_TIMEOUT
+        created_at = payload.get("created_at") or 0
+        if ttl and created_at and time.time() > created_at + ttl:
+            try:
+                lock_path.unlink()
+                logger.warning("Removed stale workspace lock: %s", lock_path)
+            except Exception:
+                pass
+            return None
+    return payload
+
+
+def _acquire_workspace_lock(
+    workspace_path: Path,
+    lock_id: str,
+    user_id: int,
+    reason: str,
+    trace_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    existing = _read_workspace_lock(workspace_path, prune_stale=True)
+    if existing:
+        detail = (
+            f"Workspace is locked by agent task (lock_id={existing.get('lock_id')})"
+        )
+        raise HTTPException(status_code=409, detail=detail)
+
+    lock_root = _lock_root(workspace_path)
+    lock_root.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    ttl = settings.AGENT_WORKSPACE_LOCK_TTL or settings.AGENT_TIMEOUT
+    payload = {
+        "lock_id": lock_id,
+        "user_id": user_id,
+        "trace_id": trace_id,
+        "reason": reason,
+        "created_at": now,
+        "expires_at": now + ttl if ttl else None,
+    }
+    _lock_path(workspace_path).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return payload
+
+
+def _release_workspace_lock(workspace_path: Path, lock_id: str) -> None:
+    lock_path = _lock_path(workspace_path)
+    if not lock_path.exists():
+        return
+    try:
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+    except Exception:
+        payload = None
+    if payload and payload.get("lock_id") != lock_id:
+        return
+    try:
+        lock_path.unlink()
+    except Exception as exc:
+        logger.warning("Failed to release workspace lock %s: %s", lock_path, exc)
+
+
+def _assert_workspace_unlocked(workspace_path: Path) -> None:
+    lock_info = _read_workspace_lock(workspace_path, prune_stale=True)
+    if lock_info:
+        detail = (
+            f"Workspace is locked by agent task (lock_id={lock_info.get('lock_id')})"
+        )
+        raise HTTPException(status_code=409, detail=detail)
+
+
+def _infer_primary_format(main_file: str) -> str:
+    """Infer primary format from the main file extension."""
+
+    suffix = Path(main_file or "").suffix.lower()
+    if suffix in {".md", ".markdown"}:
+        return "markdown"
+    if suffix == ".txt":
+        return "plaintext"
+    if suffix == ".bib":
+        return "bib"
+    if suffix == ".tex":
+        return "latex"
+    return "plaintext"
+
+
+def _normalize_workspace_config(config: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Normalize workspace config with defaults."""
+
+    base = {
+        "workspace_type": "latex",
+        "primary_format": "latex",
+        "supported_formats": ["latex", "bib"],
+        "main_file": "main.tex",
+        "bibliography_file": "references.bib",
+        "enable_web_search": False,
+    }
+    if config:
+        base.update(config)
+    if not base.get("primary_format"):
+        base["primary_format"] = _infer_primary_format(base.get("main_file", ""))
+    if not base.get("workspace_type"):
+        base["workspace_type"] = "latex" if base["primary_format"] == "latex" else "doc_studio"
+    if not base.get("supported_formats"):
+        if base["primary_format"] == "latex":
+            base["supported_formats"] = ["latex", "bib"]
+        elif base["primary_format"] == "markdown":
+            base["supported_formats"] = ["markdown", "plaintext"]
+        else:
+            base["supported_formats"] = [base["primary_format"]]
+    return base
+
+
 def _load_workspace_config(workspace_path: Path) -> Dict[str, Any]:
     config_file = workspace_path / ".workspace.json"
     if config_file.exists():
         try:
             with open(config_file, "r", encoding="utf-8") as fh:
-                return json.load(fh)
+                config = json.load(fh)
+            return _normalize_workspace_config(config)
         except Exception as exc:
             logger.warning("Failed to load workspace config %s: %s", config_file, exc)
-    return {}
+    return _normalize_workspace_config({})
 
 
 def _write_workspace_config(workspace_path: Path, config: Dict[str, Any]):
     config_file = workspace_path / ".workspace.json"
     with open(config_file, "w", encoding="utf-8") as fh:
         json.dump(config, fh, ensure_ascii=False, indent=2)
+
+
+def _get_async_run_dir(workspace_path: Path) -> Path:
+    """Return async run directory for a workspace."""
+
+    return workspace_path / ".agent_history" / "async_runs"
+
+
+def _format_sse(event_type: str, payload: Dict[str, Any]) -> str:
+    """Format SSE event payload."""
+
+    data = json.dumps(payload, ensure_ascii=False, default=str)
+    return f"event: {event_type}\ndata: {data}\n\n"
 
 
 def _record_compile_result(workspace_path: Path, result: Dict[str, Any]):
@@ -261,6 +482,62 @@ def _load_compile_result(workspace_path: Path) -> Optional[Dict[str, Any]]:
     except Exception as exc:
         logger.warning("Failed to read compile result: %s", exc)
         return None
+
+
+def _extract_reply_from_result(result: Dict[str, Any]) -> Optional[str]:
+    """Extract the final user reply from agent execution history."""
+    history = result.get("execution_history") or []
+    if not isinstance(history, list):
+        return None
+    for step in reversed(history):
+        if not isinstance(step, dict):
+            continue
+        if step.get("type") == "finish":
+            reply = step.get("content") or (step.get("result") or {}).get("reply")
+            if isinstance(reply, str) and reply.strip():
+                return reply
+        if step.get("tool") == "reply_to_user_tool":
+            reply = (step.get("result") or {}).get("reply")
+            if isinstance(reply, str) and reply.strip():
+                return reply
+    return None
+
+
+async def _persist_session_message(
+    *,
+    workspace_id: str,
+    user_id: int,
+    session_id: Optional[str],
+    user_question: str,
+    result: Dict[str, Any],
+    knowledge_base_id: Optional[int],
+) -> None:
+    """Persist a LaTeX Agent interaction to the shared session."""
+    if not session_id:
+        return
+    reply = _extract_reply_from_result(result)
+    if not reply:
+        return
+    retrieval_content = {
+        "source": "latex_agent",
+        "workspace_id": workspace_id,
+        "knowledge_base_id": knowledge_base_id,
+        "intent_type": result.get("intent_type"),
+        "trace_id": result.get("trace_id"),
+    }
+    try:
+        rag_client = get_rag_api_client()
+        await rag_client.append_message(
+            session_id=str(session_id),
+            user_id=user_id,
+            user_question=user_question,
+            model_answer=reply,
+            retrieval_content=retrieval_content,
+            source="latex_agent",
+            trace_id=result.get("trace_id"),
+        )
+    except Exception as exc:
+        logger.warning("Failed to persist LaTeX Agent message: %s", exc)
 
 
 def _build_file_nodes(base: Path, current: Optional[Path] = None) -> List[Dict[str, Any]]:
@@ -340,28 +617,41 @@ async def create_workspace(
         raise HTTPException(status_code=400, detail="Workspace already exists")
     
     workspace_path.mkdir(parents=True, exist_ok=False)
-    (workspace_path / "sections").mkdir(exist_ok=True)
-    (workspace_path / "figures").mkdir(exist_ok=True)
-    
-    config = {
-        "name": payload.name,
-        "main_file": "main.tex",
-        "bibliography_file": "references.bib"
-    }
-    if payload.config:
-        config.update(payload.config)
+
+    config = _normalize_workspace_config(payload.config)
+    config["name"] = payload.name
+    main_file_name = config.get("main_file", "main.tex")
+    primary_format = config.get("primary_format")
+    is_latex = primary_format == "latex" or Path(main_file_name).suffix.lower() == ".tex"
+
+    if is_latex:
+        (workspace_path / "sections").mkdir(exist_ok=True)
+        (workspace_path / "figures").mkdir(exist_ok=True)
     
     _write_workspace_config(workspace_path, config)
     
-    main_file = workspace_path / config["main_file"]
+    main_file = workspace_path / main_file_name
     if not main_file.exists():
-        main_file.write_text(
-            "\\documentclass{article}\n\\begin{document}\nHello LaTeX Agent!\n\\end{document}\n",
-            encoding="utf-8"
-        )
-    references_file = workspace_path / config["bibliography_file"]
-    if not references_file.exists():
-        references_file.write_text("% references.bib\n", encoding="utf-8")
+        if is_latex:
+            main_file.write_text(
+                "\\documentclass{article}\n\\begin{document}\nHello Doc Studio!\n\\end{document}\n",
+                encoding="utf-8",
+            )
+        else:
+            suffix = main_file.suffix.lower()
+            if suffix in {".md", ".markdown"}:
+                main_file.write_text(
+                    f"# {payload.name}\n\nStart writing here.\n",
+                    encoding="utf-8",
+                )
+            else:
+                main_file.write_text(f"{payload.name}\n", encoding="utf-8")
+
+    bibliography_file = config.get("bibliography_file")
+    if is_latex and bibliography_file:
+        references_file = workspace_path / bibliography_file
+        if not references_file.exists():
+            references_file.write_text("% references.bib\n", encoding="utf-8")
     
     stat = workspace_path.stat()
     return WorkspaceDetail(
@@ -381,6 +671,7 @@ async def get_workspace(
 ):
     workspace_path = _workspace_path(user_id, workspace_id)
     _ensure_workspace(workspace_path)
+    _assert_workspace_unlocked(workspace_path)
     config = _load_workspace_config(workspace_path)
     stat = workspace_path.stat()
     file_count = sum(1 for _ in workspace_path.rglob("*") if _.is_file())
@@ -417,6 +708,35 @@ async def update_workspace(
         file_count=file_count,
         updated_at=stat.st_mtime,
         config=config
+    )
+
+
+@router.put("/{workspace_id}/session", response_model=WorkspaceDetail)
+async def bind_workspace_session(
+    workspace_id: str,
+    payload: WorkspaceSessionRequest,
+    user_id: int = Depends(get_user_id),
+):
+    """绑定或解绑 workspace 的 session_id（最小实现，写入 .workspace.json）。"""
+    workspace_path = _workspace_path(user_id, workspace_id)
+    _ensure_workspace(workspace_path)
+
+    config = _load_workspace_config(workspace_path)
+    if payload.session_id:
+        config["session_id"] = payload.session_id
+    else:
+        config.pop("session_id", None)
+    _write_workspace_config(workspace_path, config)
+
+    stat = workspace_path.stat()
+    file_count = sum(1 for _ in workspace_path.rglob("*") if _.is_file())
+    return WorkspaceDetail(
+        workspace_id=workspace_id,
+        name=config.get("name", workspace_id),
+        main_file=config.get("main_file", "main.tex"),
+        file_count=file_count,
+        updated_at=stat.st_mtime,
+        config=config,
     )
 
 
@@ -488,6 +808,7 @@ async def create_file_or_directory(
 ):
     workspace_path = _workspace_path(user_id, workspace_id)
     _ensure_workspace(workspace_path)
+    _assert_workspace_unlocked(workspace_path)
     target = _safe_join(workspace_path, payload.path)
     if target.exists():
         raise HTTPException(status_code=400, detail="Target already exists")
@@ -511,6 +832,7 @@ async def update_file_content(
     """
     workspace_path = _workspace_path(user_id, workspace_id)
     _ensure_workspace(workspace_path)
+    _assert_workspace_unlocked(workspace_path)
     target = _safe_join(workspace_path, file_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -536,6 +858,7 @@ async def delete_file(
 ):
     workspace_path = _workspace_path(user_id, workspace_id)
     _ensure_workspace(workspace_path)
+    _assert_workspace_unlocked(workspace_path)
     target = _safe_join(workspace_path, file_path)
     if not target.exists():
         raise HTTPException(status_code=404, detail="File not found")
@@ -596,6 +919,148 @@ async def download_file(
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(target, filename=target.name)
+
+
+@router.get("/{workspace_id}/operations", response_model=List[OperationSummary])
+async def list_operations(
+    workspace_id: str,
+    user_id: int = Depends(get_user_id)
+):
+    workspace_path = _workspace_path(user_id, workspace_id)
+    _ensure_workspace(workspace_path)
+    history_file = _history_root(workspace_path) / "history.json"
+    if not history_file.exists():
+        return []
+    try:
+        payload = json.loads(history_file.read_text(encoding="utf-8"))
+        if not isinstance(payload, list):
+            return []
+        return payload
+    except Exception as exc:
+        logger.warning("Failed to read history file: %s", exc)
+        return []
+
+
+@router.get("/{workspace_id}/operations/{operation_id}")
+async def get_operation_detail(
+    workspace_id: str,
+    operation_id: str,
+    user_id: int = Depends(get_user_id)
+):
+    workspace_path = _workspace_path(user_id, workspace_id)
+    _ensure_workspace(workspace_path)
+    operation_path = _history_root(workspace_path) / "operations" / f"{operation_id}.json"
+    if not operation_path.exists():
+        raise HTTPException(status_code=404, detail="Operation not found")
+    try:
+        payload = json.loads(operation_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Failed to read operation file: %s", exc)
+        raise HTTPException(status_code=500, detail="Failed to read operation detail")
+    snapshot_path = _history_root(workspace_path) / "operations" / operation_id / "snapshot.json"
+    if snapshot_path.exists():
+        try:
+            payload["snapshot"] = json.loads(snapshot_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return payload
+
+
+@router.get("/{workspace_id}/operations/{operation_id}/snapshot", response_model=FileContentResponse)
+async def get_operation_snapshot_file(
+    workspace_id: str,
+    operation_id: str,
+    file_path: str,
+    version: Literal["before", "after"] = "before",
+    user_id: int = Depends(get_user_id),
+):
+    """读取操作快照文件内容"""
+    workspace_path = _workspace_path(user_id, workspace_id)
+    _ensure_workspace(workspace_path)
+    snapshot_root = _history_root(workspace_path) / "operations" / operation_id / "snapshot" / version
+    if not snapshot_root.exists():
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    target = _safe_join(snapshot_root, file_path)
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="Snapshot file not found")
+
+    try:
+        content = target.read_text(encoding="utf-8")
+        encoding = "utf-8"
+    except UnicodeDecodeError:
+        content = target.read_text(encoding="latin-1")
+        encoding = "latin-1"
+    return FileContentResponse(path=file_path, content=content, encoding=encoding)
+
+
+@router.post("/{workspace_id}/operations/{operation_id}/revert", response_model=RevertOperationResponse)
+async def revert_operation(
+    workspace_id: str,
+    operation_id: str,
+    payload: RevertOperationRequest,
+    user_id: int = Depends(get_user_id)
+):
+    workspace_path = _workspace_path(user_id, workspace_id)
+    _ensure_workspace(workspace_path)
+    snapshot = _load_operation_snapshot(workspace_path, operation_id)
+    entries = snapshot.get("files") or []
+
+    requested = set(payload.files or [])
+    if requested:
+        entries = [entry for entry in entries if entry.get("path") in requested]
+
+    reverted_files: List[str] = []
+    deleted_files: List[str] = []
+    skipped_files: List[str] = []
+
+    operation_dir = _history_root(workspace_path) / "operations" / operation_id
+    for entry in entries:
+        file_path = entry.get("path")
+        if not file_path:
+            continue
+        target = _safe_join(workspace_path, file_path)
+        before_exists = bool(entry.get("before_exists"))
+        before_path = entry.get("before_path")
+
+        if before_exists:
+            if not before_path:
+                skipped_files.append(file_path)
+                continue
+            before_abs = Path(before_path)
+            if not before_abs.is_absolute():
+                before_abs = (operation_dir / before_abs).resolve()
+            if not str(before_abs).startswith(str(operation_dir.resolve())):
+                skipped_files.append(file_path)
+                continue
+            if not before_abs.exists():
+                skipped_files.append(file_path)
+                continue
+            try:
+                content = before_abs.read_text(encoding="utf-8")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+                reverted_files.append(file_path)
+            except Exception as exc:
+                logger.warning("Failed to revert %s: %s", file_path, exc)
+                skipped_files.append(file_path)
+        else:
+            if target.exists():
+                try:
+                    target.unlink()
+                    _cleanup_empty_parents(target, workspace_path)
+                    deleted_files.append(file_path)
+                except Exception as exc:
+                    logger.warning("Failed to delete %s: %s", file_path, exc)
+                    skipped_files.append(file_path)
+            else:
+                skipped_files.append(file_path)
+
+    return RevertOperationResponse(
+        operation_id=operation_id,
+        reverted_files=reverted_files,
+        deleted_files=deleted_files,
+        skipped_files=skipped_files,
+    )
 
 
 @router.get("/{workspace_id}/pdf")
@@ -739,6 +1204,38 @@ async def metrics_endpoint():
     return PlainTextResponse(format_prometheus_metrics(), media_type="text/plain")
 
 
+@general_router.get("/metrics/summary")
+async def metrics_summary():
+    """返回轻量统计摘要，便于快速查看运行状况"""
+    return collect_metrics_summary()
+
+
+@general_router.post("/config/refresh")
+async def refresh_agent_config(
+    user_id: int = Depends(get_user_id),
+):
+    """刷新 LLM 配置并清空 Prompt 缓存。"""
+    llm_info = refresh_llm_client()
+    clear_prompt_cache()
+    return {
+        "status": "ok",
+        "llm": llm_info,
+        "prompt_cache_cleared": True,
+        "requested_by": user_id,
+    }
+
+
+@general_router.get("/llm/health")
+async def llm_health(
+    user_id: int = Depends(get_user_id),
+    llm_client=Depends(get_llm_client),
+):
+    """返回 LLM Provider 健康状态"""
+    snapshot = llm_client.get_health_snapshot()
+    snapshot["requested_by"] = user_id
+    return snapshot
+
+
 @general_router.post("/feedback")
 async def submit_agent_feedback(
     payload: AgentFeedbackRequest,
@@ -799,17 +1296,43 @@ async def edit_latex(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         
-        # 执行 Agent 任务
-        result = await agent.execute(
-            user_intent=clean_intent,
-            workspace_id=workspace_id,
+        workspace_path = _workspace_path(user_id, workspace_id)
+        _ensure_workspace(workspace_path)
+        lock_id = get_trace_id() or uuid.uuid4().hex
+        _acquire_workspace_lock(
+            workspace_path=workspace_path,
+            lock_id=lock_id,
             user_id=user_id,
-            context=context_payload or None,
-            knowledge_base_id=payload.knowledge_base_id,
-            knowledge_base_name=payload.knowledge_base_name,
-            collect_training_data=payload.collect_training_data
+            reason="edit",
+            trace_id=get_trace_id(),
         )
-        result.setdefault("trace_id", get_trace_id())
+        try:
+            # 执行 Agent 任务
+            result = await agent.execute(
+                user_intent=clean_intent,
+                workspace_id=workspace_id,
+                user_id=user_id,
+                context=context_payload or None,
+                knowledge_base_id=payload.knowledge_base_id,
+                knowledge_base_name=payload.knowledge_base_name,
+                collect_training_data=payload.collect_training_data,
+                options=payload.options,
+            )
+            result.setdefault("trace_id", get_trace_id())
+        finally:
+            _release_workspace_lock(workspace_path, lock_id)
+        try:
+            config = _load_workspace_config(workspace_path)
+            await _persist_session_message(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                session_id=config.get("session_id"),
+                user_question=clean_intent,
+                result=result,
+                knowledge_base_id=payload.knowledge_base_id,
+            )
+        except Exception as exc:
+            logger.warning("Failed to persist session message: %s", exc)
         
         logger.info(f"Edit completed: workspace={workspace_id}, changes={len(result.get('changes', []))}")
         response = LaTeXEditResponse(**result)
@@ -823,6 +1346,159 @@ async def edit_latex(
     except Exception as e:
         logger.error(f"Agent execution failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Agent execution failed: {str(e)}")
+
+
+@router.post("/{workspace_id}/edit/async")
+async def edit_latex_async(
+    workspace_id: str,
+    payload: LaTeXEditRequest,
+    user_id: int = Depends(get_user_id),
+    agent: LaTeXEditAgent = Depends(get_agent),
+):
+    """Submit an async Doc Studio edit task."""
+
+    workspace_path = _workspace_path(user_id, workspace_id)
+    _ensure_workspace(workspace_path)
+    try:
+        rate_limiter.check(user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=429, detail=str(exc))
+    try:
+        sanitize_user_input(payload.user_intent)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    run_id = uuid.uuid4().hex
+    run_dir = _get_async_run_dir(workspace_path)
+    lock_id = f"async:{run_id}"
+    _acquire_workspace_lock(
+        workspace_path=workspace_path,
+        lock_id=lock_id,
+        user_id=user_id,
+        reason="edit_async",
+        trace_id=get_trace_id(),
+    )
+    manager = get_async_run_manager()
+    try:
+        manager.create_run(
+            run_id=run_id,
+            workspace_id=workspace_id,
+            user_id=user_id,
+            run_dir=run_dir,
+        )
+        manager.append_event(run_id, "status", {"status": "queued"})
+    except Exception:
+        _release_workspace_lock(workspace_path, lock_id)
+        raise
+
+    async def _run_task() -> None:
+        manager.update_status(run_id, "running")
+        manager.append_event(run_id, "status", {"status": "running"})
+        try:
+            context_payload = dict(payload.target_location) if payload.target_location else {}
+            if payload.knowledge_base_id is not None:
+                context_payload.setdefault("knowledge_base_id", payload.knowledge_base_id)
+            if payload.knowledge_base_name:
+                context_payload.setdefault("knowledge_base_name", payload.knowledge_base_name)
+
+            clean_intent, warning = sanitize_user_input(payload.user_intent)
+            if warning:
+                manager.append_event(run_id, "status", {"warning": warning})
+
+            async def _progress_callback(event_type: str, data: Dict[str, Any]) -> None:
+                manager.append_event(run_id, event_type, data)
+
+            result = await agent.execute(
+                user_intent=clean_intent,
+                workspace_id=workspace_id,
+                user_id=user_id,
+                context=context_payload or None,
+                knowledge_base_id=payload.knowledge_base_id,
+                knowledge_base_name=payload.knowledge_base_name,
+                collect_training_data=payload.collect_training_data,
+                options=payload.options,
+                progress_callback=_progress_callback,
+            )
+            try:
+                config = _load_workspace_config(workspace_path)
+                await _persist_session_message(
+                    workspace_id=workspace_id,
+                    user_id=user_id,
+                    session_id=config.get("session_id"),
+                    user_question=clean_intent,
+                    result=result,
+                    knowledge_base_id=payload.knowledge_base_id,
+                )
+            except Exception as exc:
+                logger.warning("Failed to persist session message: %s", exc)
+            manager.set_result(run_id, result)
+        except Exception as exc:
+            logger.error("Async edit failed", exc_info=True)
+            manager.set_error(run_id, str(exc))
+        finally:
+            _release_workspace_lock(workspace_path, lock_id)
+
+    asyncio.create_task(_run_task())
+    return {"run_id": run_id, "status": "queued"}
+
+
+@router.get("/{workspace_id}/edit/async/{run_id}")
+async def get_async_run_status(
+    workspace_id: str,
+    run_id: str,
+    user_id: int = Depends(get_user_id),
+):
+    """Get async run status."""
+
+    workspace_path = _workspace_path(user_id, workspace_id)
+    _ensure_workspace(workspace_path)
+    manager = get_async_run_manager()
+    state = manager.get_run(run_id)
+    if state:
+        return state.snapshot()
+    run_dir = _get_async_run_dir(workspace_path)
+    snapshot = manager.load_run(run_dir, run_id)
+    if snapshot:
+        return snapshot
+    raise HTTPException(status_code=404, detail="Async run not found")
+
+
+@router.get("/{workspace_id}/edit/async/{run_id}/events")
+async def stream_async_run_events(
+    workspace_id: str,
+    run_id: str,
+    request: Request,
+    user_id: int = Depends(get_user_id),
+):
+    """Stream async run events via SSE."""
+
+    workspace_path = _workspace_path(user_id, workspace_id)
+    _ensure_workspace(workspace_path)
+    run_dir = _get_async_run_dir(workspace_path)
+    manager = get_async_run_manager()
+
+    async def event_stream():
+        last_index = 0
+        while True:
+            if await request.is_disconnected():
+                break
+            state = manager.get_run(run_id)
+            if not state:
+                snapshot = manager.load_run(run_dir, run_id)
+                if snapshot:
+                    yield _format_sse("status", snapshot)
+                else:
+                    yield _format_sse("run_error", {"error": "run_not_found"})
+                break
+            events = manager.list_events(run_id)
+            while last_index < len(events):
+                event = events[last_index]
+                yield _format_sse(event["event"], event["data"])
+                last_index += 1
+            if state.status in {"succeeded", "failed"} and last_index >= len(events):
+                break
+            await asyncio.sleep(0.4)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @router.post("/{workspace_id}/add-citation", response_model=LaTeXEditResponse)
@@ -857,14 +1533,40 @@ async def add_citation(
         context["knowledge_base_name"] = payload.knowledge_base_name
     
     try:
-        result = await agent.execute(
-            user_intent=user_intent,
-            workspace_id=workspace_id,
+        workspace_path = _workspace_path(user_id, workspace_id)
+        _ensure_workspace(workspace_path)
+        lock_id = get_trace_id() or uuid.uuid4().hex
+        _acquire_workspace_lock(
+            workspace_path=workspace_path,
+            lock_id=lock_id,
             user_id=user_id,
-            context=context,
-            knowledge_base_id=payload.knowledge_base_id,
-            knowledge_base_name=payload.knowledge_base_name
+            reason="add_citation",
+            trace_id=get_trace_id(),
         )
+        try:
+            result = await agent.execute(
+                user_intent=user_intent,
+                workspace_id=workspace_id,
+                user_id=user_id,
+                context=context,
+                knowledge_base_id=payload.knowledge_base_id,
+                knowledge_base_name=payload.knowledge_base_name
+            )
+            result.setdefault("trace_id", get_trace_id())
+        finally:
+            _release_workspace_lock(workspace_path, lock_id)
+        try:
+            config = _load_workspace_config(workspace_path)
+            await _persist_session_message(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                session_id=config.get("session_id"),
+                user_question=user_intent,
+                result=result,
+                knowledge_base_id=payload.knowledge_base_id,
+            )
+        except Exception as exc:
+            logger.warning("Failed to persist session message: %s", exc)
         return LaTeXEditResponse(**result)
     except Exception as e:
         logger.error(f"Add citation failed: {e}", exc_info=True)
@@ -900,14 +1602,40 @@ async def batch_add_citations(
         context["knowledge_base_name"] = payload.knowledge_base_name
     
     try:
-        result = await agent.execute(
-            user_intent=user_intent,
-            workspace_id=workspace_id,
+        workspace_path = _workspace_path(user_id, workspace_id)
+        _ensure_workspace(workspace_path)
+        lock_id = get_trace_id() or uuid.uuid4().hex
+        _acquire_workspace_lock(
+            workspace_path=workspace_path,
+            lock_id=lock_id,
             user_id=user_id,
-            context=context,
-            knowledge_base_id=payload.knowledge_base_id,
-            knowledge_base_name=payload.knowledge_base_name
+            reason="batch_add_citations",
+            trace_id=get_trace_id(),
         )
+        try:
+            result = await agent.execute(
+                user_intent=user_intent,
+                workspace_id=workspace_id,
+                user_id=user_id,
+                context=context,
+                knowledge_base_id=payload.knowledge_base_id,
+                knowledge_base_name=payload.knowledge_base_name
+            )
+            result.setdefault("trace_id", get_trace_id())
+        finally:
+            _release_workspace_lock(workspace_path, lock_id)
+        try:
+            config = _load_workspace_config(workspace_path)
+            await _persist_session_message(
+                workspace_id=workspace_id,
+                user_id=user_id,
+                session_id=config.get("session_id"),
+                user_question=user_intent,
+                result=result,
+                knowledge_base_id=payload.knowledge_base_id,
+            )
+        except Exception as exc:
+            logger.warning("Failed to persist session message: %s", exc)
         return LaTeXEditResponse(**result)
     except Exception as e:
         logger.error(f"Batch add citations failed: {e}", exc_info=True)

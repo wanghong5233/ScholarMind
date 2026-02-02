@@ -6,22 +6,57 @@ import ComSender from '@/components/sender'
 import { ChatRole, ChatType } from '@/configs'
 import { deviceActions } from '@/store/device'
 import { usePageTransport } from '@/utils'
+import { createNotebookNoteFile } from '@/utils/notebook'
 import { useMount, useRequest, useUnmount } from 'ahooks'
-import { Button, Drawer, message } from 'antd'
+import {
+  Button,
+  Drawer,
+  Form,
+  Input,
+  InputNumber,
+  Modal,
+  Select,
+  Space,
+  Switch,
+  message,
+} from 'antd'
+import dayjs from 'dayjs'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import { proxy, useSnapshot } from 'valtio'
 import { sessionActions } from '../../store/session'
 import ChatMessage from './component/chat-message'
 import Citations from './component/citations'
 import Contracts from './component/contracts'
 import ChatDrawer from './component/drawer'
+import NotebookDrawer from './component/notebook-drawer'
 import Source from './component/source'
 import styles from './index.module.scss'
 import { createChatId, createChatIdText, transportToChatEnter } from './shared'
 import type { KnowledgeBase } from '@/api/repository'
+import type { DeepResearchCitation, DeepResearchRequest, ProgressEvent } from '@/api/deepResearch'
 
 type ChatItemWithToken = API.ChatItem & { __openToken?: number }
+
+const DEEP_RESEARCH_DEFAULTS = {
+  mode: 'queue' as const,
+  depth: 2,
+  breadth: 5,
+  max_parallel: 1,
+  max_iterations: 4,
+  top_k: 6,
+  index_mode: 'auto',
+  use_web_search: false,
+  use_paper_search: false,
+  use_code_exec: false,
+}
+
+const DEEP_RESEARCH_INDEX_OPTIONS = [
+  { label: 'auto', value: 'auto' },
+  { label: 'session_only', value: 'session_only' },
+  { label: 'global_only', value: 'global_only' },
+  { label: 'hybrid', value: 'hybrid' },
+]
 
 async function scrollToBottom() {
   await new Promise((resolve) => setTimeout(resolve))
@@ -40,8 +75,67 @@ async function scrollToBottom() {
   }
 }
 
+function escapeYaml(value: string) {
+  return (value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+}
+
+function extractReportSummary(markdown: string) {
+  const lines = markdown
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+  if (!lines.length) return ''
+  const summaryLines: string[] = []
+  for (const line of lines) {
+    if (line.startsWith('#') && summaryLines.length) break
+    summaryLines.push(line.replace(/^#+\s*/, ''))
+    if (summaryLines.join(' ').length > 360) break
+  }
+  return summaryLines.join(' ').trim()
+}
+
+function buildCitationBlock(citations: DeepResearchCitation[] = []) {
+  if (!citations.length) return ''
+  const lines = ['## 引用']
+  citations.forEach((item, index) => {
+    const ref = item.ref_number ?? index + 1
+    const title = item.title || item.url || item.citation_id
+    const suffix = item.url ? ` - ${item.url}` : ''
+    lines.push(`- [${ref}] ${title}${suffix}`)
+  })
+  return lines.join('\n')
+}
+
+function buildDeepResearchNoteMarkdown(payload: {
+  topic: string
+  reportMarkdown: string
+  summary: string
+  sessionId?: string
+  researchId?: string
+  citations?: DeepResearchCitation[]
+}) {
+  const createdAt = dayjs().toISOString()
+  const tags = ['deepresearch', 'report']
+  const tagsYaml = tags.map((tag) => `"${escapeYaml(tag)}"`).join(', ')
+  const frontMatter = [
+    '---',
+    `title: "${escapeYaml(payload.topic)}"`,
+    `summary: "${escapeYaml(payload.summary || payload.topic)}"`,
+    `tags: [${tagsYaml}]`,
+    `session_id: "${escapeYaml(payload.sessionId || '')}"`,
+    `research_id: "${escapeYaml(payload.researchId || '')}"`,
+    `created_at: "${createdAt}"`,
+    `source_excerpt: "${escapeYaml(payload.summary || payload.topic)}"`,
+    '---',
+  ].join('\n')
+  const reportBody = payload.reportMarkdown.trim()
+  const citationBlock = buildCitationBlock(payload.citations)
+  return [frontMatter, reportBody, citationBlock].filter(Boolean).join('\n\n').trim()
+}
+
 export default function Index() {
   const { id } = useParams()
+  const navigate = useNavigate()
   const { data: ctx } = usePageTransport(transportToChatEnter)
 
   const [chat] = useState(() => {
@@ -63,11 +157,28 @@ export default function Index() {
   const [composerFocusKey, setComposerFocusKey] = useState(0)
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([])
   const [updatingDefaults, setUpdatingDefaults] = useState(false)
+  const [researchMode, setResearchMode] = useState<'chat' | 'deep'>('chat')
+  const [notebookOpen, setNotebookOpen] = useState(false)
+  const [researchSuggestion, setResearchSuggestion] = useState<{
+    topic: string
+    reason: string
+  } | null>(null)
+  const [editingResearchItem, setEditingResearchItem] =
+    useState<API.ChatItem | null>(null)
+  const [researchForm] = Form.useForm<DeepResearchRequest>()
   const [editingContext, setEditingContext] = useState<{
     messageId: string
   } | null>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
   const readerRef = useRef<ReadableStreamDefaultReader<any> | null>(null)
+  const researchStreamRef = useRef<Map<number, EventSource>>(new Map())
+  const researchStreamTimerRef = useRef<Map<number, number>>(new Map())
+  const researchStreamEventIdRef = useRef<Map<number, string>>(new Map())
+  const researchStreamRetryRef = useRef<Map<number, number>>(new Map())
+  const researchPersistTimerRef = useRef<number | null>(null)
+  const researchRestorePendingRef = useRef(false)
+  const suggestionDismissedRef = useRef<Set<string>>(new Set())
+  const lastSuggestionTopicRef = useRef<string>('')
   const openCitationsPanel = useCallback(
     (item: API.ChatItem | null) => {
       if (!item) {
@@ -77,6 +188,34 @@ export default function Index() {
       setCurrentChatItemState({ ...item, __openToken: Date.now() })
     },
     [],
+  )
+
+  const getSelectionText = useCallback(() => {
+    if (typeof window === 'undefined') return ''
+    return window.getSelection()?.toString() || ''
+  }, [])
+
+  const handleOpenNotebook = useCallback(() => {
+    setNotebookOpen(true)
+  }, [])
+
+  const handleOpenIdeaGen = useCallback(() => {
+    if (!id) {
+      message.warning('需要会话 ID 才能发起 IdeaGen')
+      return
+    }
+    const selection = getSelectionText().trim()
+    navigate('/idea-generation', {
+      state: {
+        prefill: { sessionId: id },
+        selection: selection || undefined,
+      },
+    })
+  }, [getSelectionText, id, navigate])
+
+  const researchPersistKey = useMemo(
+    () => (id ? `deep-research-cards:${id}` : ''),
+    [id],
   )
 
   const history = useRequest(
@@ -316,11 +455,23 @@ export default function Index() {
   }, [loading])
   useUnmount(() => {
     deviceActions.setChatting(false)
+    researchStreamRef.current.forEach((source) => source.close())
+    researchStreamRef.current.clear()
+    researchStreamTimerRef.current.forEach((timer) => window.clearTimeout(timer))
+    researchStreamTimerRef.current.clear()
+    researchStreamRetryRef.current.clear()
+    if (researchPersistTimerRef.current) {
+      window.clearTimeout(researchPersistTimerRef.current)
+      researchPersistTimerRef.current = null
+    }
   })
 
   useEffect(() => {
     if (!id) return
     setSessionDefaults(null)
+    setResearchSuggestion(null)
+    lastSuggestionTopicRef.current = ''
+    researchRestorePendingRef.current = true
     runLoadDefaults()
     runLoadKnowledgeBases()
   }, [id, runLoadDefaults, runLoadKnowledgeBases])
@@ -413,6 +564,21 @@ export default function Index() {
         })
       } catch {
         // applyDefaults 已处理
+      }
+    },
+    [sessionDefaults, updatingDefaults, applyDefaults],
+  )
+
+  const handleRagModeChange = useCallback(
+    async (value: 'fast' | 'deep') => {
+      if (!sessionDefaults || updatingDefaults) return
+      const strategy = value === 'deep' ? 'multimodal_graph' : 'multi_stage'
+      try {
+        await applyDefaults({
+          retrievalStrategy: strategy,
+        })
+      } catch {
+        // applyDefaults 已处理错误提示
       }
     },
     [sessionDefaults, updatingDefaults, applyDefaults],
@@ -681,6 +847,63 @@ export default function Index() {
     setPendingAttachments(attachments)
   }, [pendingFiles])
 
+  const uploadPendingFiles = useCallback(
+    async (files: File[], usingRag: boolean) => {
+      if (!files.length) return true
+      try {
+        if (usingRag) {
+          for (const file of files) {
+            await api.session.upload({ sessionId: id!, file })
+          }
+          return true
+        }
+        for (const file of files) {
+          await api.session.uploadForContext({
+            sessionId: id!,
+            file,
+          })
+        }
+        for (const file of files) {
+          api.session.upload({ sessionId: id!, file }).catch(() => {})
+        }
+        return true
+      } catch (error) {
+        window.$app.message.error('文件上传失败')
+        return false
+      }
+    },
+    [id],
+  )
+
+  const schedulePersistDeepResearchCards = useCallback(() => {
+    if (!researchPersistKey) return
+    if (researchPersistTimerRef.current) {
+      window.clearTimeout(researchPersistTimerRef.current)
+    }
+    researchPersistTimerRef.current = window.setTimeout(() => {
+      const records = chat.list
+        .filter((item) => item.deepResearch)
+        .map((item) => {
+          const deepResearch = item.deepResearch!
+          return {
+            userMessage: deepResearch.userMessage || deepResearch.topic,
+            deepResearch: {
+              ...deepResearch,
+              progress: (deepResearch.progress ?? []).slice(-200),
+            },
+          }
+        })
+      if (records.length) {
+        sessionStorage.setItem(
+          researchPersistKey,
+          JSON.stringify({ version: 1, items: records }),
+        )
+      } else {
+        sessionStorage.removeItem(researchPersistKey)
+      }
+    }, 500)
+  }, [chat.list, researchPersistKey])
+
   const send = useCallback(
     async (message: string, options?: { replaceMessageId?: string }) => {
       if (loadingRef.current) return
@@ -709,35 +932,11 @@ export default function Index() {
 
       // 如果有待发送的文件，先上传
       if (filesSnapshot.length > 0) {
-        try {
-          // 根据 RAG 开关决定上传方式
-          const usingRag = sessionDefaults?.useSessionKnowledgeBase || sessionDefaults?.useUserKnowledgeBase
-
-          if (usingRag) {
-            // RAG 模式：后台异步上传入库
-            for (const file of filesSnapshot) {
-              await api.session.upload({ sessionId: id!, file })
-            }
-          } else {
-            // 直接上下文模式：上传文件到 context_json
-            for (const file of filesSnapshot) {
-              await api.session.uploadForContext({
-                sessionId: id!,
-                file,
-              })
-            }
-            
-            // 同时后台异步入库（对用户透明）
-            for (const file of filesSnapshot) {
-              api.session.upload({ sessionId: id!, file }).catch(() => {
-                // 静默失败，不影响用户体验
-              })
-            }
-          }
-        } catch (error) {
-          window.$app.message.error('文件上传失败')
-          return
-        }
+        const usingRag =
+          sessionDefaults?.useSessionKnowledgeBase ||
+          sessionDefaults?.useUserKnowledgeBase
+        const ok = await uploadPendingFiles(filesSnapshot, !!usingRag)
+        if (!ok) return
       }
 
       const appendAtTail = insertIndex === undefined || insertIndex < 0
@@ -793,6 +992,606 @@ export default function Index() {
       openCitationsPanel,
       setDocuments,
     ],
+  )
+
+  const resolveErrorMessage = useCallback((error: any, fallback: string) => {
+    return (
+      error?.response?.data?.detail ||
+      error?.response?.data?.message ||
+      error?.message ||
+      fallback
+    )
+  }, [])
+
+  const evaluateDeepResearchSuggestion = useCallback((text: string) => {
+    const normalized = text.trim()
+    if (!normalized) return null
+    const keywords = [
+      '调研',
+      '研究',
+      '综述',
+      '对比',
+      '比较',
+      '最新',
+      '进展',
+      '路线图',
+      '论文',
+      '文献',
+      'survey',
+      'state of the art',
+      'benchmark',
+      'sota',
+    ]
+    const hitKeyword = keywords.find((keyword) =>
+      normalized.toLowerCase().includes(keyword.toLowerCase()),
+    )
+    if (hitKeyword) {
+      return `包含“${hitKeyword}”等研究关键词，适合深度研究流程`
+    }
+    if (normalized.length >= 60) {
+      return '问题较复杂，建议用深度研究进行系统性梳理'
+    }
+    if ((normalized.match(/[，,;；]/g) || []).length >= 2) {
+      return '问题包含多个维度，深度研究更容易覆盖全面'
+    }
+    return null
+  }, [])
+
+  const updateDeepResearchItem = useCallback(
+    (itemId: number, updater: (data: API.DeepResearchCardState) => void) => {
+      const target = chat.list.find((item) => item.id === itemId)
+      if (!target?.deepResearch) return
+      updater(target.deepResearch)
+      schedulePersistDeepResearchCards()
+    },
+    [chat, schedulePersistDeepResearchCards],
+  )
+
+  const closeDeepResearchStream = useCallback((itemId: number) => {
+    const source = researchStreamRef.current.get(itemId)
+    if (source) {
+      source.close()
+      researchStreamRef.current.delete(itemId)
+    }
+    const timer = researchStreamTimerRef.current.get(itemId)
+    if (timer) {
+      window.clearTimeout(timer)
+      researchStreamTimerRef.current.delete(itemId)
+    }
+    researchStreamRetryRef.current.delete(itemId)
+    researchStreamEventIdRef.current.delete(itemId)
+  }, [])
+
+  const fetchDeepResearchSnapshot = useCallback(
+    async (itemId: number, researchId: string) => {
+      try {
+        const { data } = await api.deepResearch.getDeepResearchSnapshot(researchId, {
+          errorToast: false,
+        })
+        const report = data?.report as API.DeepResearchCardState['report']
+        const citationsPayload = data?.citations as { citations?: any[] } | undefined
+        const citations = Array.isArray(citationsPayload?.citations)
+          ? (citationsPayload?.citations as API.DeepResearchCardState['citations'])
+          : []
+        if (report?.report_markdown) {
+          updateDeepResearchItem(itemId, (state) => {
+            state.report = report
+            state.citations = citations
+            state.status = 'completed'
+            state.statusMessage = '报告已完成'
+          })
+          closeDeepResearchStream(itemId)
+        }
+      } catch (error) {
+        console.warn('Failed to fetch deep research snapshot', error)
+      }
+    },
+    [closeDeepResearchStream, updateDeepResearchItem],
+  )
+
+  const openDeepResearchStream = useCallback(
+    (itemId: number, researchId: string) => {
+      closeDeepResearchStream(itemId)
+      const connect = () => {
+        const baseUrl = api.deepResearch.getDeepResearchProgressStreamUrl(researchId)
+        const lastEventId = researchStreamEventIdRef.current.get(itemId)
+        const url = lastEventId
+          ? `${baseUrl}&last_event_id=${encodeURIComponent(lastEventId)}`
+          : baseUrl
+        const source = new EventSource(url)
+        researchStreamRef.current.set(itemId, source)
+
+        source.addEventListener('progress', (event) => {
+          const messageEvent = event as MessageEvent<string>
+          if (messageEvent.lastEventId) {
+            researchStreamEventIdRef.current.set(itemId, messageEvent.lastEventId)
+          }
+          if (!messageEvent.data) return
+          try {
+            const parsed = JSON.parse(messageEvent.data) as ProgressEvent
+            updateDeepResearchItem(itemId, (state) => {
+              const next = [...(state.progress ?? []), parsed].slice(-200)
+              state.progress = next
+              state.lastStage = parsed.stage
+              state.statusMessage = parsed.message
+              state.updatedAt = parsed.timestamp
+              const payload = parsed.payload || {}
+              const stats = { ...(state.blockStats ?? {}) }
+              if (typeof payload.blocks === 'number') stats.total = payload.blocks
+              if (typeof payload.completed === 'number') stats.completed = payload.completed
+              if (typeof payload.pending === 'number') stats.pending = payload.pending
+              if (typeof payload.iteration === 'number') stats.iteration = payload.iteration
+              if (typeof payload.max_iterations === 'number') {
+                stats.maxIterations = payload.max_iterations
+              }
+              if (typeof payload.citations === 'number') stats.citations = payload.citations
+              if (Object.keys(stats).length) {
+                state.blockStats = stats
+              }
+              const toolCounts = { ...(state.toolCounts ?? {}) }
+              const toolCalls = Array.isArray(payload.tool_calls) ? payload.tool_calls : []
+              toolCalls.forEach((tool) => {
+                if (!tool) return
+                const name = String(tool)
+                toolCounts[name] = (toolCounts[name] ?? 0) + 1
+              })
+              if (payload.tool_type) {
+                const name = String(payload.tool_type)
+                toolCounts[name] = (toolCounts[name] ?? 0) + 1
+              }
+              if (Object.keys(toolCounts).length) {
+                state.toolCounts = toolCounts
+              }
+              if (state.status === 'queued') {
+                state.status = 'running'
+              }
+            })
+            if (
+              parsed.stage === 'reporting' &&
+              parsed.message.toLowerCase().includes('completed')
+            ) {
+              fetchDeepResearchSnapshot(itemId, researchId)
+            }
+          } catch (error) {
+            console.warn('Failed to parse research progress', error)
+          }
+        })
+
+        source.addEventListener('heartbeat', () => {})
+
+        source.onerror = () => {
+          source.close()
+          researchStreamRef.current.delete(itemId)
+          const retry = (researchStreamRetryRef.current.get(itemId) ?? 0) + 1
+          researchStreamRetryRef.current.set(itemId, retry)
+          const delay = Math.min(20000, 2000 * retry)
+          const timer = window.setTimeout(() => connect(), delay)
+          researchStreamTimerRef.current.set(itemId, timer)
+        }
+      }
+
+      connect()
+    },
+    [closeDeepResearchStream, fetchDeepResearchSnapshot, updateDeepResearchItem],
+  )
+
+  const restoreDeepResearchCards = useCallback(() => {
+    if (!researchPersistKey) return
+    try {
+      const raw = sessionStorage.getItem(researchPersistKey)
+      if (!raw) return
+      const parsed = JSON.parse(raw) as {
+        version?: number
+        items?: Array<{ userMessage?: string; deepResearch?: API.DeepResearchCardState }>
+      }
+      const items = parsed.items ?? []
+      items.forEach((record) => {
+        const deepResearch = record.deepResearch
+        if (!deepResearch) return
+        const userText = record.userMessage || deepResearch.userMessage || deepResearch.topic
+        if (userText) {
+          chat.list.push({
+            id: createChatId(),
+            role: ChatRole.User,
+            type: ChatType.Text,
+            content: userText,
+          })
+        }
+        const assistantItem: API.ChatItem = {
+          id: createChatId(),
+          role: ChatRole.Assistant,
+          type: ChatType.DeepResearch,
+          deepResearch,
+        }
+        chat.list.push(assistantItem)
+        if (
+          deepResearch.researchId &&
+          (deepResearch.status === 'queued' || deepResearch.status === 'running')
+        ) {
+          openDeepResearchStream(assistantItem.id, deepResearch.researchId)
+        }
+        if (deepResearch.researchId && deepResearch.status === 'completed' && !deepResearch.report) {
+          fetchDeepResearchSnapshot(assistantItem.id, deepResearch.researchId)
+        }
+      })
+    } catch (error) {
+      console.warn('Failed to restore deep research cards', error)
+    }
+  }, [chat.list, fetchDeepResearchSnapshot, openDeepResearchStream, researchPersistKey])
+
+  useEffect(() => {
+    if (history.loading) {
+      researchRestorePendingRef.current = true
+    }
+  }, [history.loading])
+
+  useEffect(() => {
+    if (!history.loading && researchRestorePendingRef.current) {
+      researchRestorePendingRef.current = false
+      restoreDeepResearchCards()
+    }
+  }, [history.loading, restoreDeepResearchCards])
+
+  const buildDeepResearchRequest = useCallback(
+    (topic: string, overrides?: Partial<DeepResearchRequest>) => {
+      const language = sessionDefaults?.language || 'zh'
+      const topK = sessionDefaults?.topK ?? DEEP_RESEARCH_DEFAULTS.top_k
+      const metadata = {
+        source: 'chat',
+        ...(overrides?.metadata ?? {}),
+      }
+      return {
+        ...DEEP_RESEARCH_DEFAULTS,
+        topic,
+        session_id: id,
+        language,
+        top_k: topK,
+        metadata,
+        ...overrides,
+      }
+    },
+    [id, sessionDefaults?.language, sessionDefaults?.topK],
+  )
+
+  const requestDeepResearchPlan = useCallback(
+    async (itemId: number, request: DeepResearchRequest) => {
+      updateDeepResearchItem(itemId, (state) => {
+        state.planLoading = true
+        state.planError = undefined
+      })
+      try {
+        const { data } = await api.deepResearch.previewDeepResearchPlan(request)
+        updateDeepResearchItem(itemId, (state) => {
+          state.plan = data
+          state.planLoading = false
+          state.status = 'plan'
+        })
+      } catch (error) {
+        updateDeepResearchItem(itemId, (state) => {
+          state.planLoading = false
+          state.planError = resolveErrorMessage(error, '计划生成失败')
+        })
+      }
+    },
+    [resolveErrorMessage, updateDeepResearchItem],
+  )
+
+  const sendDeepResearch = useCallback(
+    async (
+      topic: string,
+      options?: { source?: 'composer' | 'suggestion'; userLabel?: string },
+    ) => {
+      if (!id) {
+        message.warning('缺少会话信息，无法发起深度研究')
+        return
+      }
+      if (!topic.trim()) return
+      const source = options?.source ?? 'composer'
+      const userLabel =
+        options?.userLabel || (source === 'suggestion' ? `深度研究：${topic}` : topic)
+      const attachmentsSnapshot = pendingAttachments.map((item) => ({ ...item }))
+      const filesSnapshot = [...pendingFiles]
+      const ok = await uploadPendingFiles(filesSnapshot, true)
+      if (!ok) return
+
+      const userMessage: API.ChatItem = {
+        id: createChatId(),
+        role: ChatRole.User,
+        type: ChatType.Text,
+        content: userLabel,
+        attachments: attachmentsSnapshot.length ? attachmentsSnapshot : undefined,
+      }
+      const request = buildDeepResearchRequest(topic, {
+        metadata: {
+          trigger: source,
+        },
+      })
+      const assistantMessage: API.ChatItem = {
+        id: createChatId(),
+        role: ChatRole.Assistant,
+        type: ChatType.DeepResearch,
+        deepResearch: {
+          status: 'plan',
+          topic,
+          request,
+          source,
+          userMessage: userLabel,
+          planLoading: true,
+        },
+      }
+      chat.list.push(userMessage)
+      chat.list.push(assistantMessage)
+      scrollToBottom()
+      schedulePersistDeepResearchCards()
+      await requestDeepResearchPlan(assistantMessage.id, request)
+      setPendingAttachments([])
+      setPendingFiles([])
+      setComposerValue('')
+    },
+    [
+      id,
+      pendingAttachments,
+      pendingFiles,
+      uploadPendingFiles,
+      buildDeepResearchRequest,
+      chat.list,
+      requestDeepResearchPlan,
+      schedulePersistDeepResearchCards,
+    ],
+  )
+
+  const handleComposerSend = useCallback(
+    async (text: string) => {
+      if (!text.trim()) return
+      if (researchMode === 'deep' && !editingContext) {
+        setResearchSuggestion(null)
+        await sendDeepResearch(text, { source: 'composer' })
+        return
+      }
+      await send(text)
+      const reason = evaluateDeepResearchSuggestion(text)
+      if (
+        reason &&
+        !suggestionDismissedRef.current.has(text) &&
+        lastSuggestionTopicRef.current !== text
+      ) {
+        setResearchSuggestion({ topic: text, reason })
+        lastSuggestionTopicRef.current = text
+      }
+    },
+    [editingContext, evaluateDeepResearchSuggestion, researchMode, send, sendDeepResearch],
+  )
+
+  const handleAcceptSuggestion = useCallback(async () => {
+    if (!researchSuggestion) return
+    setResearchSuggestion(null)
+    await sendDeepResearch(researchSuggestion.topic, { source: 'suggestion' })
+  }, [researchSuggestion, sendDeepResearch])
+
+  const handleDismissSuggestion = useCallback(() => {
+    if (researchSuggestion?.topic) {
+      suggestionDismissedRef.current.add(researchSuggestion.topic)
+    }
+    setResearchSuggestion(null)
+  }, [researchSuggestion])
+
+  const handleDeepResearchConfirm = useCallback(
+    async (item: API.ChatItem) => {
+      if (!item.deepResearch?.request) return
+      updateDeepResearchItem(item.id, (state) => {
+        state.status = 'queued'
+        state.statusMessage = '已提交任务'
+      })
+      try {
+        const { data } = await api.deepResearch.submitDeepResearch(item.deepResearch.request)
+        updateDeepResearchItem(item.id, (state) => {
+          state.researchId = data.research_id
+          state.queuePosition = data.queue_position ?? null
+          state.activeRuns = data.active_runs ?? null
+          state.pendingRuns = data.pending_runs ?? null
+          state.status = data.status === 'running' ? 'running' : 'queued'
+          state.statusMessage = data.message || '任务已进入队列'
+        })
+        if (data.research_id) {
+          openDeepResearchStream(item.id, data.research_id)
+        }
+      } catch (error) {
+        updateDeepResearchItem(item.id, (state) => {
+          state.status = 'failed'
+          state.statusMessage = resolveErrorMessage(error, '提交失败')
+        })
+      }
+    },
+    [openDeepResearchStream, resolveErrorMessage, updateDeepResearchItem],
+  )
+
+  const handleDeepResearchCancel = useCallback(
+    async (item: API.ChatItem) => {
+      const researchId = item.deepResearch?.researchId
+      if (researchId) {
+        try {
+          await api.deepResearch.cancelDeepResearch(researchId)
+        } catch (error) {
+          message.error(resolveErrorMessage(error, '取消失败'))
+        }
+      }
+      updateDeepResearchItem(item.id, (state) => {
+        state.status = 'cancelled'
+        state.statusMessage = '任务已取消'
+      })
+      closeDeepResearchStream(item.id)
+    },
+    [closeDeepResearchStream, resolveErrorMessage, updateDeepResearchItem],
+  )
+
+  const handleDeepResearchRetryPlan = useCallback(
+    async (item: API.ChatItem) => {
+      const request = item.deepResearch?.request
+      if (!request) return
+      await requestDeepResearchPlan(item.id, request)
+    },
+    [requestDeepResearchPlan],
+  )
+
+  const handleDeepResearchEdit = useCallback(
+    (item: API.ChatItem) => {
+      if (!item.deepResearch?.request) return
+      const request = item.deepResearch.request
+      researchForm.setFieldsValue({
+        topic: request.topic,
+        depth: request.depth,
+        breadth: request.breadth,
+        max_parallel: request.max_parallel,
+        max_iterations: request.max_iterations,
+        top_k: request.top_k,
+        index_mode: request.index_mode,
+        language: request.language,
+        report_style: request.report_style,
+        use_web_search: request.use_web_search,
+        use_paper_search: request.use_paper_search,
+        use_code_exec: request.use_code_exec,
+      })
+      setEditingResearchItem(item)
+    },
+    [researchForm],
+  )
+
+  const handleResearchEditSave = useCallback(async () => {
+    if (!editingResearchItem?.deepResearch?.request) return
+    let values: Partial<DeepResearchRequest>
+    try {
+      values = await researchForm.validateFields()
+    } catch {
+      return
+    }
+    const nextRequest = {
+      ...editingResearchItem.deepResearch.request,
+      ...values,
+    }
+    updateDeepResearchItem(editingResearchItem.id, (state) => {
+      state.request = nextRequest
+      state.topic = nextRequest.topic
+    })
+    setEditingResearchItem(null)
+    await requestDeepResearchPlan(editingResearchItem.id, nextRequest)
+  }, [editingResearchItem, requestDeepResearchPlan, researchForm, updateDeepResearchItem])
+
+  const handleDeepResearchOpenWorkspace = useCallback((item: API.ChatItem) => {
+    const request = item.deepResearch?.request
+    const researchId = item.deepResearch?.researchId
+    const url = new URL(
+      `${import.meta.env.BASE_URL || '/'}deep-research`,
+      window.location.origin,
+    )
+    if (request?.topic) url.searchParams.set('topic', request.topic)
+    if (request?.session_id) url.searchParams.set('sessionId', request.session_id)
+    if (researchId) url.searchParams.set('researchId', researchId)
+    window.open(url.toString(), '_blank', 'noopener')
+  }, [])
+
+  const handleDeepResearchExport = useCallback(
+    (item: API.ChatItem, format: 'pdf' | 'markdown') => {
+      const researchId = item.deepResearch?.researchId
+      if (!researchId) {
+        message.warning('暂无可导出的研究结果')
+        return
+      }
+      const url = api.deepResearch.getDeepResearchExportUrl(
+        researchId,
+        format === 'pdf' ? 'pdf' : 'markdown',
+      )
+      window.open(url, '_blank', 'noopener')
+    },
+    [],
+  )
+
+  const handleDeepResearchCopy = useCallback((item: API.ChatItem) => {
+    const content = item.deepResearch?.report?.report_markdown || ''
+    if (!content) {
+      message.warning('暂无可复制的报告内容')
+      return
+    }
+    const tryClipboard = async () => {
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(content)
+          return true
+        }
+      } catch {
+        return false
+      }
+      return false
+    }
+    const fallbackCopy = () => {
+      try {
+        const textarea = document.createElement('textarea')
+        textarea.value = content
+        textarea.style.position = 'fixed'
+        textarea.style.opacity = '0'
+        textarea.style.left = '-9999px'
+        document.body.appendChild(textarea)
+        textarea.focus()
+        textarea.select()
+        const succeeded = document.execCommand('copy')
+        document.body.removeChild(textarea)
+        return succeeded
+      } catch {
+        return false
+      }
+    }
+    tryClipboard()
+      .then((ok) => ok || fallbackCopy())
+      .then((ok) => {
+        if (ok) {
+          message.success('报告内容已复制')
+        } else {
+          message.error('复制失败，请手动选择文本')
+        }
+      })
+  }, [])
+
+  const handleDeepResearchSaveToNotebook = useCallback(async (item: API.ChatItem) => {
+    const data = item.deepResearch
+    const reportMarkdown = data?.report?.report_markdown || ''
+    if (!reportMarkdown) {
+      message.warning('暂无可保存的研究报告')
+      return
+    }
+    const topic = data?.topic || data?.request?.topic || '深度研究报告'
+    const summary = extractReportSummary(reportMarkdown) || topic
+    const markdown = buildDeepResearchNoteMarkdown({
+      topic,
+      reportMarkdown,
+      summary,
+      sessionId: data?.request?.session_id,
+      researchId: data?.researchId,
+      citations: data?.citations,
+    })
+    try {
+      await createNotebookNoteFile(markdown, topic)
+      message.success('报告已保存到笔记本')
+    } catch (error: any) {
+      const detail =
+        error?.response?.data?.detail || error?.response?.data?.message || error?.message
+      message.error(detail ? `保存失败：${detail}` : '保存笔记失败')
+    }
+  }, [])
+
+  const handleDeepResearchInsertSummary = useCallback(
+    (_item: API.ChatItem, summary: string) => {
+      if (!summary) {
+        message.warning('摘要为空，无法回填')
+        return
+      }
+      chat.list.push({
+        id: createChatId(),
+        role: ChatRole.Assistant,
+        type: ChatType.Document,
+        content: summary,
+      })
+      scrollToBottom()
+    },
+    [chat.list],
   )
 
   const handleRetryUserMessage = useCallback(
@@ -944,6 +1743,27 @@ export default function Index() {
     handleToggleUserKb,
     handleSelectUserKb,
   ])
+  const ragModeControl = useMemo(() => {
+    if (!sessionDefaults) return undefined
+    const strategy = sessionDefaults.retrievalStrategy
+    const value: 'fast' | 'deep' =
+      strategy === 'graph' || strategy === 'multimodal_graph' ? 'deep' : 'fast'
+    return {
+      value,
+      loading: updatingDefaults || defaultsLoading,
+      disabled: updatingDefaults,
+      onChange: handleRagModeChange,
+    }
+  }, [sessionDefaults, updatingDefaults, defaultsLoading, handleRagModeChange])
+
+  const researchModeControl = useMemo(
+    () => ({
+      value: researchMode,
+      disabled: !!editingContext,
+      onChange: setResearchMode,
+    }),
+    [editingContext, researchMode],
+  )
 
   return (
     <ComPageLayout
@@ -965,14 +1785,32 @@ export default function Index() {
               </Button>
             </div>
           ) : null}
+          {researchSuggestion ? (
+            <div className={styles['chat-page__research-suggestion']}>
+              <div className={styles['chat-page__research-suggestion-text']}>
+                <strong>建议升级为深度研究：</strong>
+                {researchSuggestion.reason}
+              </div>
+              <Space size={8}>
+                <Button type="primary" size="small" onClick={handleAcceptSuggestion}>
+                  一键升级
+                </Button>
+                <Button size="small" onClick={handleDismissSuggestion}>
+                  忽略
+                </Button>
+              </Space>
+            </div>
+          ) : null}
           <ComSender
             loading={loading}
             sessionId={id}
-            onSend={send}
+            onSend={handleComposerSend}
             onAbort={abortChat}
             onContract={() => openCitationsPanel(null)}
             enableSessionKnowledgeBase={usingSessionKb}
             knowledgeControl={knowledgeControl}
+            ragModeControl={ragModeControl}
+            researchModeControl={researchModeControl}
             pendingAttachments={pendingAttachments}
             onRemovePendingAttachment={handleRemovePendingAttachment}
             onFileSelected={handleFileSelected}
@@ -999,9 +1837,17 @@ export default function Index() {
       <div className={styles['chat-page']}>
         <div className={styles['chat-page__header']}>
           <div className={styles['chat-page__header-title']}>{title}</div>
-          <Button type="text" shape="circle">
-            <img src={IconEdit} />
-          </Button>
+          <div className={styles['chat-page__header-actions']}>
+            <Button size="small" onClick={handleOpenIdeaGen}>
+              IdeaGen
+            </Button>
+            <Button size="small" onClick={handleOpenNotebook}>
+              笔记本
+            </Button>
+            <Button type="text" shape="circle">
+              <img src={IconEdit} />
+            </Button>
+          </div>
         </div>
 
         <ChatMessage
@@ -1011,6 +1857,22 @@ export default function Index() {
           onRefrence={setRead}
           onRetryUserMessage={handleRetryUserMessage}
           onResendUserMessage={handleResendUserMessage}
+          onDeepResearchConfirm={handleDeepResearchConfirm}
+          onDeepResearchCancel={handleDeepResearchCancel}
+          onDeepResearchEdit={handleDeepResearchEdit}
+          onDeepResearchRetryPlan={handleDeepResearchRetryPlan}
+          onDeepResearchOpenWorkspace={handleDeepResearchOpenWorkspace}
+          onDeepResearchExport={handleDeepResearchExport}
+          onDeepResearchCopy={handleDeepResearchCopy}
+          onDeepResearchSaveToNotebook={handleDeepResearchSaveToNotebook}
+          onDeepResearchInsertSummary={handleDeepResearchInsertSummary}
+        />
+
+        <NotebookDrawer
+          open={notebookOpen}
+          sessionId={id}
+          onClose={() => setNotebookOpen(false)}
+          getSelectionText={getSelectionText}
         />
 
         <Drawer
@@ -1029,6 +1891,79 @@ export default function Index() {
             }
           />
         </Drawer>
+
+        <Modal
+          title="调整深度研究参数"
+          open={!!editingResearchItem}
+          onCancel={() => setEditingResearchItem(null)}
+          onOk={handleResearchEditSave}
+          okText="更新计划"
+          cancelText="取消"
+          destroyOnClose
+        >
+          <Form form={researchForm} layout="vertical">
+            <Form.Item
+              name="topic"
+              label="研究主题"
+              rules={[{ required: true, message: '请输入研究主题' }]}
+            >
+              <Input placeholder="输入研究主题" />
+            </Form.Item>
+            <Space size={12} wrap>
+              <Form.Item
+                name="depth"
+                label="深度"
+                rules={[{ required: true, message: '请输入深度' }]}
+              >
+                <InputNumber min={1} max={6} />
+              </Form.Item>
+              <Form.Item
+                name="breadth"
+                label="广度"
+                rules={[{ required: true, message: '请输入广度' }]}
+              >
+                <InputNumber min={1} max={12} />
+              </Form.Item>
+              <Form.Item
+                name="max_parallel"
+                label="并发"
+                rules={[{ required: true, message: '请输入并发数' }]}
+              >
+                <InputNumber min={1} max={10} />
+              </Form.Item>
+              <Form.Item
+                name="max_iterations"
+                label="迭代"
+                rules={[{ required: true, message: '请输入迭代次数' }]}
+              >
+                <InputNumber min={1} max={10} />
+              </Form.Item>
+              <Form.Item name="top_k" label="TopK">
+                <InputNumber min={1} max={50} />
+              </Form.Item>
+              <Form.Item name="index_mode" label="Index Mode">
+                <Select options={DEEP_RESEARCH_INDEX_OPTIONS} />
+              </Form.Item>
+            </Space>
+            <Space size={12} wrap>
+              <Form.Item name="use_web_search" label="WebSearch" valuePropName="checked">
+                <Switch />
+              </Form.Item>
+              <Form.Item name="use_paper_search" label="PaperSearch" valuePropName="checked">
+                <Switch />
+              </Form.Item>
+              <Form.Item name="use_code_exec" label="CodeExec" valuePropName="checked">
+                <Switch />
+              </Form.Item>
+            </Space>
+            <Form.Item name="language" label="语言">
+              <Input placeholder="zh / en" />
+            </Form.Item>
+            <Form.Item name="report_style" label="报告风格">
+              <Input placeholder="例如：学术综述 / 技术分析" />
+            </Form.Item>
+          </Form>
+        </Modal>
       </div>
     </ComPageLayout>
   )

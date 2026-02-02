@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from models.knowledgebase import KnowledgeBase
 from models.user import User
 from schemas.knowledge_base import KnowledgeBaseCreate, KnowledgeBaseUpdate
+from service.core.rag.providers.registry import resolve_provider
 from exceptions.base import ResourceNotFoundException, PermissionDeniedException
 from service import document_service
 from utils.get_logger import logger
@@ -21,7 +22,9 @@ def create_kb_for_user(db: Session, kb_create: KnowledgeBaseCreate, user_id: int
     Returns:
         KnowledgeBase: 新创建的知识库ORM对象。
     """
-    db_kb = KnowledgeBase(**kb_create.model_dump(), user_id=user_id)
+    data = kb_create.model_dump()
+    data["rag_provider"] = resolve_provider(data.get("rag_provider"))
+    db_kb = KnowledgeBase(**data, user_id=user_id)
     db.add(db_kb)
     db.commit()
     db.refresh(db_kb)
@@ -56,6 +59,12 @@ def list_kbs_by_user_id(db: Session, user_id: int) -> List[KnowledgeBase]:
     """
     return db.query(KnowledgeBase).filter(KnowledgeBase.user_id == user_id).all()
 
+
+def get_rag_provider(db: Session, kb_id: int, user_id: int) -> str:
+    """Resolve the effective RAG provider for a knowledge base."""
+    kb = get_kb_by_id(db, kb_id, user_id)
+    return resolve_provider(getattr(kb, "rag_provider", None))
+
 def list_ephemeral_kbs_older_than(db: Session, user_id: int, older_than_hours: int) -> List[KnowledgeBase]:
     cutoff = datetime.utcnow() - timedelta(hours=older_than_hours)
     return (
@@ -86,6 +95,8 @@ def update_kb(db: Session, kb_id: int, kb_update: KnowledgeBaseUpdate, user_id: 
     kb = get_kb_by_id(db, kb_id, user_id)  # 复用带有权限检查的查询函数
     
     update_data = kb_update.model_dump(exclude_unset=True)
+    if "rag_provider" in update_data:
+        update_data["rag_provider"] = resolve_provider(update_data.get("rag_provider"))
     for key, value in update_data.items():
         setattr(kb, key, value)
     

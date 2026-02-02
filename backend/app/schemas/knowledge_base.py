@@ -1,6 +1,6 @@
 from pydantic import BaseModel
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict, Any
 
 # 移除临时的、不完整的类声明
 # class DocumentInDB:
@@ -12,6 +12,8 @@ class KnowledgeBaseBase(BaseModel):
     """
     name: str
     description: Optional[str] = None
+    rag_provider: Optional[str] = None
+    rag_config: Optional[Dict[str, Any]] = None
 
 class KnowledgeBaseCreate(KnowledgeBaseBase):
     """
@@ -27,6 +29,8 @@ class KnowledgeBaseUpdate(KnowledgeBaseBase):
     """
     name: Optional[str] = None
     description: Optional[str] = None
+    rag_provider: Optional[str] = None
+    rag_config: Optional[Dict[str, Any]] = None
 
 
 class KnowledgeBaseInDBBase(KnowledgeBaseBase):

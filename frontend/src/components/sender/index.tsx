@@ -30,6 +30,17 @@ export default function ComSender(
       onToggleUser: (checked: boolean) => void
       onSelectUserKb: (value: number) => void
     }
+    ragModeControl?: {
+      value: 'fast' | 'deep'
+      loading?: boolean
+      disabled?: boolean
+      onChange: (value: 'fast' | 'deep') => void
+    }
+    researchModeControl?: {
+      value: 'chat' | 'deep'
+      disabled?: boolean
+      onChange: (value: 'chat' | 'deep') => void
+    }
     onAttachmentsChange?: (files: API.ChatAttachment[]) => void
     pendingAttachments?: API.ChatAttachment[]
     onRemovePendingAttachment?: (id: number) => void
@@ -48,6 +59,8 @@ export default function ComSender(
     sessionId,
     enableSessionKnowledgeBase = true,
     knowledgeControl,
+    ragModeControl,
+    researchModeControl,
     onAttachmentsChange,
     pendingAttachments = [],
     onRemovePendingAttachment,
@@ -165,6 +178,45 @@ export default function ComSender(
                 ) : null}
               </Space>
             </>
+          ) : null}
+          {ragModeControl ? (
+            <Space size={6} align="center">
+              <Tooltip title="快速模式更省时，深度模式启用图谱与多模态增强">
+                <span className="com-sender__kb-label">检索模式</span>
+              </Tooltip>
+              <Select
+                size="small"
+                className="com-sender__rag-select"
+                value={ragModeControl.value}
+                disabled={ragModeControl.disabled}
+                loading={ragModeControl.loading}
+                options={[
+                  { label: '快速', value: 'fast' },
+                  { label: '深度', value: 'deep' },
+                ]}
+                onChange={(value) => ragModeControl.onChange(value as 'fast' | 'deep')}
+              />
+            </Space>
+          ) : null}
+          {researchModeControl ? (
+            <Space size={6} align="center">
+              <Tooltip title="深度研究会执行规划、检索与报告生成">
+                <span className="com-sender__kb-label">研究模式</span>
+              </Tooltip>
+              <Select
+                size="small"
+                className="com-sender__research-select"
+                value={researchModeControl.value}
+                disabled={researchModeControl.disabled}
+                options={[
+                  { label: '对话', value: 'chat' },
+                  { label: '深度研究', value: 'deep' },
+                ]}
+                onChange={(value) =>
+                  researchModeControl.onChange(value as 'chat' | 'deep')
+                }
+              />
+            </Space>
           ) : null}
         </Space>
 

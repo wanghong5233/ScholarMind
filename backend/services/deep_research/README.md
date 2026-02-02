@@ -2,7 +2,7 @@
 
 ## Goal
 Build an academic-grade DeepResearch service by combining:
-- DeepTutor-style queue orchestration
+- Queue-based orchestration
 - GPT-Researcher-style report scaffolding
 - ScholarMind academic RAG grounding
 
@@ -36,9 +36,6 @@ uvicorn main:app --reload --port 8004
 `POST /api/idea-generation`
 `GET /api/idea-generation/runs`
 `GET /api/idea-generation/{idea_id}`
-`POST /api/co-writer`
-`GET /api/co-writer/runs`
-`GET /api/co-writer/{operation_id}`
 `GET /api/deep-research/queue`
 `PATCH /api/deep-research/{research_id}/priority`
 `GET /api/deep-research/{research_id}/export?format=markdown|html|pdf`
@@ -75,9 +72,8 @@ uvicorn main:app --reload --port 8004
 ## Sync Run (Debug)
 - `ENABLE_SYNC_RUN=false` disables `POST /api/deep-research` to avoid bypassing queue control.
 
-## IdeaGen / Co-Writer Storage
+## IdeaGen Storage
 - IdeaGen metadata stored in `idea_meta.json`, payload in `ideas.json`.
-- Co-Writer metadata stored in `co_writer_meta.json`, payload in `co_writer.json`.
 
 ## Run Watchdog
 - `RUN_TIMEOUT_SECONDS` hard timeout for a run (0 disables).
@@ -170,6 +166,6 @@ Completed (current implementation):
 - Frontend DeepResearch workspace UI (run list / queue / progress / exports)
 
 Possible enhancements (quality-focused):
-- Deeper multi-level report outline (e.g., 3-level outline like DeepTutor) and section-by-section generation
+- Deeper multi-level report outline (e.g., 3-level outline) and section-by-section generation
 - Automated hallucination checks (claim ↔ citation consistency) and evaluation scripts
 - Report style presets (academic / blog / slide notes) driven by `report_style`

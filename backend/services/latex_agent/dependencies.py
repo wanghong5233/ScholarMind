@@ -3,7 +3,7 @@
 管理 Agent 服务的依赖项（LLM Client、Tool Registry、Agent 实例等）
 """
 from fastapi import Depends
-from typing import Optional
+from typing import Any, Dict, Optional
 import logging
 
 from service.llm_client import LLMClient
@@ -35,6 +35,15 @@ def get_llm_client() -> LLMClient:
         _llm_client = LLMClient()
         logger.info("Initialized LLM client")
     return _llm_client
+
+
+def refresh_llm_client() -> Dict[str, Any]:
+    """Refresh LLM client configuration in-place."""
+
+    llm_client = get_llm_client()
+    if hasattr(llm_client, "refresh_config"):
+        return llm_client.refresh_config()
+    return {"status": "skipped"}
 
 
 def get_tool_registry() -> ToolRegistry:

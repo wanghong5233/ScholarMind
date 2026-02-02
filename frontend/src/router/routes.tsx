@@ -10,7 +10,6 @@ import RepositoryOnlineImport from '@/pages/repository/OnlineImport'
 import LatexEditorPage from '@/pages/latex-editor'
 import DeepResearchPage from '@/pages/deep-research'
 import IdeaGenerationPage from '@/pages/idea-generation'
-import CoWriterPage from '@/pages/co-writer'
 import {
   Outlet,
   RouteObject,
@@ -63,10 +62,6 @@ export const routes: IRouteObject[] = [
   {
     path: '/idea-generation',
     Component: IdeaGenerationPage,
-  },
-  {
-    path: '/co-writer',
-    Component: CoWriterPage,
   },
 ]
 

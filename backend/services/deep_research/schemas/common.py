@@ -1,7 +1,7 @@
 """Shared request/response models for DeepResearch."""
 
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -31,10 +31,12 @@ class DeepResearchRequest(BaseModel):
     topic: str = Field(..., min_length=1, description="Research topic or question.")
     mode: DeepResearchMode = Field(default=DeepResearchMode.QUEUE)
     depth: int = Field(default=2, ge=1, le=6)
-    breadth: int = Field(default=4, ge=1, le=12)
-    max_parallel: int = Field(default=3, ge=1, le=10)
-    max_iterations: int = Field(default=5, ge=1, le=10)
+    breadth: int = Field(default=5, ge=1, le=12)
+    max_parallel: int = Field(default=1, ge=1, le=10)
+    max_iterations: int = Field(default=4, ge=1, le=10)
+    iteration_mode: Optional[Literal["fixed", "flexible"]] = Field(default=None)
     use_web_search: bool = Field(default=False)
+    use_paper_search: bool = Field(default=False)
     use_code_exec: bool = Field(default=False)
     code_exec_snippets: List[str] = Field(default_factory=list)
     top_k: Optional[int] = Field(default=None, ge=1, le=50)
@@ -43,6 +45,25 @@ class DeepResearchRequest(BaseModel):
     language: Optional[str] = Field(default=None, description="Preferred output language.")
     report_style: Optional[str] = Field(default=None, description="Style hint for the report.")
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class DeepResearchPlanItem(BaseModel):
+    """Plan item for previewing research scope."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: str
+    question: str
+    depth: int
+    parent_title: Optional[str] = None
+
+
+class DeepResearchPlan(BaseModel):
+    """Preview payload for a DeepResearch plan."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: List[DeepResearchPlanItem] = Field(default_factory=list)
 
 
 class CitationOut(BaseModel):
@@ -199,6 +220,8 @@ class DeepResearchRunMeta(BaseModel):
     duration_seconds: Optional[float] = None
     user_id: Optional[int] = None
     summary: Optional[Dict[str, Any]] = None
+    context: Optional[Dict[str, Any]] = None
+    token_usage: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     request: Dict[str, Any] = Field(default_factory=dict)
 

@@ -15,6 +15,7 @@ import type {
 } from '@/api/deepResearch'
 import Markdown from '@/components/markdown'
 import { exportToPdf } from '@/utils/pdfExport'
+import { createWorkspace, updateFileContent } from '@/api/latexAgent'
 import { useRequest } from 'ahooks'
 import dayjs from 'dayjs'
 import {
@@ -52,6 +53,7 @@ import {
   WarningOutlined,
 } from '@ant-design/icons'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import styles from './index.module.scss'
 
 const { Text, Paragraph } = Typography
@@ -61,11 +63,45 @@ const PROGRESS_TAIL = 300
 const PROGRESS_PAGE_LIMIT = 200
 const DEFAULTS = {
   depth: 2,
-  breadth: 4,
-  maxParallel: 3,
-  maxIterations: 5,
+  breadth: 5,
+  maxParallel: 1,
+  maxIterations: 4,
   topK: 6,
   indexMode: 'auto',
+}
+
+const PRESETS = {
+  quick: { depth: 1, breadth: 2, maxParallel: 1, maxIterations: 2 },
+  medium: { depth: 2, breadth: 5, maxParallel: 1, maxIterations: 4 },
+  deep: { depth: 2, breadth: 8, maxParallel: 1, maxIterations: 7 },
+}
+
+type PresetKey = keyof typeof PRESETS | 'custom'
+
+const PRESET_OPTIONS: { label: string; value: PresetKey; description: string }[] = [
+  { label: '快速', value: 'quick', description: '轻量探索，快速收敛' },
+  { label: '标准', value: 'medium', description: '平衡深度与效率' },
+  { label: '深度', value: 'deep', description: '高覆盖，适合深入研究' },
+  { label: '自定义', value: 'custom', description: '手动调整参数' },
+]
+
+function resolvePresetKey(params: {
+  depth: number
+  breadth: number
+  maxParallel: number
+  maxIterations: number
+}): PresetKey {
+  for (const [key, preset] of Object.entries(PRESETS)) {
+    if (
+      preset.depth === params.depth &&
+      preset.breadth === params.breadth &&
+      preset.maxParallel === params.maxParallel &&
+      preset.maxIterations === params.maxIterations
+    ) {
+      return key as PresetKey
+    }
+  }
+  return 'custom'
 }
 
 type SessionOption = {
@@ -583,18 +619,31 @@ type TraceRecord = {
   citation_id?: string
 }
 
+type DeepResearchLocationState = {
+  noteContext?: {
+    title?: string
+    content?: string
+    source?: string
+    noteId?: string
+    sessionId?: string
+  }
+}
+
 export default function DeepResearchPage() {
+  const location = useLocation()
+  const navigate = useNavigate()
   const [topic, setTopic] = useState('')
   const [sessionId, setSessionId] = useState('')
   const [mode, setMode] = useState<'queue' | 'tree'>('queue')
-  const [depth, setDepth] = useState(2)
-  const [breadth, setBreadth] = useState(4)
-  const [maxParallel, setMaxParallel] = useState(3)
-  const [maxIterations, setMaxIterations] = useState(5)
-  const [topK, setTopK] = useState<number | undefined>(6)
-  const [indexMode, setIndexMode] = useState('auto')
+  const [depth, setDepth] = useState(DEFAULTS.depth)
+  const [breadth, setBreadth] = useState(DEFAULTS.breadth)
+  const [maxParallel, setMaxParallel] = useState(DEFAULTS.maxParallel)
+  const [maxIterations, setMaxIterations] = useState(DEFAULTS.maxIterations)
+  const [topK, setTopK] = useState<number | undefined>(DEFAULTS.topK)
+  const [indexMode, setIndexMode] = useState(DEFAULTS.indexMode)
   const [language, setLanguage] = useState('')
   const [reportStyle, setReportStyle] = useState('')
+  const [importingToStudio, setImportingToStudio] = useState(false)
   const [useWebSearch, setUseWebSearch] = useState(false)
   const [useCodeExec, setUseCodeExec] = useState(false)
   const [codeSnippetsText, setCodeSnippetsText] = useState('')
@@ -634,6 +683,7 @@ export default function DeepResearchPage() {
   const [blockEvidenceLoading, setBlockEvidenceLoading] = useState(false)
   const [compareRunA, setCompareRunA] = useState<string | undefined>(undefined)
   const [compareRunB, setCompareRunB] = useState<string | undefined>(undefined)
+  const noteContextHandledRef = useRef(false)
   const streamRef = useRef<EventSource | null>(null)
   const streamSnapshotCounterRef = useRef(0)
   const streamRetryRef = useRef(0)
@@ -643,6 +693,32 @@ export default function DeepResearchPage() {
   const reportRef = useRef<HTMLDivElement | null>(null)
   const thoughtStreamRef = useRef<HTMLDivElement | null>(null)
   const thoughtItemRefs = useRef<Map<string, HTMLDivElement | null>>(new Map())
+
+  const activePresetKey = useMemo(
+    () =>
+      resolvePresetKey({
+        depth,
+        breadth,
+        maxParallel,
+        maxIterations,
+      }),
+    [depth, breadth, maxParallel, maxIterations],
+  )
+
+  const activePresetDesc = useMemo(() => {
+    const found = PRESET_OPTIONS.find((item) => item.value === activePresetKey)
+    return found?.description
+  }, [activePresetKey])
+
+  const applyPreset = useCallback((key: PresetKey) => {
+    if (key === 'custom') return
+    const preset = PRESETS[key]
+    if (!preset) return
+    setDepth(preset.depth)
+    setBreadth(preset.breadth)
+    setMaxParallel(preset.maxParallel)
+    setMaxIterations(preset.maxIterations)
+  }, [])
 
   useEffect(() => {
     const cached = sessionStorage.getItem(STORAGE_KEY)
@@ -669,6 +745,40 @@ export default function DeepResearchPage() {
       console.warn('Failed to restore deep research state', error)
     }
   }, [])
+
+  useEffect(() => {
+    if (!location.search) return
+    const params = new URLSearchParams(location.search)
+    const topicParam = params.get('topic')
+    const sessionParam = params.get('sessionId')
+    const researchParam = params.get('researchId')
+    if (topicParam) setTopic(topicParam)
+    if (sessionParam) setSessionId(sessionParam)
+    if (researchParam) setResearchId(researchParam)
+  }, [location.search])
+
+  useEffect(() => {
+    if (noteContextHandledRef.current) return
+    const state = location.state as DeepResearchLocationState | null
+    if (!state?.noteContext) return
+    noteContextHandledRef.current = true
+    const note = state.noteContext
+    if (note.title && !topic) setTopic(note.title)
+    if (note.sessionId && !sessionId) setSessionId(note.sessionId)
+    const content = (note.content || '').trim()
+    if (!content) return
+    const parsed = safeParseJson(metadataText)
+    const base =
+      parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    const next = {
+      ...base,
+      context_text: content,
+      context_title: note.title || base.context_title,
+      context_source: note.source || 'notebook',
+      context_note_id: note.noteId || base.context_note_id,
+    }
+    setMetadataText(JSON.stringify(next, null, 2))
+  }, [location.state, metadataText, sessionId, topic])
 
   useEffect(() => {
     lastStreamEventIdRef.current = ''
@@ -967,6 +1077,8 @@ export default function DeepResearchPage() {
       message.warning('Metadata JSON 格式错误')
       return
     }
+    const presetMeta =
+      activePresetKey !== 'custom' ? { deep_research_preset: activePresetKey } : {}
     const snippets = useCodeExec ? parseSnippets(codeSnippetsText) : []
     const payload: DeepResearchRequest = {
       topic: topic.trim(),
@@ -983,12 +1095,13 @@ export default function DeepResearchPage() {
       use_web_search: useWebSearch,
       use_code_exec: useCodeExec,
       code_exec_snippets: snippets,
-      metadata: metadata || {},
+      metadata: { ...(metadata || {}), ...presetMeta },
     }
     await runDeepResearchRequest(payload)
   }, [
     topic,
     metadataText,
+    activePresetKey,
     useCodeExec,
     codeSnippetsText,
     mode,
@@ -1444,6 +1557,38 @@ export default function DeepResearchPage() {
     win.focus()
     win.print()
   }, [reportMarkdown])
+
+  const handleOpenInDocStudio = useCallback(async () => {
+    if (!reportMarkdown) {
+      message.warning('暂无可导入的报告')
+      return
+    }
+    const suffix = result?.research_id || researchId || 'report'
+    const workspaceName = `deep-research-${suffix}`
+    setImportingToStudio(true)
+    try {
+      const workspace = await createWorkspace({
+        name: workspaceName,
+        config: {
+          workspace_type: 'doc_studio',
+          primary_format: 'markdown',
+          supported_formats: ['markdown', 'plaintext'],
+          main_file: 'report.md',
+        },
+      })
+      await updateFileContent({
+        workspaceId: workspace.workspaceId,
+        path: 'report.md',
+        content: reportMarkdown,
+      })
+      message.success('已导入到 Doc Studio')
+      navigate(`/latex-editor/${workspace.workspaceId}?file=report.md`)
+    } catch (error) {
+      message.error('导入到 Doc Studio 失败')
+    } finally {
+      setImportingToStudio(false)
+    }
+  }, [navigate, reportMarkdown, researchId, result?.research_id])
 
   const citations = useMemo<DeepResearchCitation[]>(() => {
     if (result?.citations?.length) return result.citations
@@ -2201,6 +2346,8 @@ export default function DeepResearchPage() {
       message.warning('Metadata JSON 格式错误')
       return
     }
+    const presetMeta =
+      activePresetKey !== 'custom' ? { deep_research_preset: activePresetKey } : {}
     const snippets = useCodeExec ? parseSnippets(codeSnippetsText) : []
     const payload: DeepResearchRequest = {
       topic: topic.trim(),
@@ -2217,7 +2364,7 @@ export default function DeepResearchPage() {
       use_web_search: useWebSearch,
       use_code_exec: useCodeExec,
       code_exec_snippets: snippets,
-      metadata: metadata || {},
+      metadata: { ...(metadata || {}), ...presetMeta },
     }
     const ok = await copyText(JSON.stringify(payload, null, 2))
     if (ok) {
@@ -2227,6 +2374,7 @@ export default function DeepResearchPage() {
     }
   }, [
     metadataText,
+    activePresetKey,
     useCodeExec,
     codeSnippetsText,
     topic,
@@ -2544,6 +2692,22 @@ export default function DeepResearchPage() {
             </div>
             <div className={styles.grid}>
               <div>
+                <Text>预设</Text>
+                <Select
+                  value={activePresetKey}
+                  onChange={(value) => applyPreset(value as PresetKey)}
+                  options={PRESET_OPTIONS.map((item) => ({
+                    label: `${item.label}（${item.description}）`,
+                    value: item.value,
+                  }))}
+                />
+                {activePresetDesc ? (
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {activePresetDesc}
+                  </Text>
+                ) : null}
+              </div>
+              <div>
                 <Text>模式</Text>
                 <Select
                   value={mode}
@@ -2556,7 +2720,12 @@ export default function DeepResearchPage() {
               </div>
               <div>
                 <Text>Depth</Text>
-                <InputNumber min={1} max={6} value={depth} onChange={(v) => setDepth(v ?? 2)} />
+                <InputNumber
+                  min={1}
+                  max={6}
+                  value={depth}
+                  onChange={(v) => setDepth(v ?? DEFAULTS.depth)}
+                />
               </div>
               <div>
                 <Text>Breadth</Text>
@@ -2564,7 +2733,7 @@ export default function DeepResearchPage() {
                   min={1}
                   max={12}
                   value={breadth}
-                  onChange={(v) => setBreadth(v ?? 4)}
+                  onChange={(v) => setBreadth(v ?? DEFAULTS.breadth)}
                 />
               </div>
               <div>
@@ -2573,7 +2742,7 @@ export default function DeepResearchPage() {
                   min={1}
                   max={10}
                   value={maxParallel}
-                  onChange={(v) => setMaxParallel(v ?? 3)}
+                  onChange={(v) => setMaxParallel(v ?? DEFAULTS.maxParallel)}
                 />
               </div>
               <div>
@@ -2582,12 +2751,17 @@ export default function DeepResearchPage() {
                   min={1}
                   max={10}
                   value={maxIterations}
-                  onChange={(v) => setMaxIterations(v ?? 5)}
+                  onChange={(v) => setMaxIterations(v ?? DEFAULTS.maxIterations)}
                 />
               </div>
               <div>
                 <Text>TopK</Text>
-                <InputNumber min={1} max={50} value={topK} onChange={(v) => setTopK(v ?? 6)} />
+                <InputNumber
+                  min={1}
+                  max={50}
+                  value={topK}
+                  onChange={(v) => setTopK(v ?? DEFAULTS.topK)}
+                />
               </div>
               <div>
                 <Text>Index</Text>
@@ -3022,6 +3196,9 @@ export default function DeepResearchPage() {
             <Button onClick={handleExportHtml}>导出 HTML</Button>
             <Button onClick={handleExportPdf}>导出 PDF</Button>
             <Button onClick={handlePrintReport}>打印 / PDF</Button>
+            <Button loading={importingToStudio} onClick={handleOpenInDocStudio}>
+              导入到 Doc Studio
+            </Button>
             <Button
               onClick={() =>
                 downloadJson(

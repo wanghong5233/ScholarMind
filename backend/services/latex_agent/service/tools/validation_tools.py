@@ -104,6 +104,12 @@ class CompileLaTeXTool(BaseTool):
             or (getattr(agent_state, "workspace_config", {}) or {}).get("main_file")
             or "main.tex"
         )
+        if not str(main_file).lower().endswith(".tex"):
+            return ToolResult(
+                success=False,
+                error="compile_latex_tool only supports .tex files",
+                summary="主文件不是 .tex，已跳过编译。",
+            )
         
         # 如果没有指定编译器，先检测文件内容
         default_compiler = "pdflatex"

@@ -3,7 +3,7 @@
 管理 Agent 服务的配置项
 """
 from pydantic_settings import BaseSettings
-from typing import Optional
+from typing import Optional, Dict
 import os
 
 
@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: Optional[str] = None  # 可选：OpenAI API Key
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
     OPENAI_MODEL_NAME: str = "gpt-4o"
+
+    # LLM 请求超时与健康策略
+    LLM_REQUEST_TIMEOUT: int = 60
+    LLM_FALLBACK_ENABLED: bool = True
+    LLM_FALLBACK_ALLOW_EXPLICIT_PROVIDER: bool = True
+    LLM_HEALTH_FAILURE_THRESHOLD: int = 3
+    LLM_HEALTH_COOLDOWN_SECONDS: int = 90
     
     # RL 训练模型配置（可选，如果使用 RL 训练的模型）
     RL_MODEL_ENABLED: bool = False  # 是否启用 RL 训练模型
@@ -31,6 +38,16 @@ class Settings(BaseSettings):
     
     LLM_TEMPERATURE: float = 0.3
     LLM_MAX_TOKENS: int = 4096
+
+    # LLM 成本统计（默认 0，按需在环境变量配置）
+    # LLM_COST_CONFIG 示例：
+    # {
+    #   "dashscope": {"qwen-plus": {"input": 0.0, "output": 0.0}, "default": {"input": 0.0, "output": 0.0}},
+    #   "openai": {"gpt-4o": {"input": 0.0, "output": 0.0}}
+    # }
+    LLM_COST_CONFIG: Dict[str, Dict[str, Dict[str, float]]] = {}
+    LLM_COST_PER_1K_INPUT_TOKENS: float = 0.0
+    LLM_COST_PER_1K_OUTPUT_TOKENS: float = 0.0
     
     # RAG 服务配置
     RAG_SERVICE_URL: str = "http://scholarmind_api:8000"
@@ -40,6 +57,17 @@ class Settings(BaseSettings):
     AGENT_TIMEOUT: int = 300  # 秒
     AGENT_WORKSPACE_CACHE_TTL: int = 60  # 秒
     AGENT_WORKSPACE_CACHE_SIZE: int = 16  # 缓存条目数
+    AGENT_HISTORY_MAX_ENTRIES: int = 500  # 历史记录最大条数（0 表示不限制）
+    AGENT_HISTORY_MAX_BYTES: int = 0  # 历史记录最大磁盘占用（0 表示不限制）
+    AGENT_WORKSPACE_LOCK_TTL: int = 600  # 工作区锁最大持续时间（秒）
+
+    # Web Search 配置
+    ENABLE_WEB_SEARCH: bool = False
+    WEB_SEARCH_PROVIDER: str = "tavily"
+    WEB_SEARCH_API_KEY: Optional[str] = None
+    WEB_SEARCH_BASE_URL: str = "https://api.tavily.com/search"
+    WEB_SEARCH_MAX_RESULTS: int = 5
+    WEB_SEARCH_TIMEOUT: int = 20
     
     # 工作区配置
     WORKSPACES_ROOT: str = "/app/workspaces"
@@ -83,4 +111,13 @@ class Settings(BaseSettings):
 
 # 全局配置实例
 settings = Settings()
+
+
+def refresh_settings() -> Settings:
+    """Reload settings from environment into the existing instance."""
+
+    updated = Settings()
+    for name in settings.model_fields:
+        setattr(settings, name, getattr(updated, name))
+    return settings
 

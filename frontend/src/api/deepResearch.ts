@@ -3,16 +3,13 @@ import { request } from './request'
 
 const DEEP_RESEARCH_BASE =
   (import.meta.env.VITE_DEEP_RESEARCH_BASE as string | undefined) ||
-  (import.meta.env.DEV ? 'http://127.0.0.1:8004/api' : '/api/deep-research')
-const DEFAULT_DEEP_RESEARCH_USER_ID =
-  (import.meta.env.VITE_DEEP_RESEARCH_DEFAULT_USER_ID as string | undefined) || '1'
+  (import.meta.env.DEV ? 'http://127.0.0.1:8000/api/deep-research' : '/api/deep-research')
 
 function withDeepResearchConfig(config?: AxiosRequestConfig): AxiosRequestConfig {
   return {
     baseURL: DEEP_RESEARCH_BASE,
     ...config,
     headers: {
-      'X-User-Id': DEFAULT_DEEP_RESEARCH_USER_ID,
       ...(config?.headers ?? {}),
     },
   }
@@ -28,7 +25,9 @@ export interface DeepResearchRequest {
   breadth?: number
   max_parallel?: number
   max_iterations?: number
+  iteration_mode?: 'fixed' | 'flexible'
   use_web_search?: boolean
+  use_paper_search?: boolean
   use_code_exec?: boolean
   code_exec_snippets?: string[]
   top_k?: number
@@ -40,28 +39,39 @@ export interface DeepResearchRequest {
 }
 
 export interface IdeaGenerationRequest {
-  topic: string
+  topic?: string
   idea_count?: number
   session_id?: string
   language?: string
   constraints?: string[]
+  notes?: IdeaGenerationNoteInput[]
   top_k?: number
   index_mode?: string
   metadata?: Record<string, any>
 }
 
-export type CoWriterTask = 'rewrite' | 'expand' | 'shorten' | 'annotate'
+export interface IdeaGenerationNoteInput {
+  title?: string
+  content: string
+  tags?: string[]
+  source?: string
+}
 
-export interface CoWriterRequest {
-  task: CoWriterTask
-  text: string
+export interface NotebookNoteRequest {
+  selection: string
   session_id?: string
   language?: string
-  instructions?: string
-  tone?: string
+  title?: string
+  tags?: string[]
   top_k?: number
   index_mode?: string
   metadata?: Record<string, any>
+}
+
+export interface NotebookNoteResponse {
+  note_markdown: string
+  citations: DeepResearchCitation[]
+  trace?: Record<string, any>
 }
 
 export interface DeepResearchCitation {
@@ -133,6 +143,8 @@ export interface DeepResearchRunMeta {
   duration_seconds?: number
   user_id?: number
   summary?: DeepResearchRunSummary
+  context?: Record<string, any>
+  token_usage?: Record<string, any>
   error?: string
   request?: Record<string, any>
 }
@@ -280,7 +292,26 @@ export interface IdeaGenerationResponse {
   idea_id: string
   ideas_markdown: string
   citations: DeepResearchCitation[]
+  ideas?: IdeaGenerationItem[]
   trace: Record<string, any>
+}
+
+export interface IdeaCandidate {
+  title: string
+  description?: string
+  dimension?: string
+  novelty?: string
+  feasibility?: string
+}
+
+export interface IdeaGenerationItem {
+  knowledge_point: string
+  description: string
+  research_ideas: IdeaCandidate[]
+  kept_ideas: string[]
+  rejected_ideas: string[]
+  reasons: Record<string, string>
+  statement_markdown?: string
 }
 
 export interface IdeaGenerationRunMeta {
@@ -302,36 +333,6 @@ export interface IdeaGenerationRunList {
 export interface IdeaGenerationRunDetail {
   meta: IdeaGenerationRunMeta
   payload: IdeaGenerationResponse
-}
-
-export type CoWriterStatus = 'running' | 'completed' | 'failed'
-
-export interface CoWriterResponse {
-  operation_id: string
-  result_markdown: string
-  citations: DeepResearchCitation[]
-  trace: Record<string, any>
-}
-
-export interface CoWriterRunMeta {
-  operation_id: string
-  status: CoWriterStatus | string
-  task: CoWriterTask
-  started_at?: string
-  finished_at?: string
-  duration_seconds?: number
-  user_id?: number
-  error?: string
-  request?: Record<string, any>
-}
-
-export interface CoWriterRunList {
-  items: CoWriterRunMeta[]
-}
-
-export interface CoWriterRunDetail {
-  meta: CoWriterRunMeta
-  payload: CoWriterResponse
 }
 
 export interface ProgressEvent {
@@ -362,6 +363,17 @@ export function runDeepResearch(
 ) {
   return request.post<DeepResearchResponse>(
     '/deep-research',
+    payload,
+    withDeepResearchConfig(options),
+  )
+}
+
+export function previewDeepResearchPlan(
+  payload: DeepResearchRequest,
+  options?: AxiosRequestConfig,
+) {
+  return request.post<DeepResearchPlan>(
+    '/deep-research/plan',
     payload,
     withDeepResearchConfig(options),
   )
@@ -461,6 +473,10 @@ export function runIdeaGeneration(payload: IdeaGenerationRequest, options?: Axio
   )
 }
 
+export function generateNotebookNote(payload: NotebookNoteRequest, options?: AxiosRequestConfig) {
+  return request.post<NotebookNoteResponse>('/notebook', payload, withDeepResearchConfig(options))
+}
+
 export function listIdeaGenerationRuns(options?: AxiosRequestConfig) {
   return request.get<IdeaGenerationRunList>(
     '/idea-generation/runs',
@@ -475,25 +491,17 @@ export function getIdeaGenerationRun(ideaId: string, options?: AxiosRequestConfi
   )
 }
 
-export function runCoWriter(payload: CoWriterRequest, options?: AxiosRequestConfig) {
-  return request.post<CoWriterResponse>('/co-writer', payload, withDeepResearchConfig(options))
-}
-
-export function listCoWriterRuns(options?: AxiosRequestConfig) {
-  return request.get<CoWriterRunList>('/co-writer/runs', withDeepResearchConfig(options))
-}
-
-export function getCoWriterRun(operationId: string, options?: AxiosRequestConfig) {
-  return request.get<CoWriterRunDetail>(
-    `/co-writer/${encodeURIComponent(operationId)}`,
-    withDeepResearchConfig(options),
-  )
-}
-
-export function getDeepResearchProgressStreamUrl(researchId: string, userId?: string) {
+export function getDeepResearchProgressStreamUrl(researchId: string) {
   const base = DEEP_RESEARCH_BASE.replace(/\/$/, '')
-  const uid = encodeURIComponent(userId || DEFAULT_DEEP_RESEARCH_USER_ID)
-  return `${base}/deep-research/${encodeURIComponent(researchId)}/progress/stream?user_id=${uid}`
+  return `${base}/deep-research/${encodeURIComponent(researchId)}/progress/stream`
+}
+
+export function getDeepResearchExportUrl(
+  researchId: string,
+  format: 'markdown' | 'html' | 'pdf' = 'markdown',
+) {
+  const base = DEEP_RESEARCH_BASE.replace(/\/$/, '')
+  return `${base}/deep-research/${encodeURIComponent(researchId)}/export?format=${format}`
 }
 
 export function listDeepResearchRuns(options?: AxiosRequestConfig) {

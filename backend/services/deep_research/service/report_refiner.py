@@ -34,6 +34,7 @@ class ReportRefiner:
         notes: List[str],
         citation_table: List[str],
         report_style: Optional[str] = None,
+        context_text: Optional[str] = None,
     ) -> Optional[str]:
         """Generate a refined report with the LLM.
 
@@ -43,6 +44,7 @@ class ReportRefiner:
             notes (List[str]): Research notes.
             citation_table (List[str]): Reference table entries.
             report_style (Optional[str]): Style hint for the report.
+            context_text (Optional[str]): Optional conversation context.
 
         Returns:
             Optional[str]: Refined report markdown, or None on failure.
@@ -54,6 +56,7 @@ class ReportRefiner:
             notes=notes,
             citation_table=citation_table,
             report_style=report_style,
+            context_text=context_text,
         )
         output = await self._llm_client.generate(prompt)
         if not output:

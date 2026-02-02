@@ -46,12 +46,16 @@ class RetrievalPreviewRequest(BaseModel):
     focus_doc_ids: Optional[List[int]] = None
     boost_doc_ids: Optional[List[int]] = None
     index_mode: Optional[str] = None
+    provider: Optional[str] = None
 
 
 class RetrievalDebugResponse(BaseModel):
     kb_id: int
     query: str
     top_k: int
+    rag_provider: Optional[str] = None
+    provider_stats: Dict[str, Any] = Field(default_factory=dict)
+    graph: Dict[str, Any] = Field(default_factory=dict)
     variant_meta: Dict[str, Any] = Field(default_factory=dict)
     variants: List[RetrievalVariant] = Field(default_factory=list)
     index_plan: List[Dict[str, Optional[str]]] = Field(default_factory=list)
@@ -73,4 +77,94 @@ class RetrievalDebugResponse(BaseModel):
     prompt_sections: List[PromptSectionDebug] = Field(default_factory=list)
     prompt_total_chars: int = 0
     prompt_context_chars: int = 0
+
+
+class RetrievalCompareRequest(BaseModel):
+    kb_id: int
+    query: str = Field(..., min_length=1, max_length=400)
+    top_k: int = Field(5, ge=1, le=50)
+    provider_a: str = Field(..., description="Provider A name")
+    provider_b: str = Field(..., description="Provider B name")
+    session_id: Optional[str] = None
+    focus_doc_ids: Optional[List[int]] = None
+    index_mode: Optional[str] = None
+
+
+class RetrievalCompareSide(BaseModel):
+    provider: str
+    latency_ms: int
+    index_mode: Optional[str] = None
+    indices_used: List[str] = Field(default_factory=list)
+    chunks: List[RetrievalChunkPreview] = Field(default_factory=list)
+    provider_stats: Dict[str, Any] = Field(default_factory=dict)
+    graph: Dict[str, Any] = Field(default_factory=dict)
+    retrieval: Dict[str, Any] = Field(default_factory=dict)
+
+
+class RetrievalCompareResponse(BaseModel):
+    kb_id: int
+    query: str
+    top_k: int
+    provider_a: str
+    provider_b: str
+    overlap: Dict[str, Any] = Field(default_factory=dict)
+    panel: Dict[str, Any] = Field(default_factory=dict)
+    a: RetrievalCompareSide
+    b: RetrievalCompareSide
+
+
+class RetrievalDashboardRequest(BaseModel):
+    kb_id: int
+    query: str = Field(..., min_length=1, max_length=400)
+    top_k: int = Field(5, ge=1, le=50)
+    provider_a: str = Field(..., description="Provider A name")
+    provider_b: str = Field(..., description="Provider B name")
+    session_id: Optional[str] = None
+    focus_doc_ids: Optional[List[int]] = None
+    index_mode: Optional[str] = None
+
+
+class RetrievalDashboardResponse(BaseModel):
+    kb_id: int
+    query: str
+    top_k: int
+    provider_a: str
+    provider_b: str
+    panel: Dict[str, Any] = Field(default_factory=dict)
+
+
+class RetrievalEvalItem(BaseModel):
+    query: str = Field(..., min_length=1, max_length=400)
+    note: Optional[str] = None
+    focus_doc_ids: Optional[List[int]] = None
+    index_mode: Optional[str] = None
+
+
+class RetrievalEvalRunRequest(BaseModel):
+    kb_id: int
+    provider_a: str = Field(..., description="Provider A name")
+    provider_b: str = Field(..., description="Provider B name")
+    eval_set: Optional[str] = Field(None, description="Named eval set")
+    items: Optional[List[RetrievalEvalItem]] = None
+    top_k: int = Field(5, ge=1, le=50)
+    session_id: Optional[str] = None
+    index_mode: Optional[str] = None
+    limit: Optional[int] = Field(None, ge=1, le=200)
+
+
+class RetrievalEvalItemResult(BaseModel):
+    query: str
+    note: Optional[str] = None
+    overlap: Dict[str, Any] = Field(default_factory=dict)
+    panel: Dict[str, Any] = Field(default_factory=dict)
+
+
+class RetrievalEvalRunResponse(BaseModel):
+    run_id: str
+    eval_set: str
+    total_items: int
+    provider_a: str
+    provider_b: str
+    summary: Dict[str, Any] = Field(default_factory=dict)
+    items: List[RetrievalEvalItemResult] = Field(default_factory=list)
 

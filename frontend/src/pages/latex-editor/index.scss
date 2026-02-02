@@ -109,6 +109,56 @@
     }
   }
 
+  &__session {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  &__session-input {
+    width: 100%;
+  }
+
+  &__session-actions {
+    display: flex;
+    justify-content: flex-end;
+  }
+
+  &__web-search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  &__model {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    min-width: 0;
+  }
+
+  &__model-select {
+    flex: 1;
+    min-width: 0;
+  }
+
+  &__model-input {
+    flex: 1;
+    min-width: 0;
+  }
+
+  &__model-advanced {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+
+    :global {
+      .ant-input-number {
+        width: 100%;
+      }
+    }
+  }
+
   &__knowledge-manual {
     margin-top: 8px;
   }
@@ -328,10 +378,49 @@
     flex-shrink: 0; // 防止被压缩
   }
 
+  &__mode-switch .ant-segmented {
+    align-self: flex-start;
+  }
+
+  &__preset-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+  }
+
   &__quick-prompts {
     display: flex;
     flex-wrap: wrap;
     gap: 8px;
+  }
+
+  &__prompt-groups {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  &__prompt-group {
+    padding: 8px 0;
+    border-bottom: 1px dashed #e5e8ef;
+  }
+
+  &__prompt-group-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+
+  &__quick-prompt-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  &__quick-prompt-delete {
+    padding: 0;
   }
 
   &__chat-messages {

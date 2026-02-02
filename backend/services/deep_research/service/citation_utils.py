@@ -88,3 +88,53 @@ async def register_web_citations(
         citations.append(citation)
 
     return citations
+
+
+async def register_paper_citations(
+    papers: List[Dict[str, Any]],
+    citation_manager: AsyncCitationManagerWrapper,
+    source_id: str,
+    provider: str = "semantic_scholar",
+) -> List[ScholarCitation]:
+    """Normalize paper search results and register them as citations.
+
+    Args:
+        papers (List[Dict[str, Any]]): Paper metadata results.
+        citation_manager (AsyncCitationManagerWrapper): Citation registry wrapper.
+        source_id (str): Source id used to generate citation ids.
+        provider (str): Paper search provider name.
+
+    Returns:
+        List[ScholarCitation]: Registered citations with reference numbers.
+    """
+
+    citations: List[ScholarCitation] = []
+    seen_keys: set[str] = set()
+
+    for item in papers or []:
+        key = str(
+            item.get("semantic_scholar_id")
+            or item.get("doi")
+            or item.get("source_url")
+            or item.get("title")
+            or ""
+        )
+        if key and key in seen_keys:
+            continue
+        if key:
+            seen_keys.add(key)
+        citation_id = await citation_manager.generate_research_citation_id(source_id)
+        provider_name = str(item.get("provider") or provider)
+        citation = ScholarCitation(
+            citation_id=citation_id,
+            title=item.get("title"),
+            url=item.get("source_url") or item.get("doi"),
+            snippet=item.get("abstract"),
+            source_type="paper",
+            metadata={"provider": provider_name, **item},
+        )
+        ref_number = await citation_manager.add_citation(citation)
+        citation.ref_number = ref_number
+        citations.append(citation)
+
+    return citations

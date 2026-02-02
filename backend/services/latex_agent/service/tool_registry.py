@@ -5,9 +5,11 @@
 from .tools import ToolRegistry
 from .tools.analysis_tools import AnalyzeContextTool, AnalyzeDocumentTool  # , AnswerWithoutEditTool (已禁用)
 from .tools.retrieval_tools import SearchPapersTool, BatchSearchPapersTool
+from .tools.web_search_tool import WebSearchTool
 from .tools.editing_tools import InsertCitationTool, UpdateBibliographyTool, InsertTextTool, RewriteSelectionTool
 from .tools.validation_tools import CompileLaTeXTool, CheckCitationConsistencyTool, CheckBibliographyTool
 from .tools.response_tools import ReplyToUserTool
+from config import settings
 import logging
 
 logger = logging.getLogger(__name__)
@@ -30,6 +32,7 @@ def create_tool_registry() -> ToolRegistry:
     # 注册检索类工具
     registry.register(SearchPapersTool())
     registry.register(BatchSearchPapersTool())
+    registry.register(WebSearchTool())
     
     # 注册编辑类工具
     registry.register(InsertTextTool())  # 通用文本插入工具

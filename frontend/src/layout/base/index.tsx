@@ -1,7 +1,6 @@
 import iconNewchat from '@/assets/layout/newchat.svg'
 import iconRepository from '@/assets/layout/repository.svg'
 import iconDebug from '@/assets/layout/debug.svg'
-import iconEdit from '@/assets/layout/edit.svg'
 import iconResearch from '@/assets/layout/debug.svg'
 import logo from '@/assets/logo.svg'
 import { deviceState } from '@/store/device'
@@ -64,7 +63,7 @@ export function BaseLayout({ children }: { children?: React.ReactNode }) {
                 className="base-layout__nav-header-icon"
                 src={iconEdit}
               />
-              <span className="base-layout__nav-header-title">LaTeX 编辑器</span>
+              <span className="base-layout__nav-header-title">Doc Studio</span>
             </div>
 
           <div
@@ -87,17 +86,6 @@ export function BaseLayout({ children }: { children?: React.ReactNode }) {
                 src={iconResearch}
               />
               <span className="base-layout__nav-header-title">研究想法生成</span>
-            </div>
-
-          <div
-            className={`base-layout__nav-header ${isActive('/co-writer') ? 'is-active' : ''}`}
-            onClick={() => (device.chatting ? null : navigate('/co-writer'))}
-          >
-              <img
-                className="base-layout__nav-header-icon"
-                src={iconEdit}
-              />
-              <span className="base-layout__nav-header-title">交互式想法生成</span>
             </div>
 
           <div

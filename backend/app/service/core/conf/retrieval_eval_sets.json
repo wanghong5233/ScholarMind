@@ -1,0 +1,42 @@
+{
+  "academic_basic": {
+    "description": "Basic academic retrieval evaluation set.",
+    "items": [
+      {
+        "query": "What is the main contribution of transformer models in NLP?"
+      },
+      {
+        "query": "Compare method A and method B in terms of efficiency and accuracy."
+      },
+      {
+        "query": "Summarize the key assumptions behind self-supervised learning."
+      },
+      {
+        "query": "What are the limitations of graph neural networks for scalability?"
+      },
+      {
+        "query": "How does retrieval-augmented generation reduce hallucinations?"
+      }
+    ]
+  },
+  "paper_review": {
+    "description": "Paper review oriented queries.",
+    "items": [
+      {
+        "query": "What is the problem statement and motivation?"
+      },
+      {
+        "query": "Describe the methodology and core components."
+      },
+      {
+        "query": "What datasets and evaluation metrics are used?"
+      },
+      {
+        "query": "What are the key results and findings?"
+      },
+      {
+        "query": "What are the limitations and future work directions?"
+      }
+    ]
+  }
+}

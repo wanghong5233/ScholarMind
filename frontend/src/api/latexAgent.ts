@@ -3,16 +3,13 @@ import { request } from './request'
 
 const LATEX_AGENT_BASE =
   (import.meta.env.VITE_LATEX_AGENT_BASE as string | undefined) ||
-  (import.meta.env.DEV ? 'http://127.0.0.1:8003/api' : '/api/latex-agent')
-const DEFAULT_LATEX_USER_ID =
-  (import.meta.env.VITE_LATEX_DEFAULT_USER_ID as string | undefined) || '1'
+  (import.meta.env.DEV ? 'http://127.0.0.1:8000/api/latex-agent' : '/api/latex-agent')
 
 function withLatexConfig(config?: AxiosRequestConfig): AxiosRequestConfig {
   return {
     baseURL: LATEX_AGENT_BASE,
     ...config,
     headers: {
-      'X-User-Id': DEFAULT_LATEX_USER_ID,
       ...(config?.headers ?? {}),
     },
   }
@@ -24,6 +21,10 @@ function encodeFilePath(path: string) {
     .filter(Boolean)
     .map((segment) => encodeURIComponent(segment))
     .join('/')
+}
+
+export function getAgentAsyncEventsUrl(workspaceId: string, runId: string) {
+  return `${LATEX_AGENT_BASE}/workspaces/${workspaceId}/edit/async/${runId}/events`
 }
 
 type WorkspaceSummaryDTO = {
@@ -195,6 +196,34 @@ export async function updateWorkspace(
   } as LatexAgentAPI.WorkspaceDetail
 }
 
+export async function bindWorkspaceSession(
+  params: { workspaceId: string; sessionId?: string | null },
+  options?: AxiosRequestConfig,
+) {
+  const { data: dto } = await request.put<{
+    workspace_id: string
+    name: string
+    main_file?: string
+    file_count: number
+    updated_at: number
+    config: Record<string, any>
+  }>(
+    `/workspaces/${params.workspaceId}/session`,
+    {
+      session_id: params.sessionId || null,
+    },
+    withLatexConfig(options),
+  )
+  return {
+    workspaceId: dto.workspace_id,
+    name: dto.name,
+    mainFile: dto.main_file,
+    fileCount: dto.file_count,
+    updatedAt: dto.updated_at,
+    config: dto.config,
+  } as LatexAgentAPI.WorkspaceDetail
+}
+
 export async function deleteWorkspace(
   params: { workspaceId: string },
   options?: AxiosRequestConfig,
@@ -288,6 +317,121 @@ export async function runAgentTask(
       knowledge_base_name: knowledgeBaseName,
     },
     withLatexConfig(requestOptions),
+  )
+  return data
+}
+
+export async function runAgentTaskAsync(
+  params: {
+    workspaceId: string
+    userIntent: string
+    context?: Record<string, any>
+    options?: Record<string, any>
+    collectTrainingData?: boolean
+    knowledgeBaseId?: number
+    knowledgeBaseName?: string
+  },
+  requestOptions?: AxiosRequestConfig,
+) {
+  const {
+    workspaceId,
+    userIntent,
+    context,
+    collectTrainingData,
+    knowledgeBaseId,
+    knowledgeBaseName,
+    options: extraOptions,
+  } = params
+  const { data } = await request.post<{
+    run_id?: string
+    runId?: string
+    status?: string
+  }>(
+    `/workspaces/${workspaceId}/edit/async`,
+    {
+      user_intent: userIntent,
+      target_location: context,
+      options: extraOptions,
+      collect_training_data: collectTrainingData ?? false,
+      knowledge_base_id: knowledgeBaseId,
+      knowledge_base_name: knowledgeBaseName,
+    },
+    withLatexConfig(requestOptions),
+  )
+  return {
+    runId: data.runId || data.run_id || '',
+    status: data.status,
+  }
+}
+
+export async function fetchAgentRunStatus(
+  params: { workspaceId: string; runId: string },
+  requestOptions?: AxiosRequestConfig,
+) {
+  const { data } = await request.get<{
+    run_id: string
+    status: string
+    result?: LatexAgentAPI.AgentResponse
+    error?: string
+    updated_at?: number
+  }>(`/workspaces/${params.workspaceId}/edit/async/${params.runId}`, withLatexConfig(requestOptions))
+  return data
+}
+
+export async function listOperations(
+  params: { workspaceId: string },
+  requestOptions?: AxiosRequestConfig,
+) {
+  const { data } = await request.get<LatexAgentAPI.OperationSummary[]>(
+    `/workspaces/${params.workspaceId}/operations`,
+    withLatexConfig(requestOptions),
+  )
+  return data
+}
+
+export async function revertOperation(
+  params: { workspaceId: string; operationId: string; files?: string[] },
+  requestOptions?: AxiosRequestConfig,
+) {
+  const { data } = await request.post<LatexAgentAPI.RevertOperationResponse>(
+    `/workspaces/${params.workspaceId}/operations/${params.operationId}/revert`,
+    {
+      files: params.files,
+    },
+    withLatexConfig(requestOptions),
+  )
+  return data
+}
+
+export async function fetchMetricsSummary(options?: AxiosRequestConfig) {
+  const { data } = await request.get<LatexAgentAPI.MetricsSummary>(
+    '/metrics/summary',
+    withLatexConfig(options),
+  )
+  return data
+}
+
+export async function fetchLlmHealth(options?: AxiosRequestConfig) {
+  const { data } = await request.get<LatexAgentAPI.LlmHealthSummary>(
+    '/llm/health',
+    withLatexConfig(options),
+  )
+  return data
+}
+
+export async function fetchOperationSnapshotFile(
+  params: { workspaceId: string; operationId: string; filePath: string; version?: 'before' | 'after' },
+  options?: AxiosRequestConfig,
+) {
+  const { data } = await request.get<LatexAgentAPI.FileContentResponse>(
+    `/workspaces/${params.workspaceId}/operations/${params.operationId}/snapshot`,
+    withLatexConfig({
+      ...options,
+      params: {
+        file_path: params.filePath,
+        version: params.version || 'before',
+      },
+    }),
   )
   return data
 }

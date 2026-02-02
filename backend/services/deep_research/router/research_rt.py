@@ -11,17 +11,10 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from config import settings
-from schemas.co_writer import (
-    CoWriterRequest,
-    CoWriterResponse,
-    CoWriterRunDetail,
-    CoWriterRunList,
-    CoWriterRunMeta,
-    CoWriterStatus,
-)
 from schemas.common import (
     BlockEvidence,
     DeepResearchRequest,
+    DeepResearchPlan,
     DeepResearchResponse,
     DeepResearchArchive,
     DeepResearchCompareRequest,
@@ -44,7 +37,8 @@ from schemas.idea_generation import (
     IdeaGenerationRunMeta,
     IdeaGenerationStatus,
 )
-from service.co_writer_pipeline import CoWriterPipeline
+from schemas.notebook import NotebookNoteRequest, NotebookNoteResponse
+from agents.planner_agent import PlannerAgent
 from service.archive_exporter import (
     build_block_evidence_zip,
     build_run_archive_zip,
@@ -52,7 +46,9 @@ from service.archive_exporter import (
 )
 from service.compare_exporter import render_compare_markdown
 from service.idea_generation_pipeline import IdeaGenerationPipeline
+from service.notebook_pipeline import NotebookPipeline
 from service.pipeline import ResearchPipeline
+from service.rag_client import RAGClient
 from service.report_exporter import render_html, render_pdf
 from service.run_manager import RunManager
 from service.state_store import StateStore
@@ -94,6 +90,53 @@ async def get_user_id_for_stream(
         return int(query_user_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Invalid user_id format") from exc
+
+
+@router.post(
+    "/deep-research/plan",
+    response_model=DeepResearchPlan,
+    summary="Preview DeepResearch plan",
+)
+async def preview_deep_research_plan(
+    payload: DeepResearchRequest,
+    user_id: int = Depends(get_user_id),
+) -> DeepResearchPlan:
+    """Generate a preview plan for a DeepResearch run."""
+
+    planner = PlannerAgent(
+        depth=payload.depth,
+        breadth=payload.breadth,
+        language=payload.language,
+    )
+    if not payload.session_id:
+        items = planner.plan(payload.topic)
+    else:
+        try:
+            async with RAGClient(
+                settings.RAG_SERVICE_URL,
+                timeout=settings.REQUEST_TIMEOUT,
+            ) as rag_client:
+                items = await planner.plan_with_rag(
+                    topic=payload.topic,
+                    rag_client=rag_client,
+                    session_id=payload.session_id,
+                    user_id=user_id,
+                    top_k=payload.top_k,
+                    index_mode=payload.index_mode,
+                )
+        except Exception:
+            items = planner.plan(payload.topic)
+    return DeepResearchPlan(
+        items=[
+            {
+                "title": item.title,
+                "question": item.question,
+                "depth": item.depth,
+                "parent_title": item.parent_title,
+            }
+            for item in items
+        ]
+    )
 
 
 @router.post("/deep-research", response_model=DeepResearchResponse, summary="Run DeepResearch")
@@ -438,6 +481,20 @@ async def run_idea_generation(
     return await pipeline.run(payload, user_id=user_id)
 
 
+@router.post("/notebook", response_model=NotebookNoteResponse, summary="Generate notebook note")
+async def generate_notebook_note(
+    payload: NotebookNoteRequest,
+    user_id: int = Depends(get_user_id),
+) -> NotebookNoteResponse:
+    """Generate a structured notebook note from a selected excerpt."""
+
+    pipeline = NotebookPipeline(
+        rag_service_url=settings.RAG_SERVICE_URL,
+        request_timeout=settings.REQUEST_TIMEOUT,
+    )
+    return await pipeline.run(payload, user_id=user_id)
+
+
 @router.get(
     "/idea-generation/runs",
     response_model=IdeaGenerationRunList,
@@ -481,67 +538,6 @@ async def get_idea_generation_run(
     return IdeaGenerationRunDetail(
         meta=IdeaGenerationRunMeta(**meta),
         payload=IdeaGenerationResponse(**payload),
-    )
-
-
-@router.post("/co-writer", response_model=CoWriterResponse, summary="Co-writer edit")
-async def run_co_writer(
-    payload: CoWriterRequest,
-    user_id: int = Depends(get_user_id),
-) -> CoWriterResponse:
-    """Rewrite or expand text with optional RAG grounding."""
-
-    pipeline = CoWriterPipeline(
-        rag_service_url=settings.RAG_SERVICE_URL,
-        data_root=settings.DATA_ROOT,
-        request_timeout=settings.REQUEST_TIMEOUT,
-    )
-    return await pipeline.run(payload, user_id=user_id)
-
-
-@router.get(
-    "/co-writer/runs",
-    response_model=CoWriterRunList,
-    summary="List co-writer runs",
-)
-async def list_co_writer_runs(
-    user_id: int = Depends(get_user_id),
-) -> CoWriterRunList:
-    """List stored co-writer runs."""
-
-    items = StateStore.list_runs_by_meta(Path(settings.DATA_ROOT), "co_writer_meta.json")
-    if user_id:
-        items = [item for item in items if str(item.get("user_id")) == str(user_id)]
-    runs = [CoWriterRunMeta(**item) for item in items]
-    return CoWriterRunList(items=runs)
-
-
-@router.get(
-    "/co-writer/{operation_id}",
-    response_model=CoWriterRunDetail,
-    summary="Fetch co-writer run detail",
-)
-async def get_co_writer_run(
-    operation_id: str,
-    user_id: int = Depends(get_user_id),
-) -> CoWriterRunDetail:
-    """Fetch stored co-writer detail payload."""
-
-    store = StateStore(Path(settings.DATA_ROOT), operation_id)
-    meta = store.load_json("co_writer_meta.json")
-    if not meta:
-        raise HTTPException(status_code=404, detail="Co-writer meta not found")
-    if user_id and str(meta.get("user_id")) != str(user_id):
-        raise HTTPException(status_code=403, detail="Forbidden")
-    payload = store.load_json("co_writer.json") or {
-        "operation_id": operation_id,
-        "result_markdown": "",
-        "citations": [],
-        "trace": {},
-    }
-    return CoWriterRunDetail(
-        meta=CoWriterRunMeta(**meta),
-        payload=CoWriterResponse(**payload),
     )
 
 

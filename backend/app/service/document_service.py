@@ -6,6 +6,7 @@ from models.knowledgebase import KnowledgeBase
 from schemas.document import DocumentUpdate, DocumentCreate
 from exceptions.base import ResourceNotFoundException, PermissionDeniedException, APIException
 from service.core.rag.utils.es_conn import ESConnection
+from service.core.rag.graph.store import KnowledgeGraphStore
 from core.config import settings
 import os
 from utils.get_logger import logger
@@ -163,6 +164,21 @@ def delete_document(db: Session, doc_id: int, user_id: int, kb_id: int) -> Docum
         raise
 
     # 4) 返回被删除的文档对象
+    try:
+        graph_store = KnowledgeGraphStore(db)
+        graph_store.cleanup_document(kb_id=kb_id, document_id=doc_to_delete.id)
+        logger.info(
+            "Graph cleanup completed for doc_id=%s kb_id=%s",
+            doc_to_delete.id,
+            kb_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Graph cleanup failed for doc_id=%s kb_id=%s: %s",
+            doc_to_delete.id,
+            kb_id,
+            exc,
+        )
     db.delete(doc_to_delete)
     db.commit()
     

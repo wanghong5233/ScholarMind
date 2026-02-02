@@ -6,6 +6,7 @@ import classNames from 'classnames'
 import { useMemo } from 'react'
 import { createChatIdText } from '../shared'
 import styles from './chat-message.module.scss'
+import DeepResearchCard from './deep-research-card'
 import { Result } from './result'
 import ChooseFile from './select-file'
 
@@ -70,8 +71,32 @@ function AssistantMessage(props: {
   onSend?: (text: string) => void
   onOpenCiations?: () => void
   onRefrence?: (index: number) => void
+  onDeepResearchConfirm?: (item: API.ChatItem) => void
+  onDeepResearchCancel?: (item: API.ChatItem) => void
+  onDeepResearchEdit?: (item: API.ChatItem) => void
+  onDeepResearchRetryPlan?: (item: API.ChatItem) => void
+  onDeepResearchOpenWorkspace?: (item: API.ChatItem) => void
+  onDeepResearchExport?: (item: API.ChatItem, format: 'pdf' | 'markdown') => void
+  onDeepResearchCopy?: (item: API.ChatItem) => void
+  onDeepResearchSaveToNotebook?: (item: API.ChatItem) => void
+  onDeepResearchInsertSummary?: (item: API.ChatItem, summary: string) => void
 }) {
-  const { item, isEnd, onSend, onOpenCiations, onRefrence } = props
+  const {
+    item,
+    isEnd,
+    onSend,
+    onOpenCiations,
+    onRefrence,
+    onDeepResearchConfirm,
+    onDeepResearchCancel,
+    onDeepResearchEdit,
+    onDeepResearchRetryPlan,
+    onDeepResearchOpenWorkspace,
+    onDeepResearchExport,
+    onDeepResearchCopy,
+    onDeepResearchSaveToNotebook,
+    onDeepResearchInsertSummary,
+  } = props
 
   const id = useMemo(() => {
     if (item.type === ChatType.Document) {
@@ -108,16 +133,34 @@ function AssistantMessage(props: {
                   />
                 )
               }
+              return null
+            case ChatType.DeepResearch:
+              return (
+                <DeepResearchCard
+                  item={item}
+                  onConfirm={onDeepResearchConfirm}
+                  onCancel={onDeepResearchCancel}
+                  onEdit={onDeepResearchEdit}
+                  onRetryPlan={onDeepResearchRetryPlan}
+                  onOpenWorkspace={onDeepResearchOpenWorkspace}
+                  onExportReport={onDeepResearchExport}
+                  onCopyReport={onDeepResearchCopy}
+                  onSaveToNotebook={onDeepResearchSaveToNotebook}
+                  onInsertSummary={onDeepResearchInsertSummary}
+                />
+              )
           }
         })()}
 
-        <Result
-          item={item}
-          isEnd={isEnd}
-          onSend={onSend}
-          onRefrence={onRefrence}
-          onOpenCitations={onOpenCiations}
-        />
+        {item.type === ChatType.DeepResearch ? null : (
+          <Result
+            item={item}
+            isEnd={isEnd}
+            onSend={onSend}
+            onRefrence={onRefrence}
+            onOpenCitations={onOpenCiations}
+          />
+        )}
       </div>
 
     </div>
@@ -131,6 +174,15 @@ export default function ChatMessage(props: {
   onRefrence?: (target: API.Reference) => void
   onRetryUserMessage?: (item: API.ChatItem, index: number) => void
   onResendUserMessage?: (item: API.ChatItem, index: number) => void
+  onDeepResearchConfirm?: (item: API.ChatItem) => void
+  onDeepResearchCancel?: (item: API.ChatItem) => void
+  onDeepResearchEdit?: (item: API.ChatItem) => void
+  onDeepResearchRetryPlan?: (item: API.ChatItem) => void
+  onDeepResearchOpenWorkspace?: (item: API.ChatItem) => void
+  onDeepResearchExport?: (item: API.ChatItem, format: 'pdf' | 'markdown') => void
+  onDeepResearchCopy?: (item: API.ChatItem) => void
+  onDeepResearchSaveToNotebook?: (item: API.ChatItem) => void
+  onDeepResearchInsertSummary?: (item: API.ChatItem, summary: string) => void
 }) {
   const {
     list,
@@ -139,6 +191,15 @@ export default function ChatMessage(props: {
     onRefrence,
     onRetryUserMessage,
     onResendUserMessage,
+    onDeepResearchConfirm,
+    onDeepResearchCancel,
+    onDeepResearchEdit,
+    onDeepResearchRetryPlan,
+    onDeepResearchOpenWorkspace,
+    onDeepResearchExport,
+    onDeepResearchCopy,
+    onDeepResearchSaveToNotebook,
+    onDeepResearchInsertSummary,
   } = props
 
   return (
@@ -167,6 +228,15 @@ export default function ChatMessage(props: {
               const target = item.reference?.[index]
               if (target) onRefrence?.(target)
             }}
+            onDeepResearchConfirm={onDeepResearchConfirm}
+            onDeepResearchCancel={onDeepResearchCancel}
+            onDeepResearchEdit={onDeepResearchEdit}
+            onDeepResearchRetryPlan={onDeepResearchRetryPlan}
+            onDeepResearchOpenWorkspace={onDeepResearchOpenWorkspace}
+            onDeepResearchExport={onDeepResearchExport}
+            onDeepResearchCopy={onDeepResearchCopy}
+            onDeepResearchSaveToNotebook={onDeepResearchSaveToNotebook}
+            onDeepResearchInsertSummary={onDeepResearchInsertSummary}
           />
         )
       })}

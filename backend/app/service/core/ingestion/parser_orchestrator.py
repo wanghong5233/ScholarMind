@@ -46,10 +46,14 @@ class ParserOrchestrator:
             except Exception as e:
                 last_err = e
                 log.error(f"[PARSER_FAIL] {parser.__class__.__name__} err={e}")
-                # MinerU 失败直接抛出异常，不允许降级
+                # MinerU 失败：按配置决定是否允许降级
                 if "MinerU" in parser.__class__.__name__:
-                    log.error(f"[CRITICAL] MinerU 解析失败，拒绝降级！请检查 MinerU 服务配置。")
-                    raise RuntimeError(f"MinerU 解析失败: {e}. 请确保 SM_MINERU_ENDPOINT 正确配置且服务可用。")
+                    if getattr(settings, "SM_MINERU_STRICT_FAIL", False):
+                        log.error(f"[CRITICAL] MinerU 解析失败，拒绝降级！请检查 MinerU 服务配置。")
+                        raise RuntimeError(
+                            f"MinerU 解析失败: {e}. 请确保 SM_MINERU_ENDPOINT 正确配置且服务可用。"
+                        )
+                    log.warning("[PARSER_FALLBACK] MinerU 解析失败，已降级到后续解析器")
                 continue
         if last_err:
             log.error(f"[PARSER_ALL_FAILED] last_err={last_err}")

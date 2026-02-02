@@ -1,5 +1,5 @@
 from __future__ import annotations
-from typing import List, Dict, Any, Generator, Optional, Tuple
+from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
 import json
 import re
@@ -13,7 +13,6 @@ from elasticsearch import NotFoundError
 
 from core.config import settings
 from service.core.rag.retrieval.vector_store import ESVectoreStore, RetrieveQuery, RetrievedChunk
-from service.core.rag.prompt.builder import PromptBuilder
 from service.core.rag.llm.client import LLMClient
 
 
@@ -24,19 +23,12 @@ class RAGResult:
 
 
 class RAGService:
+    """Retrieval-only RAG engine for chunk search."""
     def __init__(self) -> None:
         self.store = ESVectoreStore(default_index=settings.ES_DEFAULT_INDEX)
-        self.prompt = PromptBuilder(
-            language=settings.SM_DEFAULT_LANGUAGE,
-            enable_citations=settings.SM_ENABLE_CITATIONS,
-            max_context_chars=400000,  # 支持现代大模型的长上下文窗口（约100k tokens）
-        )
         self.llm = LLMClient()
         self.logger = logging.getLogger("rag.service")
-        self._last_usage: Dict[str, Any] | None = None
         self._last_retrieval_debug: Dict[str, Any] | None = None
-        self._last_history_debug: Dict[str, Any] | None = None
-        self._last_history_summary: str | None = None
         self._last_variant_meta: Dict[str, Any] | None = None
 
     # ------------------------------------------------------------------ #
@@ -95,8 +87,11 @@ class RAGService:
         use_vector: bool = True,
         index_override: Optional[str] = None,
         boost_doc_ids: Optional[List[int]] = None,
+        boost_chunk_ids: Optional[List[str]] = None,
         session_index: Optional[str] = None,
         index_mode: str = "auto",
+        provider: Optional[str] = None,
+        extra_variants: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         # 统一使用多阶段检索流程
         return self._retrieve_multi_stage(
@@ -105,8 +100,11 @@ class RAGService:
             top_k=top_k,
             focus_doc_ids=focus_doc_ids,
             boost_doc_ids=boost_doc_ids,
+            boost_chunk_ids=boost_chunk_ids,
             session_index=session_index or index_override,
             index_mode=index_mode,
+            provider=provider,
+            extra_variants=extra_variants,
         )
 
     def _retrieve_multi_stage(
@@ -117,10 +115,13 @@ class RAGService:
         top_k: int,
         focus_doc_ids: Optional[List[int]],
         boost_doc_ids: Optional[List[int]],
+        boost_chunk_ids: Optional[List[str]],
         session_index: Optional[str],
         index_mode: str,
+        provider: Optional[str],
+        extra_variants: Optional[List[Dict[str, Any]]],
     ) -> List[Dict[str, Any]]:
-        variants = self._generate_query_variants(query)
+        variants = self._generate_query_variants(query, extra_variants=extra_variants)
         if not variants:
             try:
                 self.logger.warning("RAG.retrieve[multi_stage] no query variants generated")
@@ -316,7 +317,12 @@ class RAGService:
 
         # 阶段2（精排）：在 MMR 输出的候选上进行元数据处理，准备给精排
         # 注意：精排会在外部（session_rt.py/debug_rt.py）进行，这里只准备候选
-        metadata_stage_chunks = self._apply_metadata_stage(mmr_selected, fused_scores)
+        metadata_stage_chunks = self._apply_metadata_stage(
+            mmr_selected,
+            fused_scores,
+            boost_chunk_ids=boost_chunk_ids,
+            provider=provider,
+        )
         
         # 追加上下文块（保持原序，降低权重）
         for ctx in context_only:
@@ -339,6 +345,24 @@ class RAGService:
         # 这里不取 top_k，而是返回所有候选（rerank_top_k 个）给精排
         final_payloads = metadata_stage_chunks  # 返回所有候选供精排
         final_preview = [self._serialize_payload_preview(payload) for payload in final_payloads]
+        graph_boosted_preview: List[str] = []
+        graph_boosted_count = 0
+        if boost_chunk_ids:
+            boost_set = {str(cid) for cid in boost_chunk_ids}
+            for payload in metadata_stage_chunks:
+                if payload.get("chunk_id") in boost_set:
+                    graph_boosted_count += 1
+                    if len(graph_boosted_preview) < 10:
+                        graph_boosted_preview.append(payload.get("chunk_id"))
+
+        multimodal_boosted_preview: List[str] = []
+        multimodal_boosted_count = 0
+        for payload in metadata_stage_chunks:
+            md = payload.get("metadata") or {}
+            if md.get("multimodal_boost"):
+                multimodal_boosted_count += 1
+                if len(multimodal_boosted_preview) < 10:
+                    multimodal_boosted_preview.append(payload.get("chunk_id"))
 
         try:
             metadata_preview = [item.get("chunk_id") for item in metadata_stage_chunks[: min(10, len(metadata_stage_chunks))]]
@@ -405,6 +429,10 @@ class RAGService:
                 "indices_used": sorted(indices_used),
                 "index_stats": dict(index_stats),
                 "memory": memory_debug,
+                "graph_boosted_count": graph_boosted_count,
+                "graph_boosted_preview": graph_boosted_preview,
+                "multimodal_boosted_count": multimodal_boosted_count,
+                "multimodal_boosted_preview": multimodal_boosted_preview,
                 "query_meta": meta,
             }
         except Exception:
@@ -413,7 +441,12 @@ class RAGService:
         return final_payloads
 
     # --- query generation helpers -------------------------------------------------
-    def _generate_query_variants(self, query: str) -> List[Dict[str, Any]]:
+    def _generate_query_variants(
+        self,
+        query: str,
+        *,
+        extra_variants: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
         original_query = (query or "").strip()
         if not original_query:
             return []
@@ -466,6 +499,23 @@ class RAGService:
             if hyde_text:
                 variants.append({"text": hyde_text, "tag": "hyde", "synthetic": True, "language": target_language})
 
+        extra_payloads: List[Dict[str, Any]] = []
+        for item in extra_variants or []:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("text") or "").strip()
+            if not text:
+                continue
+            extra_payloads.append(
+                {
+                    "text": text,
+                    "tag": item.get("tag") or "extra",
+                    "synthetic": bool(item.get("synthetic", True)),
+                    "language": item.get("language") or target_language,
+                }
+            )
+        variants.extend(extra_payloads)
+
         dedup: List[Dict[str, Any]] = []
         seen: set[str] = set()
         for item in variants:
@@ -475,13 +525,15 @@ class RAGService:
             seen.add(key)
             dedup.append(item)
 
-        if len(dedup) > mq_cap:
-            dedup = dedup[:mq_cap]
+        cap = max(mq_cap, 1 + len(extra_payloads))
+        if len(dedup) > cap:
+            dedup = dedup[:cap]
         self._last_variant_meta = {
             "original_query": original_query,
             "effective_query": effective_query,
             "translation_used": translation_used,
             "target_language": target_language,
+            "extra_variants": len(extra_payloads),
         }
         return dedup
 
@@ -790,6 +842,9 @@ class RAGService:
         self,
         chunks: List[RetrievedChunk],
         fused_scores: Dict[str, float],
+        *,
+        boost_chunk_ids: Optional[List[str]] = None,
+        provider: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         if not chunks:
             return []
@@ -802,6 +857,18 @@ class RAGService:
         priority_order = [seg.strip().casefold() for seg in priority_raw.split(":") if seg.strip()]
         priority_map = {name: (len(priority_order) - idx) / max(len(priority_order), 1) for idx, name in enumerate(priority_order)}
 
+        boost_set = {str(cid) for cid in boost_chunk_ids or [] if cid}
+        provider_norm = (provider or "").strip().lower()
+        enable_multimodal_boost = provider_norm in {"multimodal_graph"}
+        table_boost = float(getattr(settings, "SM_MULTIMODAL_TABLE_BOOST", 0.25) or 0.25)
+        equation_boost = float(getattr(settings, "SM_MULTIMODAL_EQUATION_BOOST", 0.3) or 0.3)
+        figure_boost = float(getattr(settings, "SM_MULTIMODAL_FIGURE_BOOST", 0.2) or 0.2)
+        logical_raw = getattr(settings, "SM_MULTIMODAL_LOGICAL_PRIORITY", "") or ""
+        logical_order = [seg.strip().casefold() for seg in logical_raw.split(":") if seg.strip()]
+        logical_map = {name: (len(logical_order) - idx) / max(len(logical_order), 1) for idx, name in enumerate(logical_order)}
+        logical_boost = float(getattr(settings, "SM_MULTIMODAL_LOGICAL_BOOST", 0.2) or 0.2)
+        reference_boost = float(getattr(settings, "SM_MULTIMODAL_REFERENCE_BOOST", 0.15) or 0.15)
+        graph_boost_weight = float(getattr(settings, "SM_GRAPH_CHUNK_BOOST_WEIGHT", 0.35) or 0.35)
         enriched: List[tuple[float, RetrievedChunk]] = []
         for chunk in chunks:
             md = chunk.metadata or {}
@@ -823,6 +890,32 @@ class RAGService:
             section = (md.get("section") or md.get("section_type") or "").casefold()
             if section_bonus and section in priority_map:
                 score += section_bonus * priority_map.get(section, 0.0)
+
+            if boost_set and str(chunk.chunk_id) in boost_set:
+                score += graph_boost_weight
+                md["graph_boost"] = True
+
+            if enable_multimodal_boost:
+                element_type = str(md.get("element_type") or "").lower()
+                logical_type = str(md.get("logical_type") or "").casefold()
+                section_type = str(md.get("section") or md.get("section_type") or "").casefold()
+                if element_type == "table_json":
+                    score += table_boost
+                    md["multimodal_boost"] = True
+                elif element_type == "equation_latex":
+                    score += equation_boost
+                    md["multimodal_boost"] = True
+                elif element_type == "figure_summary":
+                    score += figure_boost
+                    md["multimodal_boost"] = True
+                if logical_map:
+                    logical_key = logical_type or section_type
+                    if logical_key in logical_map:
+                        score += logical_boost * logical_map.get(logical_key, 0.0)
+                        md["multimodal_logical_boost"] = True
+                if section_type in {"references", "reference", "bibliography"} or logical_type in {"references", "reference", "bibliography"}:
+                    score += reference_boost
+                    md["multimodal_reference_boost"] = True
 
             md["fused_score"] = fused_scores.get(chunk.chunk_id, float(chunk.score or 0.0))
             md["retrieval_score"] = score
@@ -874,242 +967,6 @@ class RAGService:
 
     def get_last_retrieval_debug(self) -> Dict[str, Any] | None:
         return self._last_retrieval_debug
-
-    def generate(self, *, question: str, chunks: List[Dict[str, Any]], temperature: float = None, max_tokens: int = None, stream: bool = True, history: Optional[List[Dict[str, str]]] = None, compress_history: bool = False, rolling_summary: Optional[str] = None, style: Optional[str] = None, extra_system: Optional[str] = None):
-        t0 = time.time()
-        # 关闭开关时，不使用滚动摘要
-        try:
-            if not getattr(settings, "ENABLE_ROLLING_SUMMARY", True):
-                rolling_summary = None
-        except Exception:
-            pass
-        # build optional conversation history summary
-        history_summary = None
-        try:
-            hs = history if isinstance(history, list) else None
-            need_compact = bool(compress_history)
-            if hs and not need_compact:
-                # 预算=模型窗口-预留；若未配置模型窗口，退回 SM_HISTORY_MAX_TOKENS
-                model_window = self._model_context_window()
-                headroom = int(getattr(settings, "SM_HISTORY_HEADROOM", 4096) or 4096)
-                budget_tokens = max((model_window - headroom), int(getattr(settings, "SM_HISTORY_MAX_TOKENS", 2048) or 2048)) if model_window else int(getattr(settings, "SM_HISTORY_MAX_TOKENS", 2048) or 2048)
-                joined = "\n".join([f"{m.get('role','user')}: {str(m.get('content',''))}" for m in hs if isinstance(m, dict)])
-                # 超大历史先做长度预截（1MB），再估算 tokens，避免极端开销
-                if len(joined) > 1_000_000:
-                    joined = joined[-1_000_000:]
-                if rolling_summary:
-                    joined = (rolling_summary or "") + "\n" + joined
-                est_tokens = self._estimate_tokens(joined)
-                if est_tokens > budget_tokens:
-                    need_compact = True
-            if hs and need_compact:
-                # 将已有滚动摘要与完整历史共同压缩为新的摘要
-                if rolling_summary:
-                    ext = {"role": "system", "content": f"[rolling_summary]\n{rolling_summary}"}
-                    history_summary = self._summarize_history([ext] + hs)
-                else:
-                    history_summary = self._summarize_history(hs)
-                self._last_history_summary = history_summary
-                self._last_history_debug = {"mode": "summarized", "orig_turns": len(hs), "summary_chars": len(history_summary or ""), "estTokens": est_tokens, "budgetTokens": budget_tokens}
-            elif hs:
-                # 仅拼接最近若干条，提供轻量上下文
-                recent_k = int(getattr(settings, "HISTORY_RECENT_TURNS", 4) or 4)
-                tail = hs[-recent_k:]
-                recent_text = "\n".join([f"{m.get('role','user')}: {str(m.get('content',''))}" for m in tail if isinstance(m, dict)])
-                # 若存在滚动摘要，则与最近原文合并注入，以实现“摘要+近期原文”的主流策略
-                history_summary = ((rolling_summary + "\n") if rolling_summary else "") + recent_text
-                est_tokens = self._estimate_tokens(history_summary)
-                budget_tokens = int(getattr(settings, "SM_HISTORY_MAX_TOKENS", 2048) or 2048)
-                self._last_history_debug = {"mode": "recent_tail", "orig_turns": len(hs), "used_turns": len(tail), "summary_chars": len(history_summary or ""), "estTokens": est_tokens, "budgetTokens": budget_tokens}
-            else:
-                self._last_history_debug = {"mode": "none"}
-        except Exception:
-            history_summary = None
-            self._last_history_debug = None
-            self._last_history_summary = None
-
-        # --- 分配 Prompt 片段预算并裁剪 context ---
-        # 为 history/context 分配比例预算，避免历史占满
-        try:
-            model_window = self._model_context_window() or (int(getattr(settings, "SM_HISTORY_MAX_TOKENS", 2048) or 2048) + int(getattr(settings, "SM_HISTORY_HEADROOM", 4096) or 4096))
-            headroom = int(getattr(settings, "SM_HISTORY_HEADROOM", 4096) or 4096)
-            total_ctx_budget = max(model_window - headroom, 2048)
-            history_budget = int(total_ctx_budget * 0.33)
-            context_budget = int(total_ctx_budget * 0.5)
-            # 裁剪 history_summary（若存在）
-            if history_summary:
-                hist_tokens = self._estimate_tokens(history_summary)
-                if hist_tokens > history_budget:
-                    # 简单按字符比例裁剪
-                    ratio = max(history_budget / max(hist_tokens, 1), 0.1)
-                    cut = max(int(len(history_summary) * ratio), 200)
-                    history_summary = history_summary[:cut]
-            # 裁剪 chunks 合并文本
-            if chunks:
-                chunks = self._trim_chunks_to_tokens(chunks, context_budget)
-        except Exception:
-            pass
-
-        sections = self.prompt.build(question=question, chunks=chunks, history_summary=history_summary, style=style, extra_system=extra_system)
-        messages = [{"role": s.role, "content": s.content} for s in sections]
-        temperature = settings.SM_TEMPERATURE if temperature is None else temperature
-        max_tokens = settings.SM_MAX_TOKENS if max_tokens is None else max_tokens
-        try:
-            self.logger.info(f"RAG.generate stream={stream} temp={temperature} max_tokens={max_tokens} prompt_chars={sum(len(m['content']) for m in messages)}")
-        except Exception:
-            pass
-        out = self.llm.generate(messages, temperature=temperature, max_tokens=max_tokens, stream=stream)
-        if not stream:
-            try:
-                self.logger.info(f"RAG.generate done took_ms={int((time.time()-t0)*1000)}")
-            except Exception:
-                pass
-            prompt_chars = sum(len(m["content"]) for m in messages)
-            completion_chars = len(out or "")
-            ratio = 4 if self.prompt.language == "en" else 1
-            self._last_usage = {
-                "prompt_tokens": prompt_chars // ratio,
-                "completion_tokens": completion_chars // ratio,
-                "total_tokens": (prompt_chars + completion_chars) // ratio,
-            }
-            # 将模型正文中的 [doc_id:page] 等变体规范为 [id:page]
-            try:
-                out = self._normalize_citations(out)
-            except Exception:
-                pass
-        return out
-
-    def get_last_usage(self) -> Dict[str, Any] | None:
-        return self._last_usage
-
-    # --- helpers ---
-    def _normalize_citations(self, text: str) -> str:
-        if not isinstance(text, str) or not text:
-            return text
-        # 规范三类形式：
-        # [doc_id:82:1] 或 [document_id:82:1] 或 [82:1] → [82:1]
-        # 允许中英文提示词混入
-        # 先把 [doc_id:82:1]、[document_id:82:1]、[文档ID:82:1] 等替换成 [82:1]
-        patterns = [r"\[(?:doc(?:ument)?_?id|documentId|文档ID)\s*:\s*(\d+)\s*:\s*(\d+)\]",
-                    r"\[(\d+)\s*:\s*(\d+)\]"]
-        def repl(m: re.Match) -> str:
-            return f"[{m.group(1)}:{m.group(2)}]"
-        # 逐个替换复杂前缀形式
-        text = re.sub(patterns[0], repl, text, flags=re.IGNORECASE)
-        # 第二个是标准形式，保持不变（这里是幂等处理）
-        return text
-
-    # --- context helpers ---
-    def _summarize_history(self, history: List[Dict[str, str]]) -> str:
-        try:
-            # 压缩为简洁要点，保留关键信息与用户约束
-            lines = []
-            for m in history:
-                role = m.get("role", "user")
-                content = str(m.get("content", ""))
-                lines.append(f"{role}: {content}")
-            body = "\n".join(lines[-20:])  # 限制输入规模
-            msgs = [
-                {"role": "system", "content": (
-                    "请将以下对话历史压缩为6-10条要点，务必保留：用户目标/约束、偏好、拒答规则、安全要求、已达成结论与未决问题，以及与当前问题相关的关键信息。不要虚构。"
-                    if self.prompt.language == "zh"
-                    else "Summarize the conversation into 6-10 bullet points. MUST preserve: user goals/constraints, preferences, refusal/safety rules, reached conclusions and open questions, and key facts relevant to the current query. Do not fabricate."
-                )},
-                {"role": "user", "content": body},
-            ]
-            # 超时与重试保护
-            summary = self.llm.generate(msgs, temperature=0.2, max_tokens=256, stream=False)
-            if not summary:
-                summary = self.llm.generate(msgs, temperature=0.2, max_tokens=256, stream=False)
-            return summary or ""
-        except Exception:
-            return ""
-
-    def get_last_history_debug(self) -> Dict[str, Any] | None:
-        return self._last_history_debug
-
-    def get_last_history_summary(self) -> str | None:
-        return self._last_history_summary
-
-    def _estimate_tokens(self, text: str) -> int:
-        try:
-            import tiktoken  # type: ignore
-            model = None
-            if getattr(settings, "SM_LLM_TYPE", "openai") == "openai":
-                model = getattr(settings, "OPENAI_MODEL_NAME", None)
-            # DashScope 没有官方 tiktoken 配置，退回 cl100k_base 近似
-            enc = None
-            if model:
-                try:
-                    enc = tiktoken.encoding_for_model(model)
-                except Exception:
-                    enc = tiktoken.get_encoding("cl100k_base")
-            else:
-                enc = tiktoken.get_encoding("cl100k_base")
-            return len(enc.encode(text or ""))
-        except Exception:
-            # 回退：中文1:1，英文1:4 近似
-            if not text:
-                return 0
-            zh = sum(1 for c in text if ord(c) > 127)
-            en = len(text) - zh
-            return zh + en // 4
-
-    def _model_context_window(self) -> int | None:
-        name = None
-        try:
-            if getattr(settings, "SM_LLM_TYPE", "openai") == "openai":
-                name = getattr(settings, "OPENAI_MODEL_NAME", None)
-            elif getattr(settings, "SM_LLM_TYPE", "dashscope") == "dashscope":
-                name = getattr(settings, "DASHSCOPE_MODEL_NAME", None)
-        except Exception:
-            name = None
-        # 简易映射，可扩展
-        table = {
-            "gpt-4o": 128000,
-            "gpt-4o-mini": 128000,
-            "gpt-3.5-turbo": 16000,
-            "qwen-plus": 200000,
-            "qwen-max": 200000,
-            "deepseek-r1": 128000,
-            "deepseek-chat": 128000,
-        }
-        return table.get(name) if name else None
-
-    def _trim_chunks_to_tokens(self, chunks: List[Dict[str, Any]], budget_tokens: int) -> List[Dict[str, Any]]:
-        if not chunks:
-            return chunks
-        kept: List[Dict[str, Any]] = []
-        acc = 0
-        for c in chunks:
-            txt = (c or {}).get("text") or (c or {}).get("content") or ""
-            tks = self._estimate_tokens(txt)
-            if acc + tks > budget_tokens and kept:
-                continue
-            kept.append(c)
-            acc += tks
-            if acc >= budget_tokens:
-                break
-        return kept
-
-    def ask_stream(
-        self,
-        *,
-        question: str,
-        kb_id: int,
-        top_k: int = 5,
-        focus_doc_ids: Optional[List[int]] = None,
-        index_override: Optional[str] = None,
-    ) -> Generator[str, None, None]:
-        chunks = self.retrieve(
-            query=question,
-            kb_id=kb_id,
-            top_k=top_k,
-            focus_doc_ids=focus_doc_ids,
-            index_override=index_override,
-        )
-        for part in self.generate(question=question, chunks=chunks, stream=True):
-            yield part
 
     # --- citations helper ---
     def build_citations(self, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1184,56 +1041,3 @@ class RAGService:
             )
         return citations
 
-    # --- compare documents helper ---
-    def compare_documents(
-        self,
-        *,
-        kb_id: int,
-        doc_ids: List[int],
-        dimensions: List[str],
-        top_k: int = 8,
-        index_override: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Retrieve with focus on selected documents and generate a Markdown table comparison.
-        Returns: { answer: str, chunks: List[Dict] }
-        """
-        dims = [str(x).strip() for x in (dimensions or []) if str(x).strip()]
-        if not dims:
-            dims = ["Methodology", "Results", "Limitations"]
-        dims_text = ", ".join(dims)
-        if self.prompt.language == "zh":
-            question = (
-                f"请对比以下维度：{dims_text}。以 Markdown 表格输出：列=论文（按标题或文档ID），行=维度。每个单元格给出精炼要点，并附必要的引文标签。"
-            )
-            extra = (
-                "务必严格使用表格格式，避免长段落。每个要点后附加其来源引用，例如 [82:1]。若信息不足，填'—'并说明原因。不要编造。"
-            )
-            style = "简洁、要点化、表格化"
-        else:
-            question = (
-                f"Compare the following dimensions: {dims_text}. Output a Markdown table: columns=papers (by title or id), rows=dimensions. In each cell, provide concise key points with citations."
-            )
-            extra = (
-                "Use a strict table format, avoid long paragraphs. Append source citations like [82:1] after points. If insufficient info, put '—' and explain briefly. Do not fabricate."
-            )
-            style = "concise, bullet-style, tabular"
-
-        # Focused retrieval
-        rq_topk = max(top_k, 8)
-        chunks = self.retrieve(
-            query=question,
-            kb_id=kb_id,
-            top_k=rq_topk,
-            focus_doc_ids=doc_ids,
-            index_override=index_override,
-        )
-        answer = self.generate(
-            question=question,
-            chunks=chunks,
-            stream=False,
-            history=[],
-            compress_history=False,
-            style=style,
-            extra_system=extra,
-        )
-        return {"answer": answer or "", "chunks": chunks}

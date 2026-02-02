@@ -7,7 +7,6 @@ import pytest
 from agents.decision_agent import DecisionAgent, ResearchDecision
 from agents.research_agent import ResearchAgent
 from service.citation_manager import AsyncCitationManagerWrapper, CitationManager
-from service.rag_client import RAGAnswer
 from service.tool_registry import create_tool_registry
 from service.tool_router import ToolRouter
 
@@ -18,9 +17,11 @@ class DummyRAGClient:
     def __init__(self) -> None:
         self.calls = []
 
-    async def ask(self, session_id, question, user_id, top_k=None, index_mode=None):
-        self.calls.append(question)
-        return RAGAnswer(answer=f"Answer for {question}", citations=[], chunks=[], raw={})
+    async def retrieve(self, session_id, query, user_id, top_k=None, focus_doc_ids=None, index_mode=None):
+        self.calls.append(query)
+        return [
+            {"chunk_id": "c1", "document_id": "d1", "content": f"Evidence for {query}", "metadata": {}}
+        ]
 
     async def compare(self, session_id, payload, user_id):
         return {"answer": "Compare", "citations": []}
@@ -29,7 +30,7 @@ class DummyRAGClient:
 class DummyDecisionAgent(DecisionAgent):
     """DecisionAgent override that returns deterministic follow-ups."""
 
-    async def decide(self, topic, summary, citations_count, language):  # type: ignore[override]
+    async def decide(self, topic, summary, citations_count, language, context_text=None):  # type: ignore[override]
         return ResearchDecision(
             sufficient=False,
             should_compare=False,
@@ -58,6 +59,7 @@ async def _build_agent():
         web_search_client=None,
         code_exec_client=None,
         web_search_max_results=3,
+        paper_search_max_results=3,
     )
     agent = ResearchAgent(
         tool_router=ToolRouter(registry),

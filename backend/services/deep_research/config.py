@@ -14,12 +14,15 @@ class Settings(BaseSettings):
     RAG_SERVICE_URL: str = "http://scholarmind_api:8000"
     DATA_ROOT: str = "/app/data/deep_research"
     REQUEST_TIMEOUT: int = 120
+    # Service-to-service auth (JWT)
+    JWT_SECRET_KEY: str | None = None
+    JWT_ACCESS_TOKEN_EXPIRE_DAYS: int = 30
 
     MAX_ACTIVE_RUNS: int = 2
     MAX_PARALLEL_TOPICS: int = 3
-    MAX_ITERATIONS: int = 5
+    MAX_ITERATIONS: int = 7
     MAX_DEPTH: int = 2
-    MAX_BREADTH: int = 4
+    MAX_BREADTH: int = 8
     MAX_FOLLOWUPS_PER_BLOCK: int = 2
     FOLLOWUP_TRIGGER_MIN_CHARS: int = 200
     FOLLOWUP_EXECUTION_MODE: str = "queue"  # queue | inline
@@ -37,6 +40,15 @@ class Settings(BaseSettings):
     CODE_EXEC_TIMEOUT_SECONDS: int = 5
     CODE_EXEC_MAX_OUTPUT_CHARS: int = 2000
     CODE_EXEC_MAX_CODE_CHARS: int = 2000
+    PAPER_SEARCH_MAX_RESULTS: int = 5
+    PAPER_SEARCH_PROVIDERS: str = "semantic_scholar,arxiv"
+    PAPER_SEARCH_RANK_BY: str = "hybrid"
+    PAPER_SEARCH_MIN_PER_PROVIDER: int = 1
+    PAPER_SEARCH_ARXIV_MAX_RESULTS: int = 8
+    PAPER_SEARCH_ARXIV_MAX_AGE_YEARS: int = 5
+    PAPER_SEARCH_ARXIV_TIMEOUT_SECONDS: int = 20
+    PAPER_SEARCH_ARXIV_RETRIES: int = 2
+    PAPER_SEARCH_ARXIV_DELAY_SECONDS: float = 0.5
     LOG_LEVEL: str = "INFO"
     AUTO_RECOVER_RUNS: bool = True
     PROGRESS_MAX_BYTES: int = 5_000_000
@@ -71,9 +83,28 @@ class Settings(BaseSettings):
     REPORT_LLM_SECTIONAL: bool = False
     REPORT_LLM_SECTION_MAX_TOKENS: int = 1024
     REPORT_LLM_SECTION_CONTEXT_MAX_CHARS: int = 6000
+    RESEARCH_CONTEXT_MAX_CHARS: int = 6000
     OPENAI_API_KEY: str | None = None
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
     OPENAI_MODEL_NAME: str = "gpt-4o"
+    LLM_PRICE_TABLE_JSON: str | None = None
+    LLM_DEFAULT_INPUT_USD_PER_1K: float = 0.0
+    LLM_DEFAULT_OUTPUT_USD_PER_1K: float = 0.0
+
+    # Idea generation
+    IDEAGEN_CONTEXT_MAX_CHARS: int = 8000
+    IDEAGEN_MIN_KNOWLEDGE_POINTS: int = 3
+    IDEAGEN_MAX_KNOWLEDGE_POINTS: int = 5
+    IDEAGEN_MIN_IDEAS_PER_POINT: int = 5
+    IDEAGEN_MAX_IDEAS_PER_POINT: int = 10
+    IDEAGEN_NOTE_MAX_CHARS: int = 2000
+
+    # Notebook notes
+    NOTEBOOK_MAX_SELECTION_CHARS: int = 4000
+    NOTEBOOK_SOURCE_EXCERPT_MAX_CHARS: int = 200
+    NOTEBOOK_MAX_KEY_POINTS: int = 6
+    NOTEBOOK_MAX_QUESTIONS: int = 4
+    NOTEBOOK_TITLE_MAX_CHARS: int = 80
 
     # Research decision (tool selection & sufficiency)
     DECISION_LLM_ENABLED: bool = False

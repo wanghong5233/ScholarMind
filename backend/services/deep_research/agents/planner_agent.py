@@ -1,10 +1,10 @@
 """Planner agent for generating topic queues."""
 
 from dataclasses import dataclass
-import json
 from typing import Any, List, Optional
 
 from utils.language import guess_language
+from utils.json_utils import ensure_json_list, extract_json_from_text
 
 
 @dataclass
@@ -96,9 +96,22 @@ class PlannerAgent:
             top_k=top_k,
             index_mode=index_mode,
         )
-        items = self._parse_plan_items(answer.answer)
+        raw_answer = answer.answer or ""
+        items = self._parse_plan_items(raw_answer)
         if items:
             return items
+        if raw_answer:
+            repair_prompt = self._build_repair_prompt(topic, raw_answer)
+            repaired = await rag_client.ask(
+                session_id=session_id,
+                question=repair_prompt,
+                user_id=user_id,
+                top_k=top_k,
+                index_mode=index_mode,
+            )
+            repaired_items = self._parse_plan_items(repaired.answer or "")
+            if repaired_items:
+                return repaired_items
         return self.plan(topic)
 
     def _level_one_templates(self, topic: str, language: str) -> List[str]:
@@ -169,14 +182,16 @@ class PlannerAgent:
                 "你是一名研究规划助手。请将用户话题拆解为研究计划。\n"
                 f"要求：1) 深度最多 {max_depth}；2) 一级子话题最多 {max_level_one} 个；"
                 "3) 输出 JSON 数组，每项包含 title, question, depth, parent_title；"
-                "4) depth=1 的 parent_title 为空；5) 只输出 JSON。\n"
+                "4) depth=1 的 parent_title 为空；5) 只输出 JSON，不要包含其它文字或代码块。\n"
+                "覆盖维度建议：背景定义/核心机制/代表性论文/数据集基准/应用场景/局限与未来。\n"
                 f"话题：{topic}"
             )
         return (
             "You are a research planner. Decompose the topic into a research plan.\n"
             f"Constraints: depth <= {max_depth}; level-1 topics <= {max_level_one}. "
             "Return a JSON array; each item has title, question, depth, parent_title. "
-            "For depth=1, parent_title should be null. Output JSON only.\n"
+            "For depth=1, parent_title should be null. Output JSON only (no extra text).\n"
+            "Coverage hints: background/definition, mechanisms, representative papers, datasets/benchmarks, applications, limitations/future work.\n"
             f"Topic: {topic}"
         )
 
@@ -191,7 +206,8 @@ class PlannerAgent:
         """
 
         payload = self._extract_json(text)
-        if not isinstance(payload, list):
+        payload = ensure_json_list(payload)
+        if payload is None:
             return []
         items: List[PlanItem] = []
         for item in payload:
@@ -248,14 +264,29 @@ class PlannerAgent:
 
         if not text:
             return None
-        cleaned = text.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.strip("`")
-        start = cleaned.find("[")
-        end = cleaned.rfind("]")
-        if start == -1 or end == -1 or end <= start:
-            return None
-        try:
-            return json.loads(cleaned[start : end + 1])
-        except json.JSONDecodeError:
-            return None
+        return extract_json_from_text(text)
+
+    def _build_repair_prompt(self, topic: str, raw_output: str) -> str:
+        """Build a repair prompt for malformed JSON output."""
+
+        language = self.language or guess_language(topic)
+        truncated = raw_output.strip()
+        if len(truncated) > 2000:
+            truncated = truncated[:2000] + "..."
+        if language == "zh":
+            return (
+                "你刚才的输出不是合法 JSON。请修复并仅输出 JSON 数组。\n"
+                f"约束：深度最多 {self.depth}；一级子话题最多 {self.breadth} 个；"
+                "每项包含 title, question, depth, parent_title；depth=1 的 parent_title 为空。\n"
+                f"话题：{topic}\n"
+                "原始输出（需要修复）：\n"
+                f"{truncated}\n"
+            )
+        return (
+            "Your previous output is invalid JSON. Fix it and output JSON array only.\n"
+            f"Constraints: depth <= {self.depth}; level-1 topics <= {self.breadth}. "
+            "Each item has title, question, depth, parent_title; depth=1 parent_title is null.\n"
+            f"Topic: {topic}\n"
+            "Original output to fix:\n"
+            f"{truncated}\n"
+        )

@@ -34,6 +34,7 @@ elasticsearch
 elasticsearch-dsl
 xxhash
 tika
+arxiv
 openai>=1.0.0
 jieba
 llama-index-core

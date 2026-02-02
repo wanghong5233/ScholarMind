@@ -167,6 +167,160 @@ class RAGAPIClient:
             logger.error(f"RAG API list_knowledge_bases error: {e}", exc_info=True)
             raise
 
+    async def get_history(
+        self,
+        session_id: str,
+        user_id: int,
+        question: str = "",
+    ) -> Dict[str, Any]:
+        """
+        获取会话的 STM 历史切片（用于内部服务上下文注入）
+        """
+        headers = self._build_headers(user_id)
+        params = {"question": question} if question else {}
+        url = f"{self.base_url}/api/internal/history/{session_id}"
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                logger.debug(f"Calling RAG API: {url} for session history")
+                response = await client.get(url, headers=headers, params=params)
+                response.raise_for_status()
+                return response.json()
+
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                f"RAG API history failed: {e.response.status_code} {e.response.text}",
+                exc_info=True,
+            )
+            raise
+
+        except httpx.TimeoutException as e:
+            logger.error(f"RAG API history timeout: {e}", exc_info=True)
+            raise
+
+        except Exception as e:
+            logger.error(f"RAG API history error: {e}", exc_info=True)
+            raise
+
+    async def get_profile(
+        self,
+        user_id: int,
+        limit: int = 10,
+    ) -> Dict[str, Any]:
+        """
+        获取用户 LTM 记忆画像（用于内部服务上下文注入）
+        """
+        headers = self._build_headers(user_id)
+        params = {"limit": limit}
+        url = f"{self.base_url}/api/internal/profile/{user_id}"
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                logger.debug(f"Calling RAG API: {url} for memory profile")
+                response = await client.get(url, headers=headers, params=params)
+                response.raise_for_status()
+                return response.json()
+
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                f"RAG API profile failed: {e.response.status_code} {e.response.text}",
+                exc_info=True,
+            )
+            raise
+
+        except httpx.TimeoutException as e:
+            logger.error(f"RAG API profile timeout: {e}", exc_info=True)
+            raise
+
+        except Exception as e:
+            logger.error(f"RAG API profile error: {e}", exc_info=True)
+            raise
+
+    async def get_context(
+        self,
+        session_id: str,
+        user_id: int,
+        question: str = "",
+        memory_limit: int = 10,
+    ) -> Dict[str, Any]:
+        """
+        获取统一的对话上下文包（STM + LTM + 格式化文本）
+        """
+        headers = self._build_headers(user_id)
+        params = {"question": question, "memory_limit": memory_limit}
+        url = f"{self.base_url}/api/internal/context/{session_id}"
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                logger.debug(f"Calling RAG API: {url} for context pack")
+                response = await client.get(url, headers=headers, params=params)
+                response.raise_for_status()
+                return response.json()
+
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                f"RAG API context failed: {e.response.status_code} {e.response.text}",
+                exc_info=True,
+            )
+            raise
+
+        except httpx.TimeoutException as e:
+            logger.error(f"RAG API context timeout: {e}", exc_info=True)
+            raise
+
+        except Exception as e:
+            logger.error(f"RAG API context error: {e}", exc_info=True)
+            raise
+
+    async def append_message(
+        self,
+        session_id: str,
+        user_id: int,
+        user_question: str,
+        model_answer: str,
+        retrieval_content: Optional[Dict[str, Any]] = None,
+        source: Optional[str] = None,
+        trace_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        追加一条会话消息（内部服务专用）
+        """
+        headers = self._build_headers(user_id)
+        payload: Dict[str, Any] = {
+            "session_id": session_id,
+            "user_question": user_question,
+            "model_answer": model_answer,
+        }
+        if retrieval_content is not None:
+            payload["retrieval_content"] = retrieval_content
+        if source:
+            payload["source"] = source
+        if trace_id:
+            payload["trace_id"] = trace_id
+        url = f"{self.base_url}/api/internal/messages"
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                logger.debug("Calling RAG API: %s to append message", url)
+                response = await client.post(url, headers=headers, json=payload)
+                response.raise_for_status()
+                return response.json()
+
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                f"RAG API append_message failed: {e.response.status_code} {e.response.text}",
+                exc_info=True,
+            )
+            raise
+
+        except httpx.TimeoutException as e:
+            logger.error(f"RAG API append_message timeout: {e}", exc_info=True)
+            raise
+
+        except Exception as e:
+            logger.error(f"RAG API append_message error: {e}", exc_info=True)
+            raise
+
 
 # 单例模式：全局唯一的 API 客户端实例
 _rag_api_client: Optional[RAGAPIClient] = None

@@ -34,6 +34,7 @@ const state = proxy({
     plan: undefined as LatexAgentAPI.AgentPlanStatus | undefined | null,
     warnings: [] as string[],
     traceId: undefined as string | undefined,
+    operationId: undefined as string | undefined,
   },
 })
 
@@ -61,6 +62,7 @@ const actions = {
       plan: undefined,
       warnings: [],
       traceId: undefined,
+      operationId: undefined,
     }
   },
   setWorkspaceConfig(config: Record<string, any>) {
@@ -133,6 +135,9 @@ const actions = {
       meta: message.meta,
     })
   },
+  setChatMessages(messages: LatexChatMessage[]) {
+    state.chatMessages = Array.isArray(messages) ? messages : []
+  },
   setMessageFeedback(messageId: string, rating: LatexAgentAPI.AgentFeedbackRating) {
     const target = state.chatMessages.find((msg) => msg.id === messageId)
     if (!target) return
@@ -153,6 +158,7 @@ const actions = {
     plan?: LatexAgentAPI.AgentPlanStatus | null
     warnings?: string[] | null
     traceId?: string | null
+    operationId?: string | null
   }) {
     state.agentStatus = {
       intentType: payload.intentType || undefined,
@@ -160,6 +166,7 @@ const actions = {
       plan: payload.plan ?? undefined,
       warnings: payload.warnings?.filter(Boolean) ?? [],
       traceId: payload.traceId || undefined,
+      operationId: payload.operationId || undefined,
     }
   },
 }

@@ -6,4 +6,5 @@ export enum ChatRole {
 export enum ChatType {
   Text = 'text',
   Document = 'document',
+  DeepResearch = 'deep_research',
 }

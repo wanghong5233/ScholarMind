@@ -34,6 +34,36 @@ export function detail(
   })
 }
 
+export function listMessages(
+  params: {
+    sessionId: string
+    page?: number
+    pageSize?: number
+  },
+  options?: AxiosRequestConfig,
+) {
+  const { sessionId, page = 1, pageSize = 100 } = params
+  return request.get<{
+    total: number
+    page: number
+    pageSize: number
+    items: {
+      message_id: string
+      session_id: string
+      user_question: string
+      model_answer: string
+      create_time: string
+      retrieval_content?: string
+    }[]
+  }>(`sessions/${sessionId}/messages`, {
+    ...options,
+    params: {
+      page,
+      page_size: pageSize,
+    },
+  })
+}
+
 export function info(
   params: { sessionId: string },
   options?: AxiosRequestConfig,

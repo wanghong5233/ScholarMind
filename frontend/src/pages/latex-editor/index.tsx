@@ -6,6 +6,7 @@ import {
   Empty,
   Form,
   Input,
+  InputNumber,
   Layout,
   List,
   message,
@@ -14,6 +15,7 @@ import {
   Progress,
   Segmented,
   Select,
+  Switch,
   Space,
   Spin,
   Tabs,
@@ -40,8 +42,13 @@ import {
   EyeOutlined,
   CheckOutlined,
   CloseOutlined,
+  EditOutlined,
+  PushpinOutlined,
+  PushpinFilled,
   LikeOutlined,
   DislikeOutlined,
+  HistoryOutlined,
+  BarChartOutlined,
 } from '@ant-design/icons'
 import type { DataNode } from 'antd/es/tree'
 import { useSnapshot } from 'valtio'
@@ -58,18 +65,28 @@ import {
   createFileOrDirectory,
   createWorkspace,
   deleteFile,
+  bindWorkspaceSession,
+  getAgentAsyncEventsUrl,
   fetchCompileStatus,
   fetchFileContent,
   fetchWorkspaceFiles,
   listWorkspaces,
+  listOperations,
+  fetchMetricsSummary,
+  fetchLlmHealth,
+  fetchOperationSnapshotFile,
   runAgentTask,
+  runAgentTaskAsync,
   sendAgentFeedback,
+  updateWorkspace,
   updateFileContent,
+  revertOperation,
   uploadFile,
   downloadPdf,
   downloadFile,
   listAgentKnowledgeBases,
 } from '@/api/latexAgent'
+import { listMessages as listSessionMessages } from '@/api/session'
 import { latexAgentActions, latexAgentState } from '@/store/latexAgent'
 import type { LatexChatMessage } from '@/store/latexAgent'
 import './index.scss'
@@ -100,6 +117,16 @@ const getErrorMessage = (error: any) => {
   )
 }
 
+const parseRetrievalContent = (value?: string) => {
+  if (!value) return undefined
+  try {
+    return JSON.parse(value)
+  } catch (error) {
+    console.error('Failed to parse retrieval_content:', error)
+    return undefined
+  }
+}
+
 const intentTagMap: Record<
   string,
   {
@@ -111,6 +138,7 @@ const intentTagMap: Record<
   suggest: { label: '建议', color: 'orange' },
   edit: { label: '编辑', color: 'blue' },
   citation: { label: '引用', color: 'purple' },
+  custom: { label: '自定义', color: 'geekblue' },
   file_op: { label: '文件操作', color: 'default' },
 }
 
@@ -137,6 +165,26 @@ const copyTextToClipboard = async (text: string) => {
   } finally {
     document.body.removeChild(textarea)
   }
+}
+
+const downloadJson = (filename: string, payload: unknown) => {
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
+}
+
+const resolveEditorLanguage = (filePath?: string) => {
+  if (!filePath) return 'latex'
+  const lower = filePath.toLowerCase()
+  if (lower.endsWith('.md') || lower.endsWith('.markdown')) return 'markdown'
+  if (lower.endsWith('.txt')) return 'plaintext'
+  return 'latex'
 }
 
 const generateId = () =>
@@ -167,7 +215,39 @@ type SelectionFragment = {
   placeholder: string
 }
 
-const quickPromptPresets = [
+type PromptIntent = 'edit' | 'suggest' | 'qa' | 'citation' | 'custom'
+
+type PromptLlmOptions = {
+  llm_provider?: 'auto' | 'dashscope' | 'openai'
+  llm_model?: string
+  llm_temperature?: number
+  llm_max_tokens?: number
+}
+
+type PromptPreset = {
+  id?: string
+  label: string
+  description?: string
+  prompt: string | ((hasSelection: boolean) => string)
+  intent: PromptIntent
+  isCustom?: boolean
+  llm_options?: PromptLlmOptions
+  pinned?: boolean
+}
+
+type CustomPromptPreset = {
+  id: string
+  label: string
+  description?: string
+  prompt: string
+  intent: PromptIntent
+  llm_options?: PromptLlmOptions
+  pinned?: boolean
+}
+
+const CUSTOM_PROMPT_STORAGE_KEY = 'doc_studio_prompt_presets'
+
+const quickPromptPresets: PromptPreset[] = [
   // 写作类（最常用 - 会直接修改文件）
   {
     label: '生成正文',
@@ -286,9 +366,13 @@ const LatexEditorPage = () => {
   const snap = useSnapshot(latexAgentState)
   const [prompt, setPrompt] = useState('')
   const [chatLoading, setChatLoading] = useState(false)
+  const [asyncMode, setAsyncMode] = useState(true)
+  const [asyncRunId, setAsyncRunId] = useState<string | null>(null)
+  const [asyncRunStatus, setAsyncRunStatus] = useState<'idle' | 'running' | 'succeeded' | 'failed'>('idle')
   const [selections, setSelections] = useState<SelectionFragment[]>([])
   const [workspaceModalOpen, setWorkspaceModalOpen] = useState(false)
   const [newWorkspaceName, setNewWorkspaceName] = useState('')
+  const [newWorkspaceType, setNewWorkspaceType] = useState<'latex' | 'markdown'>('latex')
   const [workspaceSubmitting, setWorkspaceSubmitting] = useState(false)
   const [fileModalOpen, setFileModalOpen] = useState(false)
   const [fileModalType, setFileModalType] = useState<'file' | 'directory'>('file')
@@ -304,17 +388,60 @@ const LatexEditorPage = () => {
     timestamp: string
   } | null>(null)
   const [showPromptLog, setShowPromptLog] = useState(false)
+  const [customPromptPresets, setCustomPromptPresets] = useState<CustomPromptPreset[]>([])
+  const [presetModalOpen, setPresetModalOpen] = useState(false)
+  const [presetEditingId, setPresetEditingId] = useState<string | null>(null)
+  const [presetName, setPresetName] = useState('')
+  const [presetIntent, setPresetIntent] = useState<PromptIntent>('edit')
+  const [presetPrompt, setPresetPrompt] = useState('')
+  const [presetBindModel, setPresetBindModel] = useState(false)
+  const [presetFilter, setPresetFilter] = useState<'all' | PromptIntent>('all')
+  const [presetSearch, setPresetSearch] = useState('')
+  const [webSearchEnabled, setWebSearchEnabled] = useState(false)
+  const [webSearchSaving, setWebSearchSaving] = useState(false)
+  const [sessionBindValue, setSessionBindValue] = useState('')
+  const [sessionBindLoading, setSessionBindLoading] = useState(false)
+  const [llmProvider, setLlmProvider] = useState<'auto' | 'dashscope' | 'openai'>('auto')
+  const [llmModel, setLlmModel] = useState('')
+  const [llmTemperature, setLlmTemperature] = useState<number | null>(null)
+  const [llmMaxTokens, setLlmMaxTokens] = useState<number | null>(null)
+  const [llmOptionsReady, setLlmOptionsReady] = useState(false)
+  const [promptPresetsReady, setPromptPresetsReady] = useState(false)
+  const [workspaceFlagsReady, setWorkspaceFlagsReady] = useState(false)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const presetFileInputRef = useRef<HTMLInputElement | null>(null)
   const editorRef = useRef<any>(null)
+  const asyncStreamRef = useRef<EventSource | null>(null)
   const chatMessagesEndRef = useRef<HTMLDivElement | null>(null)
   const lastAutoScrollMessageIdRef = useRef<string | null>(null)
   const promptInputRef = useRef<TextAreaRef | null>(null)
+  const llmOptionsAppliedRef = useRef<string>('')
+  const promptPresetsAppliedRef = useRef<string>('')
+  const workspaceFlagsAppliedRef = useRef<string>('')
   
   // Diff 预览相关状态
   const [diffModalOpen, setDiffModalOpen] = useState(false)
   const [allFileDiffs, setAllFileDiffs] = useState<LatexAgentAPI.FileDiff[]>([])
   const [currentDiffIndex, setCurrentDiffIndex] = useState(0)
   const [acceptedDiffs, setAcceptedDiffs] = useState<Set<number>>(new Set())
+  const [lastOperationId, setLastOperationId] = useState<string | null>(null)
+  const [diffOperationId, setDiffOperationId] = useState<string | null>(null)
+  const [undoingLastApply, setUndoingLastApply] = useState(false)
+  const [diffReverting, setDiffReverting] = useState(false)
+  const [operationHistoryOpen, setOperationHistoryOpen] = useState(false)
+  const [operationHistoryLoading, setOperationHistoryLoading] = useState(false)
+  const [operationHistory, setOperationHistory] = useState<LatexAgentAPI.OperationSummary[]>([])
+  const [revertingOperationId, setRevertingOperationId] = useState<string | null>(null)
+  const [systemStatsLoading, setSystemStatsLoading] = useState(false)
+  const [llmHealth, setLlmHealth] = useState<LatexAgentAPI.LlmHealthSummary | null>(null)
+  const [metricsSummary, setMetricsSummary] = useState<LatexAgentAPI.MetricsSummary | null>(null)
+  const [systemStatusOpen, setSystemStatusOpen] = useState(false)
+  const [diffContentLoading, setDiffContentLoading] = useState(false)
+  const [resolvedOriginal, setResolvedOriginal] = useState('')
+  const [resolvedModified, setResolvedModified] = useState('')
+  const [lineChanges, setLineChanges] = useState<any[]>([])
+  const [acceptedLineChanges, setAcceptedLineChanges] = useState<Set<number>>(new Set())
+  const diffEditorRef = useRef<any>(null)
   
   // 可调整宽度的状态（使用 localStorage 持久化）
   const [leftSiderWidth, setLeftSiderWidth] = useState(() => {
@@ -336,6 +463,308 @@ const LatexEditorPage = () => {
     if (!raw) return null
     const parsed = Number(raw)
     return Number.isFinite(parsed) ? parsed : null
+  }, [])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const raw = localStorage.getItem('doc_studio_llm_options')
+    if (!raw) return
+    try {
+      const parsed = JSON.parse(raw)
+      if (parsed?.llm_provider) {
+        setLlmProvider(parsed.llm_provider)
+      }
+      if (parsed?.llm_model) {
+        setLlmModel(parsed.llm_model)
+      }
+      if (typeof parsed?.llm_temperature === 'number') {
+        setLlmTemperature(parsed.llm_temperature)
+      }
+      if (typeof parsed?.llm_max_tokens === 'number') {
+        setLlmMaxTokens(parsed.llm_max_tokens)
+      }
+    } catch (error) {
+      console.warn('Failed to load Doc Studio LLM options', error)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const payload = {
+      llm_provider: llmProvider,
+      llm_model: llmModel,
+      llm_temperature: llmTemperature,
+      llm_max_tokens: llmMaxTokens,
+    }
+    localStorage.setItem('doc_studio_llm_options', JSON.stringify(payload))
+  }, [llmProvider, llmModel, llmTemperature, llmMaxTokens])
+
+  const persistCustomPromptPresets = useCallback((items: CustomPromptPreset[]) => {
+    setCustomPromptPresets(items)
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(CUSTOM_PROMPT_STORAGE_KEY, JSON.stringify(items))
+    }
+  }, [])
+
+  const applyPromptPresetsFromConfig = useCallback((config?: Record<string, any>) => {
+    if (!config) return
+    const raw = Array.isArray(config.prompt_presets) ? config.prompt_presets : []
+    if (!raw.length) return
+    const allowedIntents: PromptIntent[] = ['edit', 'suggest', 'qa', 'citation', 'custom']
+    const sanitized: CustomPromptPreset[] = raw
+      .filter((item: any) => item && typeof item.label === 'string' && typeof item.prompt === 'string')
+      .map((item: any) => ({
+        id: item.id || generateId(),
+        label: item.label,
+        description: item.description || '自定义模板',
+        prompt: item.prompt,
+        intent: allowedIntents.includes(item.intent) ? item.intent : 'custom',
+        llm_options: item.llm_options,
+        pinned: Boolean(item.pinned),
+      }))
+    if (!sanitized.length) return
+    promptPresetsAppliedRef.current = JSON.stringify(sanitized)
+    setCustomPromptPresets(sanitized)
+  }, [])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const raw = localStorage.getItem(CUSTOM_PROMPT_STORAGE_KEY)
+    if (!raw) return
+    try {
+      const parsed = JSON.parse(raw)
+      if (!Array.isArray(parsed)) return
+      const sanitized: CustomPromptPreset[] = parsed
+        .filter((item) => item && typeof item.label === 'string' && typeof item.prompt === 'string')
+        .map((item) => ({
+          id: item.id || generateId(),
+          label: item.label,
+          description: item.description || '自定义模板',
+          prompt: item.prompt,
+          intent: item.intent || 'custom',
+          llm_options: item.llm_options,
+          pinned: Boolean(item.pinned),
+        }))
+      setCustomPromptPresets(sanitized)
+    } catch (error) {
+      console.warn('Failed to load custom prompt presets', error)
+    }
+  }, [])
+
+  const llmOptions = useMemo(() => {
+    const options: Record<string, any> = {}
+    if (llmProvider !== 'auto') {
+      options.llm_provider = llmProvider
+    }
+    if (llmModel.trim()) {
+      options.llm_model = llmModel.trim()
+    }
+    if (typeof llmTemperature === 'number') {
+      options.llm_temperature = llmTemperature
+    }
+    if (typeof llmMaxTokens === 'number') {
+      options.llm_max_tokens = llmMaxTokens
+    }
+    return options
+  }, [llmProvider, llmModel, llmTemperature, llmMaxTokens])
+
+  const llmOptionsConfig = useMemo(() => {
+    const options: Record<string, any> = {
+      llm_provider: llmProvider,
+    }
+    if (llmModel.trim()) {
+      options.llm_model = llmModel.trim()
+    }
+    if (typeof llmTemperature === 'number') {
+      options.llm_temperature = llmTemperature
+    }
+    if (typeof llmMaxTokens === 'number') {
+      options.llm_max_tokens = llmMaxTokens
+    }
+    return options
+  }, [llmProvider, llmModel, llmTemperature, llmMaxTokens])
+
+  const promptPresetsConfig = useMemo(() => {
+    return customPromptPresets.map((preset) => ({
+      id: preset.id,
+      label: preset.label,
+      description: preset.description,
+      prompt: preset.prompt,
+      intent: preset.intent,
+      llm_options: preset.llm_options,
+      pinned: preset.pinned,
+    }))
+  }, [customPromptPresets])
+
+  const workspaceFlagsConfig = useMemo(() => {
+    return {
+      enable_web_search: webSearchEnabled,
+    }
+  }, [webSearchEnabled])
+
+  const promptPresets = useMemo<PromptPreset[]>(() => {
+    const custom = customPromptPresets.map((preset) => ({
+      ...preset,
+      isCustom: true,
+    }))
+    return [...custom, ...quickPromptPresets]
+  }, [customPromptPresets])
+
+  const orderedPromptPresets = useMemo(() => {
+    return [...promptPresets].sort((a, b) => {
+      const pinScore = Number(Boolean(b.pinned)) - Number(Boolean(a.pinned))
+      if (pinScore !== 0) return pinScore
+      const customScore = Number(Boolean(b.isCustom)) - Number(Boolean(a.isCustom))
+      if (customScore !== 0) return customScore
+      return a.label.localeCompare(b.label, 'zh-CN')
+    })
+  }, [promptPresets])
+
+  const visiblePromptPresets = useMemo(() => {
+    let filtered = orderedPromptPresets
+    if (presetFilter === 'custom') {
+      filtered = filtered.filter((preset) => preset.isCustom)
+    } else if (presetFilter !== 'all') {
+      filtered = filtered.filter((preset) => preset.intent === presetFilter)
+    }
+    const keyword = presetSearch.trim().toLowerCase()
+    if (!keyword) return filtered
+    return filtered.filter((preset) => {
+      const promptText = typeof preset.prompt === 'string' ? preset.prompt : ''
+      const haystack = `${preset.label} ${preset.description || ''} ${promptText}`.toLowerCase()
+      return haystack.includes(keyword)
+    })
+  }, [orderedPromptPresets, presetFilter, presetSearch])
+
+  const groupedPromptPresets = useMemo(() => {
+    const groups: Record<PromptIntent, PromptPreset[]> = {
+      edit: [],
+      suggest: [],
+      qa: [],
+      citation: [],
+      custom: [],
+    }
+    for (const preset of visiblePromptPresets) {
+      groups[preset.intent]?.push(preset)
+    }
+    const order: PromptIntent[] = ['edit', 'suggest', 'qa', 'citation', 'custom']
+    return order
+      .map((intent) => ({ intent, items: groups[intent] }))
+      .filter((group) => group.items.length > 0)
+  }, [visiblePromptPresets])
+
+  const applyLlmOptionsFromConfig = useCallback(
+    (config?: Record<string, any>) => {
+      if (!config) return
+      const raw =
+        config.llm_options && typeof config.llm_options === 'object' ? config.llm_options : config
+      const hasAny =
+        raw.llm_provider ||
+        raw.llm_model ||
+        typeof raw.llm_temperature === 'number' ||
+        typeof raw.llm_max_tokens === 'number'
+      if (!hasAny) return
+
+      const nextProvider =
+        raw.llm_provider === 'dashscope' || raw.llm_provider === 'openai' || raw.llm_provider === 'auto'
+          ? raw.llm_provider
+          : llmProvider
+      const nextModel = typeof raw.llm_model === 'string' ? raw.llm_model : llmModel
+      const nextTemperature =
+        typeof raw.llm_temperature === 'number' ? raw.llm_temperature : llmTemperature
+      const nextMaxTokens =
+        typeof raw.llm_max_tokens === 'number' ? raw.llm_max_tokens : llmMaxTokens
+
+      const normalized = {
+        llm_provider: nextProvider,
+        llm_model: nextModel,
+        llm_temperature: nextTemperature,
+        llm_max_tokens: nextMaxTokens,
+      }
+      llmOptionsAppliedRef.current = JSON.stringify(normalized)
+      setLlmProvider(nextProvider)
+      setLlmModel(nextModel || '')
+      setLlmTemperature(typeof nextTemperature === 'number' ? nextTemperature : null)
+      setLlmMaxTokens(typeof nextMaxTokens === 'number' ? nextMaxTokens : null)
+    },
+    [llmProvider, llmModel, llmTemperature, llmMaxTokens],
+  )
+
+  const applyWorkspaceFlagsFromConfig = useCallback((config?: Record<string, any>) => {
+    if (!config) return
+    const enableWebSearch =
+      typeof config.enable_web_search === 'boolean' ? config.enable_web_search : false
+    const sessionId = typeof config.session_id === 'string' ? config.session_id : ''
+    const normalized = {
+      enable_web_search: enableWebSearch,
+    }
+    workspaceFlagsAppliedRef.current = JSON.stringify(normalized)
+    setWebSearchEnabled(enableWebSearch)
+    setSessionBindValue(sessionId)
+  }, [])
+
+  useEffect(() => {
+    setLlmOptionsReady(false)
+    llmOptionsAppliedRef.current = ''
+  }, [snap.workspaceId])
+
+  useEffect(() => {
+    setPromptPresetsReady(false)
+    promptPresetsAppliedRef.current = ''
+  }, [snap.workspaceId])
+
+  useEffect(() => {
+    setWorkspaceFlagsReady(false)
+    workspaceFlagsAppliedRef.current = ''
+  }, [snap.workspaceId])
+
+  useEffect(() => {
+    if (!snap.workspaceId || !llmOptionsReady) return
+    const serialized = JSON.stringify(llmOptionsConfig)
+    if (serialized === llmOptionsAppliedRef.current) return
+    llmOptionsAppliedRef.current = serialized
+    updateWorkspace({
+      workspaceId: snap.workspaceId,
+      config: { llm_options: llmOptionsConfig },
+    }).catch((error) => {
+      console.warn('Failed to persist LLM options', error)
+    })
+  }, [llmOptionsConfig, llmOptionsReady, snap.workspaceId])
+
+  useEffect(() => {
+    if (!snap.workspaceId || !promptPresetsReady) return
+    const serialized = JSON.stringify(promptPresetsConfig)
+    if (serialized === promptPresetsAppliedRef.current) return
+    promptPresetsAppliedRef.current = serialized
+    updateWorkspace({
+      workspaceId: snap.workspaceId,
+      config: { prompt_presets: promptPresetsConfig },
+    }).catch((error) => {
+      console.warn('Failed to persist prompt presets', error)
+    })
+  }, [promptPresetsConfig, promptPresetsReady, snap.workspaceId])
+
+  useEffect(() => {
+    if (!snap.workspaceId || !workspaceFlagsReady) return
+    const serialized = JSON.stringify(workspaceFlagsConfig)
+    if (serialized === workspaceFlagsAppliedRef.current) return
+    workspaceFlagsAppliedRef.current = serialized
+    setWebSearchSaving(true)
+    updateWorkspace({
+      workspaceId: snap.workspaceId,
+      config: workspaceFlagsConfig,
+    })
+      .catch((error) => {
+        console.warn('Failed to persist workspace flags', error)
+      })
+      .finally(() => {
+        setWebSearchSaving(false)
+      })
+  }, [workspaceFlagsConfig, workspaceFlagsReady, snap.workspaceId])
+  const preferredFileFromUrl = useMemo(() => {
+    if (typeof window === 'undefined') return ''
+    const raw = new URLSearchParams(window.location.search).get('file')
+    return raw ? raw.trim() : ''
   }, [])
   const [knowledgeBases, setKnowledgeBases] = useState<LatexAgentAPI.KnowledgeBaseSummary[]>([])
   const [knowledgeLoading, setKnowledgeLoading] = useState(false)
@@ -366,6 +795,17 @@ const LatexEditorPage = () => {
     () => buildTreeData(cloneFileNodes(snap.fileTree)),
     [snap.fileTree],
   )
+
+  const isLatexWorkspace = useMemo(() => {
+    const config = snap.workspaceConfig || {}
+    const workspaceType = config.workspace_type || config.workspaceType
+    const primaryFormat = config.primary_format || config.primaryFormat
+    const mainFile = config.main_file || config.mainFile
+    if (workspaceType === 'latex' || primaryFormat === 'latex') return true
+    if (typeof mainFile === 'string' && mainFile.toLowerCase().endsWith('.tex')) return true
+    if (snap.activeFilePath?.toLowerCase().endsWith('.tex')) return true
+    return false
+  }, [snap.activeFilePath, snap.workspaceConfig])
   
   // 自动展开所有目录
   useEffect(() => {
@@ -635,6 +1075,31 @@ const LatexEditorPage = () => {
     planTotalSteps > 0 ? Math.round((planCompletedSteps / planTotalSteps) * 100) : 0
   const agentWarnings = snap.agentStatus.warnings ?? []
 
+  const llmMetricEntries = useMemo(() => {
+    const metrics = metricsSummary?.llm || {}
+    return Object.entries(metrics).map(([key, value]) => {
+      const parts = key.split('::')
+      const provider = parts[0] || key
+      const model = parts.slice(1).join('::') || key
+      return {
+        key,
+        provider,
+        model,
+        ...value,
+      }
+    })
+  }, [metricsSummary])
+
+  const llmTotals = useMemo(() => {
+    let tokens = 0
+    let cost = 0
+    llmMetricEntries.forEach((entry) => {
+      tokens += entry.total_tokens || 0
+      cost += entry.total_cost || 0
+    })
+    return { tokens, cost }
+  }, [llmMetricEntries])
+
   const formatStepTime = useCallback((ts?: number) => {
     if (!ts) return ''
     return new Date(ts * 1000).toLocaleTimeString()
@@ -714,12 +1179,79 @@ const LatexEditorPage = () => {
     [],
   )
 
+  const loadWorkspaceChatHistory = useCallback(
+    async (workspaceId: string, config: Record<string, any>) => {
+      const sessionId = config?.session_id ?? config?.sessionId
+      if (!sessionId) {
+        latexAgentActions.setChatMessages([])
+        return
+      }
+      try {
+        const { data } = await listSessionMessages({
+          sessionId: String(sessionId),
+          page: 1,
+          pageSize: 200,
+        })
+        const items = Array.isArray(data?.items) ? data.items : []
+        const messages: LatexChatMessage[] = []
+        items.forEach((item) => {
+          const retrievalData = parseRetrievalContent(item.retrieval_content)
+          const source = retrievalData?.source
+          const sourceWorkspace = retrievalData?.workspace_id
+          if (source && source !== 'latex_agent') return
+          if (sourceWorkspace && sourceWorkspace !== workspaceId) return
+          const createdAt = item.create_time ? Date.parse(item.create_time) : Date.now()
+          const baseId = item.message_id || `${createdAt}-${Math.random()}`
+          if (item.user_question) {
+            messages.push({
+              id: `${baseId}-user`,
+              role: 'user',
+              content: item.user_question,
+              createdAt,
+              meta: {
+                messageId: item.message_id,
+                source,
+                workspaceId: sourceWorkspace,
+                traceId: retrievalData?.trace_id,
+              },
+            })
+          }
+          if (item.model_answer) {
+            messages.push({
+              id: `${baseId}-agent`,
+              role: 'agent',
+              content: item.model_answer,
+              createdAt: createdAt + 1,
+              meta: {
+                messageId: item.message_id,
+                source,
+                workspaceId: sourceWorkspace,
+                traceId: retrievalData?.trace_id,
+              },
+            })
+          }
+        })
+        latexAgentActions.setChatMessages(messages)
+      } catch (error) {
+        console.warn('Failed to load session messages', error)
+      }
+    },
+    [],
+  )
+
   const loadWorkspaceFiles = useCallback(
     async (workspaceId: string, shouldOpenDefault = true) => {
       try {
         const data = await fetchWorkspaceFiles({ workspaceId })
         latexAgentActions.setFileTree(data.files)
         latexAgentActions.setWorkspaceConfig(data.config)
+        applyLlmOptionsFromConfig(data.config)
+        applyPromptPresetsFromConfig(data.config)
+        applyWorkspaceFlagsFromConfig(data.config)
+        await loadWorkspaceChatHistory(workspaceId, data.config)
+        setLlmOptionsReady(true)
+        setPromptPresetsReady(true)
+        setWorkspaceFlagsReady(true)
         
         // 调试：打印文件树结构
         const printFileTree = (nodes: any[], indent = '') => {
@@ -735,16 +1267,25 @@ const LatexEditorPage = () => {
 
         // 【Cursor 风格】从 localStorage 恢复该工作区上次打开的文件标签页
         if (shouldOpenDefault) {
+          const allPaths = collectAllFilePaths(data.files)
+          const preferredFile =
+            preferredFileFromUrl && allPaths.includes(preferredFileFromUrl)
+              ? preferredFileFromUrl
+              : ''
           const storageKey = `latex_editor_workspace_state_${workspaceId}`
           let restored = false
           try {
+            if (preferredFile) {
+              await openFile(preferredFile, true)
+              latexAgentActions.setActiveFile(preferredFile)
+              restored = true
+            }
             const raw = localStorage.getItem(storageKey)
-            if (raw) {
+            if (raw && !restored) {
               const parsed = JSON.parse(raw) as {
                 openedFiles?: string[]
                 activeFilePath?: string
               }
-              const allPaths = collectAllFilePaths(data.files)
               const validOpened = parsed.openedFiles?.filter((p) => allPaths.includes(p)) ?? []
 
               if (validOpened.length > 0) {
@@ -775,7 +1316,14 @@ const LatexEditorPage = () => {
         message.error(getErrorMessage(error))
       }
     },
-    [openFile],
+    [
+      applyLlmOptionsFromConfig,
+      applyPromptPresetsFromConfig,
+      applyWorkspaceFlagsFromConfig,
+      openFile,
+      loadWorkspaceChatHistory,
+      preferredFileFromUrl,
+    ],
   )
 
   const loadKnowledgeBases = useCallback(async () => {
@@ -804,6 +1352,9 @@ const LatexEditorPage = () => {
       })
     } catch (error) {
       message.error(getErrorMessage(error))
+      if (asyncMode) {
+        setChatLoading(false)
+      }
     } finally {
       setKnowledgeLoading(false)
     }
@@ -840,6 +1391,12 @@ const LatexEditorPage = () => {
   useEffect(() => {
     loadKnowledgeBases()
   }, [loadKnowledgeBases])
+
+  useEffect(() => {
+    if (!isLatexWorkspace && rightTab === 'compile') {
+      setRightTab('chat')
+    }
+  }, [isLatexWorkspace, rightTab])
 
   // 【Cursor 风格】将每个工作区的打开文件状态持久化到 localStorage
   useEffect(() => {
@@ -971,9 +1528,28 @@ const LatexEditorPage = () => {
     }
     setWorkspaceSubmitting(true)
     try {
-      const workspace = await createWorkspace({ name: newWorkspaceName.trim() })
+      const workspaceConfig =
+        newWorkspaceType === 'markdown'
+          ? {
+              workspace_type: 'doc_studio',
+              primary_format: 'markdown',
+              supported_formats: ['markdown', 'plaintext'],
+              main_file: 'notes.md',
+            }
+          : {
+              workspace_type: 'latex',
+              primary_format: 'latex',
+              supported_formats: ['latex', 'bib'],
+              main_file: 'main.tex',
+              bibliography_file: 'references.bib',
+            }
+      const workspace = await createWorkspace({
+        name: newWorkspaceName.trim(),
+        config: workspaceConfig,
+      })
       setWorkspaceModalOpen(false)
       setNewWorkspaceName('')
+      setNewWorkspaceType('latex')
       await loadWorkspaces(workspace.workspaceId)
       message.success('创建成功')
     } catch (error) {
@@ -1081,7 +1657,13 @@ const LatexEditorPage = () => {
         }
         
         // 如果上传的是文本文件，自动打开
-        if (file.name.endsWith('.tex') || file.name.endsWith('.bib')) {
+        if (
+          file.name.endsWith('.tex') ||
+          file.name.endsWith('.bib') ||
+          file.name.endsWith('.md') ||
+          file.name.endsWith('.markdown') ||
+          file.name.endsWith('.txt')
+        ) {
           const fullPath = directoryPath ? `${directoryPath}/${file.name}` : file.name
           setTimeout(() => openFile(fullPath), 500)  // 稍微延迟以确保文件树已刷新
         }
@@ -1183,6 +1765,10 @@ const LatexEditorPage = () => {
   const handleCompile = async () => {
     if (!snap.workspaceId) {
       message.warning('请选择工作区')
+      return
+    }
+    if (!isLatexWorkspace) {
+      message.info('当前工作区非 LaTeX，编译功能不可用')
       return
     }
 
@@ -1415,7 +2001,7 @@ const LatexEditorPage = () => {
   }
 
   const handleQuickPromptApply = useCallback(
-    (presetPrompt: string | ((hasSelection: boolean) => string)) => {
+    (preset: PromptPreset) => {
       // 1. 检查编辑器中是否有选中文本（但还没有添加到 selections）
       const editor = editorRef.current
       let newSelection: SelectionFragment | null = null
@@ -1457,9 +2043,13 @@ const LatexEditorPage = () => {
         : selections
       
       const hasSelection = finalSelections.length > 0
-      const promptText = typeof presetPrompt === 'function'
-        ? presetPrompt(hasSelection)
-        : presetPrompt
+      const promptText = typeof preset.prompt === 'function'
+        ? preset.prompt(hasSelection)
+        : preset.prompt
+
+      if (preset.llm_options) {
+        applyLlmOptionsFromConfig({ llm_options: preset.llm_options })
+      }
       
       // 3. 生成最终提示词，确保包含所有占位符
       let finalPrompt = promptText
@@ -1503,12 +2093,684 @@ const LatexEditorPage = () => {
         promptInputDivRef.current?.focus()
       }, 0)
     },
-    [selections, snap.activeFilePath],
+    [applyLlmOptionsFromConfig, selections, snap.activeFilePath],
   )
+
+  const handleOpenPresetModal = (preset?: CustomPromptPreset) => {
+    if (!preset && !prompt.trim()) {
+      message.warning('请输入指令后再保存模板')
+      return
+    }
+    if (preset) {
+      setPresetEditingId(preset.id)
+      setPresetName(preset.label)
+      setPresetIntent(preset.intent || 'custom')
+      setPresetPrompt(preset.prompt)
+      setPresetBindModel(Boolean(preset.llm_options))
+    } else {
+      setPresetEditingId(null)
+      setPresetName('')
+      setPresetIntent('edit')
+      setPresetPrompt(prompt.trim())
+      setPresetBindModel(false)
+    }
+    setPresetModalOpen(true)
+  }
+
+  const handleSavePreset = () => {
+    const name = presetName.trim()
+    const content = presetPrompt.trim()
+    if (!name) {
+      message.warning('请输入模板名称')
+      return
+    }
+    if (!content) {
+      message.warning('模板内容不能为空')
+      return
+    }
+    const existingIndexById = presetEditingId
+      ? customPromptPresets.findIndex((item) => item.id === presetEditingId)
+      : -1
+    const existingIndexByName = customPromptPresets.findIndex((item) => item.label === name)
+    const existingIndex = existingIndexById >= 0 ? existingIndexById : existingIndexByName
+    const targetId =
+      existingIndexById >= 0 && presetEditingId
+        ? presetEditingId
+        : existingIndexByName >= 0
+          ? customPromptPresets[existingIndexByName].id
+          : generateId()
+    const existingItem =
+      existingIndex >= 0 ? customPromptPresets[existingIndex] : undefined
+    const payload: CustomPromptPreset = {
+      id: targetId,
+      label: name,
+      description: '自定义模板',
+      prompt: content,
+      intent: presetIntent,
+      llm_options: presetBindModel ? llmOptionsConfig : undefined,
+      pinned: existingItem?.pinned,
+    }
+    const next = [...customPromptPresets]
+    if (existingIndex >= 0) {
+      next[existingIndex] = payload
+      message.success('已更新同名模板')
+    } else {
+      next.push(payload)
+      message.success('模板已保存')
+    }
+    persistCustomPromptPresets(next)
+    setPresetModalOpen(false)
+    setPresetEditingId(null)
+    setPresetBindModel(false)
+  }
+
+  const handleDeletePreset = (id: string) => {
+    const next = customPromptPresets.filter((item) => item.id !== id)
+    persistCustomPromptPresets(next)
+    message.success('已删除模板')
+    if (presetEditingId === id) {
+      setPresetModalOpen(false)
+      setPresetEditingId(null)
+      setPresetBindModel(false)
+    }
+  }
+
+  const handleTogglePresetPin = (id: string) => {
+    const next = customPromptPresets.map((item) =>
+      item.id === id ? { ...item, pinned: !item.pinned } : item,
+    )
+    persistCustomPromptPresets(next)
+  }
+
+  const handleBindSession = async (clear?: boolean) => {
+    if (!snap.workspaceId) {
+      message.warning('请选择工作区')
+      return
+    }
+    const sessionId = clear ? '' : sessionBindValue.trim()
+    if (!clear && !sessionId) {
+      message.warning('请输入 Session ID')
+      return
+    }
+    setSessionBindLoading(true)
+    try {
+      const detail = await bindWorkspaceSession({
+        workspaceId: snap.workspaceId,
+        sessionId: sessionId || null,
+      })
+      latexAgentActions.setWorkspaceConfig(detail.config)
+      setSessionBindValue(detail.config?.session_id || '')
+      message.success(clear ? '已解绑会话' : '已绑定会话')
+    } catch (error) {
+      message.error('绑定会话失败')
+    } finally {
+      setSessionBindLoading(false)
+    }
+  }
+
+  const handleUndoLastApply = async () => {
+    if (!snap.workspaceId) {
+      message.warning('请选择工作区')
+      return
+    }
+    if (!lastOperationId) {
+      message.info('暂无可撤销的修改')
+      return
+    }
+    setUndoingLastApply(true)
+    try {
+      const result = await revertOperation({
+        workspaceId: snap.workspaceId,
+        operationId: lastOperationId,
+      })
+      const revertedFiles = result.reverted_files || []
+      for (const filePath of revertedFiles) {
+        if (snap.openedFiles.includes(filePath)) {
+          await openFile(filePath, true)
+        }
+      }
+      if (result.deleted_files?.length) {
+        await loadWorkspaceFiles(snap.workspaceId, false)
+      }
+      const affectedCount = (result.reverted_files?.length || 0) + (result.deleted_files?.length || 0)
+      if (affectedCount) {
+        message.success(`已撤销 ${affectedCount} 个文件的修改`)
+      } else {
+        message.info('未检测到需要撤销的文件')
+      }
+      setLastOperationId(null)
+    } catch (error) {
+      message.error(`撤销失败：${getErrorMessage(error)}`)
+    } finally {
+      setUndoingLastApply(false)
+    }
+  }
+
+  const loadOperationHistory = useCallback(async () => {
+    if (!snap.workspaceId) return
+    setOperationHistoryLoading(true)
+    try {
+      const data = await listOperations({ workspaceId: snap.workspaceId })
+      setOperationHistory(Array.isArray(data) ? data : [])
+    } catch (error) {
+      message.error('加载操作历史失败')
+    } finally {
+      setOperationHistoryLoading(false)
+    }
+  }, [snap.workspaceId])
+
+  const refreshSystemStats = useCallback(
+    async (silent?: boolean) => {
+      if (!snap.workspaceId) return
+      if (!silent) {
+        setSystemStatsLoading(true)
+      }
+      try {
+        const [metrics, health] = await Promise.all([
+          fetchMetricsSummary(),
+          fetchLlmHealth(),
+        ])
+        setMetricsSummary(metrics)
+        setLlmHealth(health)
+      } catch (error) {
+        if (!silent) {
+          message.error('加载运行统计失败')
+        }
+      } finally {
+        setSystemStatsLoading(false)
+      }
+    },
+    [snap.workspaceId],
+  )
+
+  useEffect(() => {
+    if (!operationHistoryOpen) return
+    loadOperationHistory()
+  }, [operationHistoryOpen, loadOperationHistory])
+
+  useEffect(() => {
+    if (!snap.workspaceId) return
+    refreshSystemStats(true)
+  }, [snap.workspaceId, refreshSystemStats])
+
+  useEffect(() => {
+    if (!systemStatusOpen) return
+    refreshSystemStats()
+  }, [systemStatusOpen, refreshSystemStats])
+
+  const refreshLineChanges = useCallback(() => {
+    if (!diffEditorRef.current) return
+    const changes = diffEditorRef.current.getLineChanges?.() || []
+    setLineChanges(changes)
+    setAcceptedLineChanges(new Set())
+  }, [])
+
+  const loadDiffContent = useCallback(
+    async (diff: LatexAgentAPI.FileDiff | undefined) => {
+      if (!diff) {
+        setResolvedOriginal('')
+        setResolvedModified('')
+        setLineChanges([])
+        return
+      }
+      if (!snap.workspaceId) return
+      const fallbackOriginal = diff.original_content || ''
+      const fallbackModified = diff.modified_content || ''
+
+      if (!diffOperationId || !diff.file_path) {
+        setResolvedOriginal(fallbackOriginal)
+        setResolvedModified(fallbackModified)
+        return
+      }
+
+      setDiffContentLoading(true)
+      try {
+        let originalContent = fallbackOriginal
+        try {
+          const snapshot = await fetchOperationSnapshotFile({
+            workspaceId: snap.workspaceId,
+            operationId: diffOperationId,
+            filePath: diff.file_path,
+            version: 'before',
+          })
+          originalContent = snapshot?.content ?? ''
+        } catch (error) {
+          originalContent = fallbackOriginal
+        }
+
+        let modifiedContent = fallbackModified
+        try {
+          const current = await fetchFileContent({
+            workspaceId: snap.workspaceId,
+            path: diff.file_path,
+          })
+          modifiedContent = current?.content ?? fallbackModified
+        } catch (error) {
+          modifiedContent = fallbackModified
+        }
+
+        setResolvedOriginal(originalContent)
+        setResolvedModified(modifiedContent)
+      } finally {
+        setDiffContentLoading(false)
+      }
+    },
+    [diffOperationId, snap.workspaceId],
+  )
+
+  useEffect(() => {
+    loadDiffContent(allFileDiffs[currentDiffIndex])
+  }, [allFileDiffs, currentDiffIndex, loadDiffContent])
+
+  useEffect(() => {
+    if (!resolvedOriginal && !resolvedModified) return
+    requestAnimationFrame(() => {
+      refreshLineChanges()
+    })
+  }, [resolvedOriginal, resolvedModified, refreshLineChanges])
+
+  const handleRevertOperation = async (operationId: string) => {
+    if (!snap.workspaceId) {
+      message.warning('请选择工作区')
+      return
+    }
+    setRevertingOperationId(operationId)
+    try {
+      const result = await revertOperation({
+        workspaceId: snap.workspaceId,
+        operationId,
+      })
+      const revertedFiles = result.reverted_files || []
+      for (const filePath of revertedFiles) {
+        if (snap.openedFiles.includes(filePath)) {
+          await openFile(filePath, true)
+        }
+      }
+      if (result.deleted_files?.length) {
+        await loadWorkspaceFiles(snap.workspaceId, false)
+      }
+      const affectedCount = (result.reverted_files?.length || 0) + (result.deleted_files?.length || 0)
+      if (affectedCount) {
+        message.success(`已回滚 ${affectedCount} 个文件`)
+      } else {
+        message.info('未检测到可回滚的文件')
+      }
+      if (lastOperationId === operationId) {
+        setLastOperationId(null)
+      }
+      await loadOperationHistory()
+    } catch (error) {
+      message.error(`回滚失败：${getErrorMessage(error)}`)
+    } finally {
+      setRevertingOperationId(null)
+    }
+  }
+
+  const handleFinalizeDiffs = async () => {
+    if (!snap.workspaceId) {
+      message.warning('请选择工作区')
+      return
+    }
+    if (!diffOperationId) {
+      message.error('缺少操作 ID，无法回滚')
+      return
+    }
+    const rejectedFiles = allFileDiffs
+      .filter((_, index) => !acceptedDiffs.has(index))
+      .map((diff) => diff.file_path)
+      .filter(Boolean)
+
+    if (!rejectedFiles.length) {
+      setDiffModalOpen(false)
+      setAllFileDiffs([])
+      setCurrentDiffIndex(0)
+      setAcceptedDiffs(new Set())
+      setDiffOperationId(null)
+      message.success('已保留全部修改')
+      return
+    }
+
+    setDiffReverting(true)
+    try {
+      const result = await revertOperation({
+        workspaceId: snap.workspaceId,
+        operationId: diffOperationId,
+        files: rejectedFiles,
+      })
+      const revertedFiles = result.reverted_files || []
+      for (const filePath of revertedFiles) {
+        if (snap.openedFiles.includes(filePath)) {
+          await openFile(filePath, true)
+        }
+      }
+      if (result.deleted_files?.length) {
+        await loadWorkspaceFiles(snap.workspaceId, false)
+      }
+      const affectedCount = (result.reverted_files?.length || 0) + (result.deleted_files?.length || 0)
+      message.success(`已撤销 ${affectedCount} 个文件的修改`)
+      setDiffModalOpen(false)
+      setAllFileDiffs([])
+      setCurrentDiffIndex(0)
+      setAcceptedDiffs(new Set())
+      setDiffOperationId(null)
+    } catch (error) {
+      message.error(`撤销未接受修改失败：${getErrorMessage(error)}`)
+    } finally {
+      setDiffReverting(false)
+    }
+  }
+
+  const handleRejectCurrentDiff = async () => {
+    if (!snap.workspaceId) {
+      message.warning('请选择工作区')
+      return
+    }
+    const target = allFileDiffs[currentDiffIndex]
+    if (!target?.file_path) {
+      message.warning('未找到当前文件')
+      return
+    }
+    if (!diffOperationId) {
+      message.error('缺少操作 ID，无法回滚')
+      return
+    }
+    if (diffReverting) return
+    setDiffReverting(true)
+    try {
+      const result = await revertOperation({
+        workspaceId: snap.workspaceId,
+        operationId: diffOperationId,
+        files: [target.file_path],
+      })
+      const revertedFiles = result.reverted_files || []
+      for (const filePath of revertedFiles) {
+        if (snap.openedFiles.includes(filePath)) {
+          await openFile(filePath, true)
+        }
+      }
+      if (result.deleted_files?.length) {
+        await loadWorkspaceFiles(snap.workspaceId, false)
+      }
+      const affectedCount = (result.reverted_files?.length || 0) + (result.deleted_files?.length || 0)
+      message.success(affectedCount ? `已回滚 ${affectedCount} 个文件` : '已回滚该文件')
+
+      const nextDiffs = allFileDiffs.filter((_, index) => index !== currentDiffIndex)
+      const nextAccepted = new Set<number>()
+      acceptedDiffs.forEach((index) => {
+        if (index === currentDiffIndex) return
+        nextAccepted.add(index > currentDiffIndex ? index - 1 : index)
+      })
+      if (!nextDiffs.length) {
+        setDiffModalOpen(false)
+        setAllFileDiffs([])
+        setCurrentDiffIndex(0)
+        setAcceptedDiffs(new Set())
+        setDiffOperationId(null)
+      } else {
+        setAllFileDiffs(nextDiffs)
+        setAcceptedDiffs(nextAccepted)
+        setCurrentDiffIndex(Math.min(currentDiffIndex, nextDiffs.length - 1))
+      }
+    } catch (error) {
+      message.error(`回滚失败：${getErrorMessage(error)}`)
+    } finally {
+      setDiffReverting(false)
+    }
+  }
+
+  const handleKeepCurrentDiff = () => {
+    const nextDiffs = allFileDiffs.filter((_, index) => index !== currentDiffIndex)
+    const nextAccepted = new Set<number>()
+    acceptedDiffs.forEach((index) => {
+      if (index === currentDiffIndex) return
+      nextAccepted.add(index > currentDiffIndex ? index - 1 : index)
+    })
+    if (!nextDiffs.length) {
+      setDiffModalOpen(false)
+      setAllFileDiffs([])
+      setCurrentDiffIndex(0)
+      setAcceptedDiffs(new Set())
+      setDiffOperationId(null)
+    } else {
+      setAllFileDiffs(nextDiffs)
+      setAcceptedDiffs(nextAccepted)
+      setCurrentDiffIndex(Math.min(currentDiffIndex, nextDiffs.length - 1))
+    }
+  }
+
+  const handleAcceptLineChange = (changeIndex: number) => {
+    setAcceptedLineChanges((prev) => {
+      const next = new Set(prev)
+      next.add(changeIndex)
+      return next
+    })
+  }
+
+  const applyLineChangeRevert = (
+    change: any,
+    originalText: string,
+    modifiedText: string,
+  ) => {
+    const originalLines = originalText.split('\n')
+    const modifiedLines = modifiedText.split('\n')
+    const oStart = Number(change?.originalStartLineNumber || 0)
+    const oEnd = Number(change?.originalEndLineNumber || 0)
+    const mStart = Number(change?.modifiedStartLineNumber || 0)
+    const mEnd = Number(change?.modifiedEndLineNumber || 0)
+
+    const hasOriginal = oStart > 0 || oEnd > 0
+    const hasModified = mStart > 0 || mEnd > 0
+    const originalSlice = hasOriginal ? originalLines.slice(Math.max(oStart - 1, 0), oEnd) : []
+
+    if (!hasOriginal && hasModified) {
+      // 插入：删除新增内容
+      const start = Math.max(mStart - 1, 0)
+      const count = Math.max(mEnd - mStart + 1, 0)
+      modifiedLines.splice(start, count)
+    } else if (hasOriginal && !hasModified) {
+      // 删除：插回原始内容
+      const insertPos = Math.max((mStart || oStart) - 1, 0)
+      modifiedLines.splice(insertPos, 0, ...originalSlice)
+    } else {
+      // 替换
+      const start = Math.max(mStart - 1, 0)
+      const count = Math.max(mEnd - mStart + 1, 0)
+      modifiedLines.splice(start, count, ...originalSlice)
+    }
+
+    return modifiedLines.join('\n')
+  }
+
+  const handleRejectLineChange = async (changeIndex: number) => {
+    if (!snap.workspaceId) {
+      message.warning('请选择工作区')
+      return
+    }
+    const diff = allFileDiffs[currentDiffIndex]
+    if (!diff?.file_path) {
+      message.warning('未找到当前文件')
+      return
+    }
+    const change = lineChanges[changeIndex]
+    if (!change) {
+      message.warning('未找到该修改片段')
+      return
+    }
+    if (diffContentLoading) return
+
+    setDiffReverting(true)
+    try {
+      const nextContent = applyLineChangeRevert(change, resolvedOriginal, resolvedModified)
+      await updateFileContent({
+        workspaceId: snap.workspaceId,
+        path: diff.file_path,
+        content: nextContent,
+      })
+      setResolvedModified(nextContent)
+      setAllFileDiffs((prev) =>
+        prev.map((item, idx) =>
+          idx === currentDiffIndex
+            ? { ...item, modified_content: nextContent, is_truncated: false }
+            : item,
+        ),
+      )
+      message.success('已回滚该处修改')
+      requestAnimationFrame(() => {
+        refreshLineChanges()
+      })
+    } catch (error) {
+      message.error(`回滚失败：${getErrorMessage(error)}`)
+    } finally {
+      setDiffReverting(false)
+    }
+  }
+
+  const handleExportPresets = () => {
+    if (!customPromptPresets.length) {
+      message.warning('暂无可导出的自定义模板')
+      return
+    }
+    downloadJson('doc-studio-presets.json', {
+      exported_at: new Date().toISOString(),
+      presets: customPromptPresets,
+    })
+  }
+
+  const handleImportPresets = () => {
+    presetFileInputRef.current?.click()
+  }
+
+  const handlePresetFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+    try {
+      const text = await file.text()
+      const parsed = JSON.parse(text)
+      const rawPresets = Array.isArray(parsed) ? parsed : parsed?.presets
+      if (!Array.isArray(rawPresets)) {
+        message.error('模板文件格式无效')
+        return
+      }
+      const allowedIntents: PromptIntent[] = ['edit', 'suggest', 'qa', 'citation', 'custom']
+      const sanitized: CustomPromptPreset[] = rawPresets
+        .filter((item: any) => item && typeof item.label === 'string' && typeof item.prompt === 'string')
+        .map((item: any) => ({
+          id: item.id || generateId(),
+          label: item.label,
+          description: item.description || '自定义模板',
+          prompt: item.prompt,
+          intent: allowedIntents.includes(item.intent) ? item.intent : 'custom',
+          llm_options: item.llm_options,
+          pinned: Boolean(item.pinned),
+        }))
+      if (!sanitized.length) {
+        message.warning('未找到可导入的模板')
+        return
+      }
+      const merged = [...customPromptPresets]
+      const byId = new Map(merged.map((item) => [item.id, item]))
+      const byLabel = new Map(merged.map((item) => [item.label, item]))
+      let added = 0
+      let updated = 0
+      sanitized.forEach((item) => {
+        const existing = byId.get(item.id) || byLabel.get(item.label)
+        if (existing) {
+          Object.assign(existing, item)
+          updated += 1
+        } else {
+          merged.push(item)
+          added += 1
+        }
+      })
+      persistCustomPromptPresets(merged)
+      message.success(`模板导入完成：新增 ${added} 条，更新 ${updated} 条`)
+    } catch (error) {
+      console.warn('Failed to import presets', error)
+      message.error('模板导入失败')
+    } finally {
+      event.target.value = ''
+    }
+  }
+
+  const closeAsyncStream = useCallback(() => {
+    if (asyncStreamRef.current) {
+      asyncStreamRef.current.close()
+      asyncStreamRef.current = null
+    }
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      closeAsyncStream()
+    }
+  }, [closeAsyncStream])
+
+  useEffect(() => {
+    if (!asyncMode) {
+      closeAsyncStream()
+      setAsyncRunStatus('idle')
+    }
+  }, [asyncMode, closeAsyncStream])
 
   const pushChatMessage = (payload: Omit<LatexChatMessage, 'id' | 'createdAt'>) => {
     latexAgentActions.appendChatMessage(payload)
   }
+
+  const handleAgentResponse = useCallback(
+    async (response: LatexAgentAPI.AgentResponse, traceId: string) => {
+      const changeCount = response.changes?.length || 0
+      const operationId = response.operation_id || null
+      const hasChanges = Boolean(
+        (response.file_diffs && response.file_diffs.length > 0) ||
+          (response.changes && response.changes.length > 0),
+      )
+      pushChatMessage({
+        role: 'agent',
+        content: response.execution_history?.[response.execution_history.length - 1]?.content
+          ? response.execution_history[response.execution_history.length - 1].content
+          : `完成，检测到 ${changeCount} 处变更`,
+        meta: {
+          changes: response.changes,
+          traceId: response.trace_id || traceId,
+          operationId,
+        },
+      })
+      latexAgentActions.setExecutionHistory(response.execution_history)
+      latexAgentActions.setAgentStatus({
+        intentType: response.intent_type,
+        intentConfidence: response.intent_confidence ?? undefined,
+        plan: response.plan || undefined,
+        warnings: response.warnings || [],
+        traceId: response.trace_id || traceId,
+        operationId,
+      })
+      if (operationId && hasChanges) {
+        setLastOperationId(operationId)
+      }
+      if (response.file_diffs && response.file_diffs.length > 0) {
+        setAllFileDiffs(response.file_diffs)
+        setCurrentDiffIndex(0)
+        setAcceptedDiffs(new Set(response.file_diffs.map((_, index) => index)))
+        setDiffOperationId(operationId)
+        setDiffModalOpen(true)
+      } else if (response.changes && response.changes.length > 0) {
+        const affectedFiles = Array.from(
+          new Set(
+            (response.changes || [])
+              .map((change) => change.file)
+              .filter(Boolean) as string[],
+          ),
+        )
+        for (const filePath of affectedFiles) {
+          await openFile(filePath)
+        }
+        message.info(`已应用 ${changeCount} 处修改`)
+      }
+      refreshSystemStats(true)
+      setChatLoading(false)
+    },
+    [openFile, pushChatMessage, refreshSystemStats],
+  )
 
   const handleFeedbackSubmit = useCallback(
     async (messageId: string, traceId: string | undefined, rating: LatexAgentAPI.AgentFeedbackRating) => {
@@ -1606,59 +2868,152 @@ const LatexEditorPage = () => {
       latexAgentActions.setAgentStatus({ intentType: undefined, plan: undefined, warnings: [] })
       const knowledgeBaseId = selectedKnowledgeBaseId ?? undefined
       const knowledgeBaseName = knowledgeBaseId ? selectedKnowledgeBase?.name : undefined
-      const response = await runAgentTask({
-        workspaceId: snap.workspaceId,
-        userIntent: finalPrompt,
-        context: Object.keys(contextPayload).length ? contextPayload : undefined,
-        knowledgeBaseId,
-        knowledgeBaseName,
-      }, { headers: { 'X-Trace-Id': traceId } })
-      const changeCount = response.changes?.length || 0
-      pushChatMessage({
-        role: 'agent',
-        content: response.execution_history?.[response.execution_history.length - 1]?.content
-          ? response.execution_history[response.execution_history.length - 1].content
-          : `完成，检测到 ${changeCount} 处变更`,
-        meta: {
-          changes: response.changes,
-          traceId: response.trace_id || traceId,
-        },
-      })
-      latexAgentActions.setExecutionHistory(response.execution_history)
-      latexAgentActions.setAgentStatus({
-        intentType: response.intent_type,
-        intentConfidence: response.intent_confidence ?? undefined,
-        plan: response.plan || undefined,
-        warnings: response.warnings || [],
-        traceId: response.trace_id || traceId,
-      })
-      // 如果有文件修改，显示 Diff 预览而不是立即应用
-      if (response.file_diffs && response.file_diffs.length > 0) {
-        // 后端返回完整的 file_diffs
-        setAllFileDiffs(response.file_diffs)
-        setCurrentDiffIndex(0)
-        setAcceptedDiffs(new Set())
-        setDiffModalOpen(true)
-      } else if (response.changes && response.changes.length > 0) {
-        // 兼容：如果没有 file_diffs 但有 changes，直接刷新文件
-      const affectedFiles = Array.from(
-        new Set(
-          (response.changes || [])
-            .map((change) => change.file)
-            .filter(Boolean) as string[],
-        ),
-      )
-      for (const filePath of affectedFiles) {
-        await openFile(filePath)
+      if (asyncMode) {
+        closeAsyncStream()
+        setAsyncRunStatus('running')
+        const asyncResult = await runAgentTaskAsync(
+          {
+            workspaceId: snap.workspaceId,
+            userIntent: finalPrompt,
+            context: Object.keys(contextPayload).length ? contextPayload : undefined,
+            knowledgeBaseId,
+            knowledgeBaseName,
+            options: Object.keys(llmOptions).length ? llmOptions : undefined,
+          },
+          { headers: { 'X-Trace-Id': traceId } },
+        )
+        if (!asyncResult.runId) {
+          throw new Error('Failed to start async run')
         }
-        message.info(`已应用 ${changeCount} 处修改`)
+        setAsyncRunId(asyncResult.runId)
+        const url = getAgentAsyncEventsUrl(snap.workspaceId, asyncResult.runId)
+        const source = new EventSource(url)
+        asyncStreamRef.current = source
+
+        source.addEventListener('status', (event) => {
+          const payload = JSON.parse((event as MessageEvent<string>).data || '{}')
+          if (payload?.warning) {
+            message.warning(payload.warning)
+          }
+          if (payload.status === 'running') {
+            setAsyncRunStatus('running')
+          } else if (payload.status === 'succeeded') {
+            setAsyncRunStatus('succeeded')
+          } else if (payload.status === 'failed') {
+            setAsyncRunStatus('failed')
+          }
+        })
+        source.addEventListener('plan', (event) => {
+          try {
+            const payload = JSON.parse((event as MessageEvent<string>).data || '{}')
+            if (payload?.steps) {
+              const current = latexAgentState.agentStatus
+              latexAgentActions.setAgentStatus({
+                intentType: current.intentType,
+                intentConfidence: current.intentConfidence,
+                warnings: current.warnings,
+                traceId: current.traceId,
+                operationId: current.operationId,
+                plan: payload,
+              })
+            }
+          } catch (error) {
+            console.warn('Failed to parse plan event', error)
+          }
+        })
+        source.addEventListener('step', (event) => {
+          try {
+            const payload = JSON.parse((event as MessageEvent<string>).data || '{}')
+            if (payload?.step) {
+              const next = [...latexAgentState.executionHistory, payload.step]
+              latexAgentActions.setExecutionHistory(next)
+            }
+            if (payload?.plan) {
+              const current = latexAgentState.agentStatus
+              latexAgentActions.setAgentStatus({
+                intentType: current.intentType,
+                intentConfidence: current.intentConfidence,
+                warnings: current.warnings,
+                traceId: current.traceId,
+                operationId: current.operationId,
+                plan: payload.plan,
+              })
+            }
+          } catch (error) {
+            console.warn('Failed to parse step event', error)
+          }
+        })
+        source.addEventListener('finish', (event) => {
+          try {
+            const payload = JSON.parse((event as MessageEvent<string>).data || '{}')
+            if (payload?.plan) {
+              const current = latexAgentState.agentStatus
+              latexAgentActions.setAgentStatus({
+                intentType: current.intentType,
+                intentConfidence: current.intentConfidence,
+                warnings: current.warnings,
+                traceId: current.traceId,
+                operationId: current.operationId,
+                plan: payload.plan,
+              })
+            }
+          } catch (error) {
+            console.warn('Failed to parse finish event', error)
+          }
+        })
+        source.addEventListener('result', async (event) => {
+          try {
+            const payload = JSON.parse((event as MessageEvent<string>).data || '{}')
+            if (payload?.result) {
+              await handleAgentResponse(payload.result, traceId)
+            }
+            setAsyncRunStatus('succeeded')
+          } catch (error) {
+            message.error('解析异步结果失败')
+          } finally {
+            closeAsyncStream()
+          }
+        })
+        source.addEventListener('run_error', (event) => {
+          try {
+            const payload = JSON.parse((event as MessageEvent<string>).data || '{}')
+            message.error(payload?.error || '异步任务失败')
+          } catch (error) {
+            message.error('异步任务失败')
+          } finally {
+            setAsyncRunStatus('failed')
+            setChatLoading(false)
+            closeAsyncStream()
+          }
+        })
+        source.onerror = () => {
+          setAsyncRunStatus('failed')
+          setChatLoading(false)
+          closeAsyncStream()
+        }
+        return
       }
+
+      const response = await runAgentTask(
+        {
+          workspaceId: snap.workspaceId,
+          userIntent: finalPrompt,
+          context: Object.keys(contextPayload).length ? contextPayload : undefined,
+          knowledgeBaseId,
+          knowledgeBaseName,
+          options: Object.keys(llmOptions).length ? llmOptions : undefined,
+        },
+        { headers: { 'X-Trace-Id': traceId } },
+      )
+      await handleAgentResponse(response, traceId)
     } catch (error) {
       message.error(getErrorMessage(error))
     } finally {
       setPrompt('')
       setSelections([])
-      setChatLoading(false)
+      if (!asyncMode) {
+        setChatLoading(false)
+      }
     }
   }
 
@@ -1716,6 +3071,82 @@ const LatexEditorPage = () => {
                 onClick={loadKnowledgeBases}
               />
             </div>
+            <div className="latex-editor__session">
+              <Input
+                value={sessionBindValue}
+                className="latex-editor__session-input"
+                placeholder="绑定 Session ID（可选）"
+                onChange={(event) => setSessionBindValue(event.target.value)}
+              />
+              <Space size="small" className="latex-editor__session-actions">
+                <Button
+                  size="small"
+                  type="primary"
+                  ghost
+                  loading={sessionBindLoading}
+                  onClick={() => handleBindSession(false)}
+                >
+                  绑定
+                </Button>
+                <Button
+                  size="small"
+                  loading={sessionBindLoading}
+                  onClick={() => handleBindSession(true)}
+                >
+                  解绑
+                </Button>
+              </Space>
+            </div>
+            <div className="latex-editor__web-search">
+              <Switch
+                checked={webSearchEnabled}
+                loading={webSearchSaving}
+                onChange={(value) => setWebSearchEnabled(value)}
+              />
+              <Text type="secondary">Web 搜索</Text>
+              <Tooltip title="需要配置 WEB_SEARCH_API_KEY 才能生效">
+                <Tag color={webSearchEnabled ? 'green' : 'default'}>
+                  {webSearchEnabled ? '已启用' : '未启用'}
+                </Tag>
+              </Tooltip>
+            </div>
+            <div className="latex-editor__model">
+              <Select
+                value={llmProvider}
+                className="latex-editor__model-select"
+                placeholder="模型提供方"
+                options={[
+                  { label: '自动选择', value: 'auto' },
+                  { label: 'DashScope', value: 'dashscope' },
+                  { label: 'OpenAI', value: 'openai' },
+                ]}
+                onChange={(value) => setLlmProvider(value)}
+              />
+              <Input
+                value={llmModel}
+                className="latex-editor__model-input"
+                placeholder="模型名称（留空=默认）"
+                onChange={(event) => setLlmModel(event.target.value)}
+              />
+            </div>
+            <div className="latex-editor__model-advanced">
+              <InputNumber
+                value={llmTemperature ?? undefined}
+                min={0}
+                max={2}
+                step={0.1}
+                placeholder="温度(可选)"
+                onChange={(value) => setLlmTemperature(typeof value === 'number' ? value : null)}
+              />
+              <InputNumber
+                value={llmMaxTokens ?? undefined}
+                min={128}
+                max={16384}
+                step={256}
+                placeholder="Max tokens(可选)"
+                onChange={(value) => setLlmMaxTokens(typeof value === 'number' ? value : null)}
+              />
+            </div>
             <div className="latex-editor__file-actions">
               <Button
                 icon={<FileAddOutlined />}
@@ -1759,6 +3190,13 @@ const LatexEditorPage = () => {
                 type="file"
                 style={{ display: 'none' }}
                 onChange={handleFileInputChange}
+              />
+              <input
+                ref={presetFileInputRef}
+                type="file"
+                accept="application/json"
+                style={{ display: 'none' }}
+                onChange={handlePresetFileChange}
               />
             </div>
             <div className="latex-editor__tree-wrapper">
@@ -1823,14 +3261,29 @@ const LatexEditorPage = () => {
                   保存
                 </Button>
                 <Button
-                  type="primary"
-                  ghost
-                  icon={<PlayCircleOutlined />}
-                  onClick={handleCompile}
-                  disabled={!snap.workspaceId}
+                  icon={<SyncOutlined />}
+                  onClick={handleUndoLastApply}
+                  disabled={!lastOperationId || undoingLastApply}
                 >
-                  编译
+                  撤销上次操作
                 </Button>
+                <Button icon={<HistoryOutlined />} onClick={() => setOperationHistoryOpen(true)}>
+                  操作历史
+                </Button>
+                <Button icon={<BarChartOutlined />} onClick={() => setSystemStatusOpen(true)}>
+                  系统状态
+                </Button>
+                {isLatexWorkspace && (
+                  <Button
+                    type="primary"
+                    ghost
+                    icon={<PlayCircleOutlined />}
+                    onClick={handleCompile}
+                    disabled={!snap.workspaceId}
+                  >
+                    编译
+                  </Button>
+                )}
               </Space>
             </Header>
             <Content className="latex-editor__content">
@@ -1859,7 +3312,7 @@ const LatexEditorPage = () => {
                       key={snap.activeFilePath}
                       theme="vs-dark"
                       height="100%"
-                      language="latex"
+                      language={resolveEditorLanguage(snap.activeFilePath)}
                       loading={<Spin />}
                       value={currentFileBuffer?.content || ''}
                       onChange={handleEditorChange}
@@ -1907,12 +3360,14 @@ const LatexEditorPage = () => {
                 >
                   执行历史
                 </button>
-                <button
-                  className={`latex-editor__custom-tab ${rightTab === 'compile' ? 'latex-editor__custom-tab--active' : ''}`}
-                  onClick={() => setRightTab('compile')}
-                >
-                  编译结果
-                </button>
+                {isLatexWorkspace && (
+                  <button
+                    className={`latex-editor__custom-tab ${rightTab === 'compile' ? 'latex-editor__custom-tab--active' : ''}`}
+                    onClick={() => setRightTab('compile')}
+                  >
+                    编译结果
+                  </button>
+                )}
               </div>
               <div className="latex-editor__custom-tabs-content">
                 {/* Chat Panel */}
@@ -1976,37 +3431,142 @@ const LatexEditorPage = () => {
                       )}
                       <div className="latex-editor__mode-switch">
                         <Text type="secondary" style={{ fontSize: 13 }}>不知道怎么问？试试这些示例：</Text>
-                        <Space wrap size={[8, 8]} className="latex-editor__quick-prompts">
-                          {quickPromptPresets.map((preset) => {
-                            const isEdit = preset.intent === 'edit'
-                            return (
-                              <Tooltip 
-                                title={
-                                  <div>
-                                    <div style={{ fontWeight: 500 }}>{preset.description}</div>
-                                    <div style={{ fontSize: '11px', marginTop: 4, opacity: 0.85 }}>
-                                      {isEdit ? '⚠️ 会直接修改文件' : '💡 只给建议，不修改文件'}
-                                    </div>
-                                  </div>
-                                } 
-                                key={preset.label}
-                              >
-                                <Button
-                                  size="small"
-                                  type={isEdit ? 'primary' : 'default'}
-                                  onClick={() => handleQuickPromptApply(preset.prompt)}
-                                  style={{ 
-                                    fontSize: 13,
-                                    height: 28,
-                                    padding: '0 12px',
-                                  }}
-                                >
-                                  {preset.label}
-                                </Button>
-                              </Tooltip>
-                            )
-                          })}
+                        <Space size="small" wrap>
+                          <Switch checked={asyncMode} onChange={setAsyncMode} />
+                          <Text type="secondary">异步模式（长任务可恢复）</Text>
+                          {asyncRunStatus !== 'idle' && (
+                            <Tag color={asyncRunStatus === 'running' ? 'blue' : asyncRunStatus === 'failed' ? 'red' : 'green'}>
+                              {asyncRunStatus === 'running' ? '进行中' : asyncRunStatus === 'failed' ? '失败' : '完成'}
+                            </Tag>
+                          )}
+                          {asyncRunId && (
+                            <Tag color="default">Run: {asyncRunId.slice(0, 8)}</Tag>
+                          )}
                         </Space>
+                        <Segmented
+                          size="small"
+                          value={presetFilter}
+                          onChange={(value) => setPresetFilter(value as 'all' | PromptIntent)}
+                          options={[
+                            { label: '全部', value: 'all' },
+                            { label: '编辑', value: 'edit' },
+                            { label: '建议', value: 'suggest' },
+                            { label: '问答', value: 'qa' },
+                            { label: '引用', value: 'citation' },
+                            { label: '自定义', value: 'custom' },
+                          ]}
+                        />
+                        <Space wrap size={[8, 8]} className="latex-editor__preset-actions">
+                          <Input
+                            allowClear
+                            value={presetSearch}
+                            placeholder="搜索模板"
+                            onChange={(event) => setPresetSearch(event.target.value)}
+                            style={{ width: 200 }}
+                          />
+                          <Button size="small" icon={<UploadOutlined />} onClick={handleImportPresets}>
+                            导入模板
+                          </Button>
+                          <Button
+                            size="small"
+                            icon={<DownloadOutlined />}
+                            disabled={!customPromptPresets.length}
+                            onClick={handleExportPresets}
+                          >
+                            导出模板
+                          </Button>
+                          <Text type="secondary" style={{ fontSize: 12 }}>
+                            共 {orderedPromptPresets.length} 个模板
+                          </Text>
+                        </Space>
+                        <div className="latex-editor__prompt-groups">
+                          {groupedPromptPresets.map((group) => (
+                            <div key={group.intent} className="latex-editor__prompt-group">
+                              <div className="latex-editor__prompt-group-title">
+                                <Text strong>{intentTagMap[group.intent]?.label || '模板'}</Text>
+                                <Tag>{group.items.length}</Tag>
+                              </div>
+                              <Space wrap size={[8, 8]} className="latex-editor__quick-prompts">
+                                {group.items.map((preset) => {
+                                  const isEdit = preset.intent === 'edit' || preset.intent === 'citation'
+                                  const tooltipText =
+                                    preset.description ||
+                                    (preset.isCustom ? '自定义模板' : '')
+                                  const contentWarning = isEdit
+                                    ? '⚠️ 会直接修改文件'
+                                    : '💡 只给建议，不修改文件'
+                                  const button = (
+                                    <Button
+                                      size="small"
+                                      type={isEdit ? 'primary' : 'default'}
+                                      onClick={() => handleQuickPromptApply(preset)}
+                                      style={{
+                                        fontSize: 13,
+                                        height: 28,
+                                        padding: '0 12px',
+                                      }}
+                                    >
+                                      {preset.label}
+                                    </Button>
+                                  )
+                                  return (
+                                    <span
+                                      key={preset.id || preset.label}
+                                      className="latex-editor__quick-prompt-item"
+                                    >
+                                      <Tooltip
+                                        title={
+                                          <div>
+                                            <div style={{ fontWeight: 500 }}>{tooltipText}</div>
+                                            <div style={{ fontSize: '11px', marginTop: 4, opacity: 0.85 }}>
+                                              {contentWarning}
+                                            </div>
+                                          </div>
+                                        }
+                                      >
+                                        {button}
+                                      </Tooltip>
+                                      <Tag color={intentTagMap[preset.intent]?.color || 'default'}>
+                                        {intentTagMap[preset.intent]?.label || '模板'}
+                                      </Tag>
+                                      {preset.isCustom && preset.id && (
+                                        <Button
+                                          size="small"
+                                          type={preset.pinned ? 'primary' : 'text'}
+                                          icon={preset.pinned ? <PushpinFilled /> : <PushpinOutlined />}
+                                          onClick={() => handleTogglePresetPin(preset.id!)}
+                                          className="latex-editor__quick-prompt-delete"
+                                        />
+                                      )}
+                                      {preset.isCustom && (
+                                        <Button
+                                          size="small"
+                                          type="text"
+                                          icon={<EditOutlined />}
+                                          onClick={() => handleOpenPresetModal(preset as CustomPromptPreset)}
+                                          className="latex-editor__quick-prompt-delete"
+                                        />
+                                      )}
+                                      {preset.isCustom && preset.id && (
+                                        <Popconfirm
+                                          title="确认删除该模板？"
+                                          onConfirm={() => handleDeletePreset(preset.id!)}
+                                        >
+                                          <Button
+                                            size="small"
+                                            type="text"
+                                            icon={<CloseOutlined />}
+                                            className="latex-editor__quick-prompt-delete"
+                                          />
+                                        </Popconfirm>
+                                      )}
+                                    </span>
+                                  )
+                                })}
+                              </Space>
+                            </div>
+                          ))}
+                        </div>
                       </div>
                       {(intentStatus || planTotalSteps > 0) && (
                         <div className="latex-editor__agent-status">
@@ -2028,6 +3588,9 @@ const LatexEditorPage = () => {
                             )}
                             {snap.agentStatus.traceId && (
                               <Tag color="default">Trace ID: {snap.agentStatus.traceId}</Tag>
+                            )}
+                            {snap.agentStatus.operationId && (
+                              <Tag color="default">Op: {snap.agentStatus.operationId.slice(0, 8)}</Tag>
                             )}
                           </div>
                           {planTotalSteps > 0 && (
@@ -2228,6 +3791,13 @@ const LatexEditorPage = () => {
                             引用片段 ({selections.length})
                           </Button>
                           <Button
+                            icon={<SaveOutlined />}
+                            disabled={!prompt.trim()}
+                            onClick={() => handleOpenPresetModal()}
+                          >
+                            保存模板
+                          </Button>
+                          <Button
                             type="primary"
                             icon={<SendOutlined />}
                             onClick={handleSend}
@@ -2251,7 +3821,8 @@ const LatexEditorPage = () => {
                       )}
                     </div>
                 {/* Compile Panel */}
-                <div className="latex-editor__compile" style={{ display: rightTab === 'compile' ? 'block' : 'none' }}>
+                {isLatexWorkspace && (
+                  <div className="latex-editor__compile" style={{ display: rightTab === 'compile' ? 'block' : 'none' }}>
                       {snap.compileResult ? (
                         <>
                           <Text type={snap.compileResult.success ? 'success' : 'danger'}>
@@ -2457,6 +4028,7 @@ const LatexEditorPage = () => {
                         />
                       )}
                     </div>
+                )}
               </div>
             </div>
           </Sider>
@@ -2484,10 +4056,23 @@ const LatexEditorPage = () => {
         title="新建工作区"
         open={workspaceModalOpen}
         onOk={handleCreateWorkspace}
-        onCancel={() => setWorkspaceModalOpen(false)}
+        onCancel={() => {
+          setWorkspaceModalOpen(false)
+          setNewWorkspaceType('latex')
+        }}
         confirmLoading={workspaceSubmitting}
       >
         <Form layout="vertical">
+          <Form.Item label="工作区类型">
+            <Select
+              value={newWorkspaceType}
+              onChange={(value) => setNewWorkspaceType(value)}
+              options={[
+                { label: 'LaTeX 论文工作区', value: 'latex' },
+                { label: 'Markdown/学习笔记', value: 'markdown' },
+              ]}
+            />
+          </Form.Item>
           <Form.Item label="工作区名称">
             <Input
               placeholder="例如: paper-demo"
@@ -2523,6 +4108,59 @@ const LatexEditorPage = () => {
           )}
         </Form>
       </Modal>
+      <Modal
+        title={presetEditingId ? '编辑模板' : '保存模板'}
+        open={presetModalOpen}
+        onOk={handleSavePreset}
+        onCancel={() => setPresetModalOpen(false)}
+      >
+        <Form layout="vertical">
+          <Form.Item label="模板名称">
+            <Input
+              placeholder="例如：方法调研模板"
+              value={presetName}
+              onChange={(event) => setPresetName(event.target.value)}
+            />
+          </Form.Item>
+          <Form.Item label="模板类型">
+            <Select
+              value={presetIntent}
+              onChange={(value) => setPresetIntent(value)}
+              options={[
+                { label: '编辑/写作', value: 'edit' },
+                { label: '建议/评审', value: 'suggest' },
+                { label: '问答/解释', value: 'qa' },
+                { label: '引用/文献', value: 'citation' },
+              ]}
+            />
+          </Form.Item>
+          <Form.Item label="模板内容">
+            <Input.TextArea
+              rows={6}
+              value={presetPrompt}
+              onChange={(event) => setPresetPrompt(event.target.value)}
+            />
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              支持使用 @selection1、@selection2 引用选中片段
+            </Text>
+          </Form.Item>
+          <Form.Item label="绑定当前模型设置">
+            <Space align="center">
+              <Switch checked={presetBindModel} onChange={setPresetBindModel} />
+              <Text type="secondary">将当前模型/温度/Max tokens 写入模板</Text>
+            </Space>
+          </Form.Item>
+          {presetBindModel && (
+            <Form.Item label="当前模型配置">
+              <Text type="secondary">
+                {llmProvider === 'auto' ? '自动选择' : llmProvider} / {llmModel || '默认模型'}
+                {typeof llmTemperature === 'number' ? ` / temp=${llmTemperature}` : ''}
+                {typeof llmMaxTokens === 'number' ? ` / max=${llmMaxTokens}` : ''}
+              </Text>
+            </Form.Item>
+          )}
+        </Form>
+      </Modal>
 
       {/* Agent 修改预览 Modal */}
       <Modal
@@ -2540,16 +4178,22 @@ const LatexEditorPage = () => {
         }
         open={diffModalOpen}
         onCancel={() => {
-          // 关闭时检查是否有已接受的修改
-          if (acceptedDiffs.size > 0) {
+          if (acceptedDiffs.size < allFileDiffs.length) {
+            const rejectedCount = allFileDiffs.length - acceptedDiffs.size
             Modal.confirm({
-              title: '确认关闭？',
-              content: `您已接受 ${acceptedDiffs.size} 个文件的修改，关闭后将不保存这些修改。`,
+              title: '关闭预览？',
+              content: `你已拒绝或未确认 ${rejectedCount} 个文件的修改，关闭后这些修改仍会保留。是否撤销未接受的修改？`,
+              okText: '撤销未接受',
+              cancelText: '保留修改',
               onOk: () => {
+                handleFinalizeDiffs()
+              },
+              onCancel: () => {
                 setDiffModalOpen(false)
                 setAllFileDiffs([])
                 setCurrentDiffIndex(0)
                 setAcceptedDiffs(new Set())
+                setDiffOperationId(null)
               },
             })
           } else {
@@ -2557,6 +4201,7 @@ const LatexEditorPage = () => {
             setAllFileDiffs([])
             setCurrentDiffIndex(0)
             setAcceptedDiffs(new Set())
+            setDiffOperationId(null)
           }
         }}
         width="90%"
@@ -2580,104 +4225,26 @@ const LatexEditorPage = () => {
             <Space>
               <Button
                 icon={<CloseOutlined />}
-                onClick={() => {
-                  // 拒绝当前文件的修改
-                  const newAccepted = new Set(acceptedDiffs)
-                  newAccepted.delete(currentDiffIndex)
-                  setAcceptedDiffs(newAccepted)
-                  // 如果还有下一个文件，跳到下一个
-                  if (currentDiffIndex < allFileDiffs.length - 1) {
-                    setCurrentDiffIndex(currentDiffIndex + 1)
-                  } else if (currentDiffIndex > 0) {
-                    setCurrentDiffIndex(currentDiffIndex - 1)
-                  } else {
-                    // 如果只有一个文件且拒绝了，关闭 Modal
-                    setDiffModalOpen(false)
-                    setAllFileDiffs([])
-                    setCurrentDiffIndex(0)
-                    setAcceptedDiffs(new Set())
-                    message.info('已拒绝所有修改')
-                  }
-                }}
+                disabled={diffReverting}
+                onClick={handleRejectCurrentDiff}
               >
-                拒绝此文件
-              </Button>
-              <Button
-                type={acceptedDiffs.has(currentDiffIndex) ? 'default' : 'primary'}
-                icon={<CheckOutlined />}
-                onClick={() => {
-                  // 标记当前文件为已接受
-                  const newAccepted = new Set(acceptedDiffs)
-                  newAccepted.add(currentDiffIndex)
-                  setAcceptedDiffs(newAccepted)
-                  message.success(`已接受 ${allFileDiffs[currentDiffIndex].file_path} 的修改`)
-                  // 如果还有下一个文件，自动跳到下一个
-                  if (currentDiffIndex < allFileDiffs.length - 1) {
-                    setCurrentDiffIndex(currentDiffIndex + 1)
-                  }
-                }}
-              >
-                {acceptedDiffs.has(currentDiffIndex) ? '已接受' : '接受此文件'}
+                回滚此文件
               </Button>
               <Button
                 type="primary"
                 icon={<CheckOutlined />}
-                disabled={acceptedDiffs.size === 0}
-                onClick={async () => {
-                  // 应用所有已接受的修改
-                  const appliedFiles: string[] = []
-                  try {
-                    for (const index of Array.from(acceptedDiffs)) {
-                      const diff = allFileDiffs[index]
-                      if (diff) {
-                        let contentToSave = diff.modified_content
-                        
-                        // 如果是截断的预览，需要重新加载完整文件内容
-                        if (diff.is_truncated) {
-                          try {
-                            const fullContent = await fetchFileContent({
-                              workspaceId: snap.workspaceId,
-                              path: diff.file_path,
-                            })
-                            contentToSave = fullContent.content
-                          } catch (error) {
-                            message.warning(`无法加载完整文件 ${diff.file_path}，将使用预览内容`)
-                            // 继续使用预览内容
-                          }
-                        }
-                        
-                        // 调用 API 保存文件到服务器
-                        await updateFileContent({
-                          workspaceId: snap.workspaceId,
-                          path: diff.file_path,
-                          content: contentToSave,
-                        })
-                        // 更新本地状态
-                        latexAgentActions.updateFileContent(
-                          diff.file_path,
-                          contentToSave,
-                        )
-                        latexAgentActions.markFileSaved(diff.file_path)
-                        appliedFiles.push(diff.file_path)
-                      }
-                    }
-                    setDiffModalOpen(false)
-                    setAllFileDiffs([])
-                    setCurrentDiffIndex(0)
-                    setAcceptedDiffs(new Set())
-                    message.success(`已应用并保存 ${appliedFiles.length} 个文件的修改`)
-                    // 重新加载受影响的文件（确保显示最新内容）
-                    for (const filePath of appliedFiles) {
-                      if (snap.openedFiles.includes(filePath)) {
-                        await openFile(filePath, true)
-                      }
-                    }
-                  } catch (error) {
-                    message.error(`保存失败：${getErrorMessage(error)}`)
-                  }
-                }}
+                onClick={handleKeepCurrentDiff}
               >
-                应用已接受的修改 ({acceptedDiffs.size})
+                保留此文件
+              </Button>
+              <Button
+                type="primary"
+                icon={<CheckOutlined />}
+                loading={diffReverting}
+                disabled={diffReverting || allFileDiffs.length === acceptedDiffs.size}
+                onClick={handleFinalizeDiffs}
+              >
+                撤销未接受修改 ({allFileDiffs.length - acceptedDiffs.size})
               </Button>
             </Space>
           </Space>
@@ -2732,9 +4299,9 @@ const LatexEditorPage = () => {
                 key={currentDiffIndex}
                 height="100%"
                 theme="vs-dark"
-                language="latex"
-                original={allFileDiffs[currentDiffIndex].original_content}
-                modified={allFileDiffs[currentDiffIndex].modified_content}
+                language={resolveEditorLanguage(allFileDiffs[currentDiffIndex]?.file_path)}
+                original={resolvedOriginal || allFileDiffs[currentDiffIndex].original_content}
+                modified={resolvedModified || allFileDiffs[currentDiffIndex].modified_content}
                 options={{
                   readOnly: true,
                   renderSideBySide: diffViewMode === 'split',
@@ -2742,6 +4309,10 @@ const LatexEditorPage = () => {
                   fontSize: 14,
                   wordWrap: 'on',
                   automaticLayout: true,
+                }}
+                onMount={(editor: any) => {
+                  diffEditorRef.current = editor
+                  refreshLineChanges()
                 }}
               />
             )}
@@ -2753,6 +4324,56 @@ const LatexEditorPage = () => {
                 message="仅展示增量片段"
                 description="为提升性能，已只展示与本次改动相关的上下文。接受后会自动重新加载完整文件。"
               />
+            )}
+            {diffContentLoading && (
+              <div style={{ marginTop: 12 }}>
+                <Spin size="small" />
+                <Text type="secondary" style={{ marginLeft: 8 }}>
+                  正在加载完整内容...
+                </Text>
+              </div>
+            )}
+            {lineChanges.length > 0 && (
+              <div style={{ marginTop: 16 }}>
+                <Text type="secondary">逐处修改</Text>
+                <List
+                  size="small"
+                  dataSource={lineChanges}
+                  renderItem={(change: any, idx) => {
+                    const oStart = Number(change?.originalStartLineNumber || 0)
+                    const oEnd = Number(change?.originalEndLineNumber || 0)
+                    const mStart = Number(change?.modifiedStartLineNumber || 0)
+                    const mEnd = Number(change?.modifiedEndLineNumber || 0)
+                    const label = `原 ${oStart}-${oEnd} → 新 ${mStart}-${mEnd}`
+                    const accepted = acceptedLineChanges.has(idx)
+                    return (
+                      <List.Item
+                        actions={[
+                          <Button
+                            key="accept"
+                            size="small"
+                            disabled={accepted}
+                            onClick={() => handleAcceptLineChange(idx)}
+                          >
+                            {accepted ? '已接受' : '接受此处'}
+                          </Button>,
+                          <Button
+                            key="reject"
+                            size="small"
+                            danger
+                            loading={diffReverting}
+                            onClick={() => handleRejectLineChange(idx)}
+                          >
+                            回滚此处
+                          </Button>,
+                        ]}
+                      >
+                        <Text type="secondary">{label}</Text>
+                      </List.Item>
+                    )
+                  }}
+                />
+              </div>
             )}
           </div>
         </div>
@@ -2770,6 +4391,140 @@ const LatexEditorPage = () => {
             )}
           </Text>
         </div>
+      </Modal>
+
+      <Modal
+        title="操作历史"
+        open={operationHistoryOpen}
+        onCancel={() => setOperationHistoryOpen(false)}
+        footer={null}
+        width={720}
+      >
+        <List
+          loading={operationHistoryLoading}
+          dataSource={operationHistory}
+          locale={{ emptyText: '暂无操作记录' }}
+          renderItem={(item) => {
+            const modifiedCount = item.modified_files?.length || 0
+            const timestamp = item.timestamp ? new Date(item.timestamp).toLocaleString() : '未知时间'
+            return (
+              <List.Item
+                actions={[
+                  <Popconfirm
+                    key="revert"
+                    title="确认回滚该操作？"
+                    onConfirm={() => handleRevertOperation(item.operation_id)}
+                  >
+                    <Button
+                      size="small"
+                      loading={revertingOperationId === item.operation_id}
+                      disabled={!modifiedCount}
+                    >
+                      回滚
+                    </Button>
+                  </Popconfirm>,
+                ]}
+              >
+                <List.Item.Meta
+                  title={
+                    <Space>
+                      <Text strong>{item.user_intent || '操作'}</Text>
+                      <Tag color={item.success ? 'green' : 'red'}>
+                        {item.success ? '成功' : '失败'}
+                      </Tag>
+                      {item.intent_type && <Tag>{item.intent_type}</Tag>}
+                    </Space>
+                  }
+                  description={
+                    <Space size="middle" wrap>
+                      <Text type="secondary">{timestamp}</Text>
+                      <Text type="secondary">文件数：{modifiedCount}</Text>
+                      {item.trace_id && (
+                        <Text type="secondary">Trace: {item.trace_id.slice(0, 8)}</Text>
+                      )}
+                      <Text type="secondary">Op: {item.operation_id.slice(0, 8)}</Text>
+                    </Space>
+                  }
+                />
+              </List.Item>
+            )
+          }}
+        />
+      </Modal>
+
+      <Modal
+        title="系统状态"
+        open={systemStatusOpen}
+        onCancel={() => setSystemStatusOpen(false)}
+        footer={null}
+        width={720}
+      >
+        <Space align="center" wrap style={{ marginBottom: 12 }}>
+          <Button
+            size="small"
+            icon={<ReloadOutlined />}
+            loading={systemStatsLoading}
+            onClick={() => refreshSystemStats()}
+          >
+            刷新
+          </Button>
+          {llmHealth?.preferred_provider && (
+            <Tag color="blue">首选：{llmHealth.preferred_provider}</Tag>
+          )}
+        </Space>
+        {llmHealth?.providers?.length ? (
+          <div style={{ marginBottom: 12 }}>
+            <Text type="secondary">Provider 健康</Text>
+            <Space wrap style={{ marginTop: 6 }}>
+              {llmHealth.providers.map((provider) => {
+                const inCooldown = provider.in_cooldown
+                const color = !provider.available
+                  ? 'default'
+                  : inCooldown
+                    ? 'orange'
+                    : 'green'
+                const cooldown = provider.cooldown_remaining_seconds || 0
+                const tooltipText = provider.last_error
+                  ? `失败 ${provider.failures || 0} 次：${provider.last_error}`
+                  : inCooldown
+                    ? `冷却中（剩余 ${cooldown}s）`
+                    : '健康'
+                return (
+                  <Tooltip key={provider.provider} title={tooltipText}>
+                    <Tag color={color}>
+                      {provider.provider}
+                      {inCooldown ? ` 冷却${cooldown}s` : ' OK'}
+                    </Tag>
+                  </Tooltip>
+                )
+              })}
+            </Space>
+          </div>
+        ) : null}
+        <div style={{ marginBottom: 12 }}>
+          <Text type="secondary">Token / 成本</Text>
+          <Space wrap style={{ marginTop: 6 }}>
+            <Tag color="geekblue">Tokens 总计：{llmTotals.tokens.toLocaleString()}</Tag>
+            <Tag color="purple">估算成本：{llmTotals.cost.toFixed(6)}</Tag>
+          </Space>
+        </div>
+        {llmMetricEntries.length > 0 && (
+          <div>
+            <Text type="secondary">模型调用概况</Text>
+            <Space wrap style={{ marginTop: 6 }}>
+              {llmMetricEntries.map((entry) => (
+                <Tooltip
+                  key={entry.key}
+                  title={`成功 ${entry.success} / 失败 ${entry.failure} | tokens ${entry.total_tokens} | cost ${entry.total_cost.toFixed(6)}`}
+                >
+                  <Tag color={entry.failure ? 'volcano' : 'default'}>
+                    {entry.provider}/{entry.model}
+                  </Tag>
+                </Tooltip>
+              ))}
+            </Space>
+          </div>
+        )}
       </Modal>
       
       {/* 文件树右键菜单 */}

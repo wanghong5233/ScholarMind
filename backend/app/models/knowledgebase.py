@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, TIMESTAMP, Text, Boolean
+from sqlalchemy import Column, Integer, String, ForeignKey, TIMESTAMP, Text, Boolean, JSON
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from models.base import Base
@@ -13,6 +13,8 @@ class KnowledgeBase(Base):
     user_id = Column(Integer, ForeignKey('users.id', ondelete='CASCADE'), nullable=False, comment="关联的用户ID")
     name = Column(String(255), nullable=False, comment="知识库名称")
     description = Column(Text, nullable=True, comment="知识库描述信息")
+    rag_provider = Column(String(64), nullable=True, comment="RAG Provider（multi_stage/graph/multimodal_graph）")
+    rag_config = Column(JSON, nullable=True, comment="RAG Provider 配置（JSON）")
     
     created_at = Column(TIMESTAMP, nullable=False, server_default=func.now(), comment="创建时间")
     updated_at = Column(TIMESTAMP, nullable=False, server_default=func.now(), onupdate=func.now(), comment="最后更新时间")

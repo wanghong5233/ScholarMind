@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from agents.planner_agent import PlanItem, PlannerAgent
 from agents.note_agent import NoteAgent
@@ -30,6 +31,7 @@ from service.report_quality import analyze_report
 from service.report_sanitizer import sanitize_citations
 from service.report_templates import ReportTemplateBuilder
 from service.state_store import StateStore
+from service.token_usage import TokenUsageTracker
 from service.tool_registry import create_tool_registry
 from service.tool_router import ToolRouter
 from service.web_search_client import WebSearchClient
@@ -74,9 +76,11 @@ class ResearchPipeline:
         store = StateStore(self._data_root, research_id)
         started_at = datetime.utcnow()
         plan_payload: Dict[str, Any] = {"items": []}
+        existing_meta = store.load_meta() or {}
+        token_tracker = TokenUsageTracker.from_settings(existing_meta.get("token_usage"))
 
         if resume:
-            meta = store.load_meta()
+            meta = existing_meta
             if not meta:
                 raise ValueError("Research meta not found for resume.")
             started_at = self._parse_started_at(meta.get("started_at")) or started_at
@@ -110,6 +114,9 @@ class ResearchPipeline:
                 )
             )
             language = request.language or guess_language(request.topic)
+            context_text, context_meta = await self._load_context_pack(request, user_id)
+            if context_meta:
+                store.update_meta({"context": context_meta})
             try:
                 await self._research_queue(
                     store=store,
@@ -120,6 +127,8 @@ class ResearchPipeline:
                     citation_manager_async=citation_manager_async,
                     manager_async=manager_async,
                     language=language,
+                    context_text=context_text,
+                    token_tracker=token_tracker,
                 )
             except Exception as exc:  # noqa: BLE001 - record run meta on failure
                 finished_at = datetime.utcnow()
@@ -129,11 +138,11 @@ class ResearchPipeline:
                         "finished_at": finished_at.isoformat(),
                         "duration_seconds": (finished_at - started_at).total_seconds(),
                         "error": str(exc),
+                        "token_usage": token_tracker.summary(),
                     }
                 )
                 raise
         else:
-            existing_meta = store.load_meta() or {}
             priority = existing_meta.get("priority")
             if priority is None and isinstance(request.metadata, dict):
                 priority = request.metadata.get("priority")
@@ -175,11 +184,24 @@ class ResearchPipeline:
                 store.save_json("outline.json", plan_payload)
                 store.save_json("queue.json", queue.to_dict())
                 store.save_json("citations.json", citation_manager.to_dict())
+                store.save_json(
+                    "step1_planning.json",
+                    {
+                        "research_id": research_id,
+                        "generated_at": datetime.utcnow().isoformat(),
+                        "plan": plan_payload,
+                        "queue": queue.to_dict(),
+                        "citations": citation_manager.to_dict(),
+                    },
+                )
                 self._emit_progress(
                     store, research_id, "planning", "Planning completed", {"items": len(plan_items)}
                 )
 
                 language = request.language or guess_language(request.topic)
+                context_text, context_meta = await self._load_context_pack(request, user_id)
+                if context_meta:
+                    store.update_meta({"context": context_meta})
                 await self._research_queue(
                     store=store,
                     queue=queue,
@@ -189,6 +211,8 @@ class ResearchPipeline:
                     citation_manager_async=citation_manager_async,
                     manager_async=manager_async,
                     language=language,
+                    context_text=context_text,
+                    token_tracker=token_tracker,
                 )
             except Exception as exc:  # noqa: BLE001 - record run meta on failure
                 finished_at = datetime.utcnow()
@@ -198,9 +222,20 @@ class ResearchPipeline:
                         "finished_at": finished_at.isoformat(),
                         "duration_seconds": (finished_at - started_at).total_seconds(),
                         "error": str(exc),
+                        "token_usage": token_tracker.summary(),
                     }
                 )
                 raise
+
+        store.save_json(
+            "step2_research.json",
+            {
+                "research_id": research_id,
+                "generated_at": datetime.utcnow().isoformat(),
+                "queue": queue.to_dict(),
+                "citations": citation_manager.to_dict(),
+            },
+        )
 
         reporter = ReporterAgent(citation_manager, language=language)
         self._emit_progress(
@@ -264,6 +299,8 @@ class ResearchPipeline:
                     allowed_refs=allowed_refs,
                     draft_report=draft_report,
                     report_style=request.report_style,
+                    context_text=context_text,
+                    usage_callback=token_tracker.record,
                 )
             else:
                 llm_report = await self._refine_report(
@@ -273,6 +310,8 @@ class ResearchPipeline:
                     notes=report_notes,
                     citation_table=citation_table,
                     report_style=request.report_style,
+                    context_text=context_text,
+                    usage_callback=token_tracker.record,
                 )
             if llm_report:
                 if not getattr(settings, "REPORT_LLM_SECTIONAL", False):
@@ -369,6 +408,7 @@ class ResearchPipeline:
                     "finished_at": finished_at.isoformat(),
                     "duration_seconds": (finished_at - started_at).total_seconds(),
                     "summary": summary,
+                    "token_usage": token_tracker.summary(),
                 }
             )
 
@@ -395,6 +435,7 @@ class ResearchPipeline:
                     "finished_at": finished_at.isoformat(),
                     "duration_seconds": (finished_at - started_at).total_seconds(),
                     "error": str(exc),
+                    "token_usage": token_tracker.summary(),
                 }
             )
             raise
@@ -430,6 +471,103 @@ class ResearchPipeline:
                 )
         except Exception:  # noqa: BLE001 - fallback to template planning
             return planner.plan(request.topic)
+
+    async def _load_context_pack(
+        self,
+        request: DeepResearchRequest,
+        user_id: int,
+    ) -> tuple[Optional[str], Dict[str, Any]]:
+        """Load a unified conversation context pack and metadata.
+
+        Args:
+            request (DeepResearchRequest): Request payload.
+            user_id (int): ScholarMind user id.
+
+        Returns:
+            tuple[Optional[str], Dict[str, Any]]: Context text and metadata.
+        """
+        note_context, note_meta = self._extract_metadata_context(request)
+        if not request.session_id:
+            if note_context:
+                context_meta = {
+                    "context_present": True,
+                    "context_chars": len(note_context),
+                    "context_sha256": hashlib.sha256(note_context.encode("utf-8")).hexdigest(),
+                    "reason": "metadata_only",
+                    **note_meta,
+                }
+                return note_context, context_meta
+            return None, {"context_present": False, "reason": "missing_session_id"}
+        try:
+            async with RAGClient(self._rag_service_url, timeout=self._request_timeout) as rag_client:
+                payload = await rag_client.get_context(
+                    session_id=request.session_id,
+                    user_id=user_id,
+                    question=request.topic,
+                )
+            context_text_raw = payload.get("context_text")
+            context_text = context_text_raw.strip() if isinstance(context_text_raw, str) else ""
+            history_items = payload.get("history") or []
+            memory_items = (payload.get("memory") or {}).get("items") or []
+            if note_context:
+                if context_text:
+                    context_text = f"{note_context}\n\n{context_text}"
+                else:
+                    context_text = note_context
+            truncated = False
+            if context_text and settings.RESEARCH_CONTEXT_MAX_CHARS > 0:
+                if len(context_text) > settings.RESEARCH_CONTEXT_MAX_CHARS:
+                    context_text = context_text[: settings.RESEARCH_CONTEXT_MAX_CHARS]
+                    truncated = True
+            context_meta = {
+                "context_present": bool(context_text),
+                "context_chars": len(context_text),
+                "context_sha256": (
+                    hashlib.sha256(context_text.encode("utf-8")).hexdigest()
+                    if context_text
+                    else None
+                ),
+                "history_count": len(history_items),
+                "memory_count": len(memory_items),
+                "context_truncated": truncated,
+            }
+            if note_meta:
+                context_meta.update(note_meta)
+            return context_text or None, context_meta
+        except Exception:
+            return None, {"context_present": False, "reason": "fetch_failed"}
+
+    @staticmethod
+    def _extract_metadata_context(request: DeepResearchRequest) -> tuple[str, Dict[str, Any]]:
+        """Extract optional context overrides from request metadata.
+
+        Args:
+            request (DeepResearchRequest): Incoming DeepResearch request.
+
+        Returns:
+            tuple[str, Dict[str, Any]]: Context text and metadata details.
+        """
+        if not isinstance(request.metadata, dict):
+            return "", {}
+        raw_text = request.metadata.get("context_text")
+        if not isinstance(raw_text, str):
+            return "", {}
+        context_text = raw_text.strip()
+        if not context_text:
+            return "", {}
+        truncated = False
+        if settings.NOTEBOOK_MAX_SELECTION_CHARS > 0:
+            if len(context_text) > settings.NOTEBOOK_MAX_SELECTION_CHARS:
+                context_text = context_text[: settings.NOTEBOOK_MAX_SELECTION_CHARS]
+                truncated = True
+        return context_text, {
+            "note_context_present": True,
+            "note_context_chars": len(context_text),
+            "note_context_truncated": truncated,
+            "note_context_source": request.metadata.get("context_source"),
+            "note_context_title": request.metadata.get("context_title"),
+            "note_context_id": request.metadata.get("context_note_id"),
+        }
 
     def _apply_plan(
         self,
@@ -523,6 +661,8 @@ class ResearchPipeline:
         citation_manager_async: AsyncCitationManagerWrapper,
         manager_async: AsyncManagerAgentWrapper,
         language: str,
+        context_text: Optional[str] = None,
+        token_tracker: Optional[TokenUsageTracker] = None,
     ) -> None:
         """Run research over all queued blocks.
 
@@ -533,6 +673,8 @@ class ResearchPipeline:
             user_id (int): ScholarMind user id.
             citation_manager (CitationManager): Citation registry.
             citation_manager_async (AsyncCitationManagerWrapper): Async citation wrapper.
+            context_text (Optional[str]): Optional conversation context.
+            token_tracker (Optional[TokenUsageTracker]): Token usage tracker.
         """
 
         if not request.session_id:
@@ -550,6 +692,10 @@ class ResearchPipeline:
             )
             return
 
+        iteration_mode = (request.iteration_mode or "legacy").lower()
+        if iteration_mode not in {"fixed", "flexible"}:
+            iteration_mode = "legacy"
+        usage_callback = token_tracker.record if token_tracker else None
         semaphore = asyncio.Semaphore(request.max_parallel)
         self._emit_progress(
             store,
@@ -577,16 +723,30 @@ class ResearchPipeline:
                         max_code_chars=settings.CODE_EXEC_MAX_CODE_CHARS,
                     )
 
+                rag_llm_client = LLMClient(
+                    api_key=settings.OPENAI_API_KEY,
+                    base_url=settings.OPENAI_BASE_URL,
+                    model_name=settings.OPENAI_MODEL_NAME,
+                    temperature=0.2,
+                    max_tokens=512,
+                    timeout=self._request_timeout,
+                    usage_callback=usage_callback,
+                    usage_label="rag.ask.summary",
+                )
                 tool_registry = create_tool_registry(
                     rag_client=rag_client,
                     citation_manager=citation_manager_async,
                     web_search_client=web_search_client,
                     code_exec_client=code_exec_client,
                     web_search_max_results=settings.WEB_SEARCH_MAX_RESULTS,
+                    paper_search_max_results=settings.PAPER_SEARCH_MAX_RESULTS,
+                    rag_llm_client=rag_llm_client,
                 )
                 tool_router = ToolRouter(tool_registry)
                 tool_names = [tool["name"] for tool in tool_registry.list_tools()]
-                decision_agent = self._build_decision_agent(language, tool_names)
+                decision_agent = self._build_decision_agent(
+                    language, tool_names, usage_callback=usage_callback
+                )
                 agent = ResearchAgent(
                     tool_router=tool_router,
                     decision_agent=decision_agent,
@@ -603,13 +763,32 @@ class ResearchPipeline:
 
                 async def run_block(block):
                     async with semaphore:
+                        iteration_index = block.iterations + 1
+                        if iteration_mode in {"fixed", "flexible"} and block.iterations >= block.max_iterations:
+                            await manager_async.mark_status(block.block_id, TopicStatus.FAILED)
+                            self._emit_progress(
+                                store,
+                                queue.research_id,
+                                "researching",
+                                "Block skipped (max iterations reached)",
+                                {
+                                    "block_id": block.block_id,
+                                    "iterations": block.iterations,
+                                    "max_iterations": block.max_iterations,
+                                },
+                            )
+                            return
                         await manager_async.mark_status(block.block_id, TopicStatus.RESEARCHING)
+                        progress_payload = {"block_id": block.block_id}
+                        if iteration_mode != "legacy":
+                            progress_payload["iteration"] = iteration_index
+                            progress_payload["max_iterations"] = block.max_iterations
                         self._emit_progress(
                             store,
                             queue.research_id,
                             "researching",
                             f"Researching {block.title}",
-                            {"block_id": block.block_id},
+                            progress_payload,
                         )
                         try:
                             result = await agent.research_block(
@@ -619,7 +798,9 @@ class ResearchPipeline:
                                 top_k=request.top_k,
                                 index_mode=request.index_mode,
                                 language=language,
+                                context_text=context_text,
                                 use_web_search=request.use_web_search,
+                                    use_paper_search=getattr(request, "use_paper_search", False),
                                 use_code_exec=request.use_code_exec,
                                 code_exec_snippets=request.code_exec_snippets,
                             )
@@ -702,6 +883,24 @@ class ResearchPipeline:
                                     },
                                 )
 
+                            if result.paper_search_summary:
+                                block.notes.append("Paper search highlights:")
+                                block.notes.extend(note_agent.compress(result.paper_search_summary))
+                                for citation in result.paper_search_citations:
+                                    block.add_citation(citation.citation_id)
+                                if result.paper_search_trace:
+                                    block.add_trace(result.paper_search_trace)
+                                self._emit_progress(
+                                    store,
+                                    queue.research_id,
+                                    "researching",
+                                    "Paper search completed",
+                                    {
+                                        "block_id": block.block_id,
+                                        "citations": len(result.paper_search_citations),
+                                    },
+                                )
+
                             if result.code_exec_outputs:
                                 for idx, output in enumerate(result.code_exec_outputs):
                                     block.notes.append(f"Code execution {idx + 1}:")
@@ -750,14 +949,43 @@ class ResearchPipeline:
                                         f"Decision added {len(new_blocks)} follow-ups for {block.title}",
                                         {"block_id": block.block_id},
                                     )
-                            await manager_async.mark_status(block.block_id, TopicStatus.COMPLETED)
-                            self._emit_progress(
-                                store,
-                                queue.research_id,
-                                "researching",
-                                "Block completed",
-                                {"block_id": block.block_id},
-                            )
+                            block.iterations = max(block.iterations, iteration_index)
+                            block.touch()
+                            decision_sufficient = True
+                            if result.decision is not None:
+                                decision_sufficient = bool(result.decision.sufficient)
+                            repeat_reason = None
+                            should_repeat = False
+                            if iteration_mode == "fixed":
+                                should_repeat = block.iterations < block.max_iterations
+                                repeat_reason = "fixed"
+                            elif iteration_mode == "flexible" and not decision_sufficient:
+                                should_repeat = block.iterations < block.max_iterations
+                                repeat_reason = "insufficient"
+
+                            if should_repeat:
+                                await manager_async.mark_status(block.block_id, TopicStatus.PENDING)
+                                self._emit_progress(
+                                    store,
+                                    queue.research_id,
+                                    "researching",
+                                    "Block queued for next iteration",
+                                    {
+                                        "block_id": block.block_id,
+                                        "iteration": block.iterations,
+                                        "max_iterations": block.max_iterations,
+                                        "reason": repeat_reason,
+                                    },
+                                )
+                            else:
+                                await manager_async.mark_status(block.block_id, TopicStatus.COMPLETED)
+                                self._emit_progress(
+                                    store,
+                                    queue.research_id,
+                                    "researching",
+                                    "Block completed",
+                                    {"block_id": block.block_id, "iterations": block.iterations},
+                                )
 
                             new_blocks = await manager_async.maybe_expand(block, result.summary, language)
                             if new_blocks:
@@ -845,6 +1073,7 @@ class ResearchPipeline:
         self,
         language: str,
         available_tools: Optional[List[str]],
+        usage_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> DecisionAgent:
         """Build the decision agent for tool selection."""
 
@@ -865,6 +1094,8 @@ class ResearchPipeline:
             temperature=settings.DECISION_LLM_TEMPERATURE,
             max_tokens=settings.DECISION_LLM_MAX_TOKENS,
             timeout=self._request_timeout,
+            usage_callback=usage_callback,
+            usage_label="decision_agent",
         )
         return DecisionAgent(
             llm_client=llm_client,
@@ -936,6 +1167,8 @@ class ResearchPipeline:
         notes: List[str],
         citation_table: List[str],
         report_style: Optional[str] = None,
+        context_text: Optional[str] = None,
+        usage_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Optional[str]:
         """Optionally refine the report using an LLM.
 
@@ -945,6 +1178,7 @@ class ResearchPipeline:
             outline (List[str]): Outline lines.
             notes (List[str]): Research notes.
             citation_table (List[str]): Reference table lines.
+            context_text (Optional[str]): Optional conversation context.
 
         Returns:
             Optional[str]: LLM-generated report or None.
@@ -960,6 +1194,8 @@ class ResearchPipeline:
             temperature=settings.REPORT_LLM_TEMPERATURE,
             max_tokens=settings.REPORT_LLM_MAX_TOKENS,
             timeout=self._request_timeout,
+            usage_callback=usage_callback,
+            usage_label="report_refiner",
         )
         refiner = ReportRefiner(client, language=language)
         return await refiner.refine(
@@ -968,6 +1204,7 @@ class ResearchPipeline:
             notes=notes,
             citation_table=citation_table,
             report_style=report_style,
+            context_text=context_text,
         )
 
     async def _refine_report_sectional(
@@ -986,11 +1223,32 @@ class ResearchPipeline:
         allowed_refs: List[int],
         draft_report: str,
         report_style: Optional[str] = None,
+        context_text: Optional[str] = None,
+        usage_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> Optional[str]:
         """Generate a refined report section-by-section (optional).
 
         This mode emits progress events per section and updates `report.json` so the
         frontend can preview partial report content while the run is still running.
+
+        Args:
+            store (StateStore): State persistence helper.
+            reporter (ReporterAgent): Report renderer.
+            research_id (str): Research run id.
+            topic (str): Research topic.
+            language (str): Report language code.
+            outline (List[str]): Outline lines.
+            report_outline (List[str]): High-level outline items.
+            outline_detailed (List[str]): Detailed outline lines.
+            notes (List[str]): Research notes.
+            citation_table (List[str]): Reference table lines.
+            allowed_refs (List[int]): Allowed citation indices.
+            draft_report (str): Deterministic draft report.
+            report_style (Optional[str]): Report style hint.
+            context_text (Optional[str]): Optional conversation context.
+
+        Returns:
+            Optional[str]: LLM-generated report or None.
         """
 
         if not getattr(settings, "REPORT_LLM_ENABLED", False):
@@ -1003,6 +1261,8 @@ class ResearchPipeline:
             temperature=settings.REPORT_LLM_TEMPERATURE,
             max_tokens=settings.REPORT_LLM_MAX_TOKENS,
             timeout=self._request_timeout,
+            usage_callback=usage_callback,
+            usage_label="report_section",
         )
         if not client.is_configured():
             return None
@@ -1050,6 +1310,7 @@ class ResearchPipeline:
                 language=language,
                 report_style=report_style,
                 previous_text=previous_text or None,
+                context_text=context_text,
             )
             raw = await client.generate(prompt, max_tokens=section_max_tokens)
             if not raw:

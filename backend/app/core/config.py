@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     JWT_ACCESS_TOKEN_EXPIRE_DAYS: int = 30  # 生产环境：7天，开发环境可设为30天
     JWT_ALGORITHM: str = "HS256"
     ROOT_PATH: str = ""
+    # Internal service base URLs (Gateway/BFF)
+    DEEP_RESEARCH_SERVICE_URL: str = "http://deep_research:8004"
+    LATEX_AGENT_SERVICE_URL: str = "http://latex_agent:8003"
 
     # Elasticsearch
     ES_HOST: str = "http://localhost:9200"
@@ -75,6 +78,36 @@ class Settings(BaseSettings):
     SM_STREAMING_ENABLED: bool = True                                            # SSE 流式开关
     SM_DEFAULT_LANGUAGE: Literal["zh", "en"] = "zh"                           # 默认语言
     SM_AUTO_TRANSLATE_TO_EN: bool = True                                          # 中文查询是否自动翻译为英文以提升检索命中
+    SM_DEFAULT_RAG_PROVIDER: str = "multi_stage"                                  # 默认 RAG Provider
+    SM_RAG_PROVIDER_ALLOWLIST: str = "multi_stage,graph,multimodal_graph"         # 可用 Provider 列表
+
+    # Knowledge Graph 设置
+    SM_GRAPH_ENABLED: bool = False
+    SM_GRAPH_ENABLE_LLM: bool = True
+    SM_GRAPH_MAX_CHUNKS_PER_DOC: int = 40
+    SM_GRAPH_MIN_CHARS: int = 200
+    SM_GRAPH_MAX_ENTITIES_PER_CHUNK: int = 8
+    SM_GRAPH_MAX_RELATIONS_PER_CHUNK: int = 10
+    SM_GRAPH_QUERY_MAX_ENTITIES: int = 6
+    SM_GRAPH_LLM_MAX_TOKENS: int = 512
+    SM_GRAPH_QUERY_MAX_TOKENS: int = 256
+    SM_GRAPH_TEXT_TRUNCATE_CHARS: int = 1800
+    SM_GRAPH_MAX_BOOST_CHUNKS: int = 30
+    SM_GRAPH_CHUNK_BOOST_WEIGHT: float = 0.35
+    SM_GRAPH_QUERY_EXPANSION_ENABLED: bool = True
+    SM_GRAPH_QUERY_MAX_VARIANTS: int = 6
+
+    # Multimodal boost (only effective for multimodal providers)
+    SM_MULTIMODAL_TABLE_BOOST: float = 0.25
+    SM_MULTIMODAL_EQUATION_BOOST: float = 0.3
+    SM_MULTIMODAL_FIGURE_BOOST: float = 0.2
+    SM_MULTIMODAL_LOGICAL_PRIORITY: str = "abstract:introduction:method:results:conclusion:related_work"
+    SM_MULTIMODAL_LOGICAL_BOOST: float = 0.2
+    SM_MULTIMODAL_REFERENCE_BOOST: float = 0.15
+
+    # Retrieval evaluation
+    SM_RETRIEVAL_EVAL_FILE: str = "conf/retrieval_eval_sets.json"
+    SM_RETRIEVAL_EVAL_MAX_ITEMS: int = 50
     SM_MULTI_QUERY_NUM: int = 5                                                  # Multi-Query 子查询数（含 original）
     SM_MULTI_QUERY_MAX: int = 6                                                  # Multi-Query 上限（含 original）
     SM_HYDE_ENABLED: bool = True                                                 # 是否启用 HyDE
@@ -132,6 +165,7 @@ class Settings(BaseSettings):
     SM_MINERU_HTTP_FILE_FIELD: str = "file"                                      # 上传字段名
     SM_MINERU_TIMEOUT_SECS: int = 1200                                            # HTTP/CLI 超时（20分钟，应对复杂PDF）
     SM_MINERU_MAX_PAGES: int = 30                                                 # 读取页数的上限（兜底路径）
+    SM_MINERU_STRICT_FAIL: bool = False                                           # MinerU 失败是否阻断流程（False=允许降级）
     # CLI 模式下的命令模板（MinerU 的官方命令是 mineru）
     SM_MINERU_CLI_BIN: str = "mineru"
     SM_MINERU_CLI_CMD: str = "{bin} -p \"{input}\" -o \"{output}\""
@@ -159,6 +193,8 @@ class Settings(BaseSettings):
     SM_HISTORY_HEADROOM: int = 30000  # 预留给检索上下文/系统提示/答案空间（约 120k 字符）
     HISTORY_RECENT_TURNS: int = 4
     ENABLE_ROLLING_SUMMARY: bool = True
+    SM_CONTEXT_PACK_MAX_TOKENS: int = 2048  # 内部上下文包最大 token 数
+    SM_CONTEXT_PACK_MAX_CHARS: int = 6000  # 内部上下文包最大字符数
 
     # 短期记忆（STM）配置
     SM_STM_SCAN_MESSAGES: int = 40

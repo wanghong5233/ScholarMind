@@ -1,6 +1,7 @@
 # DeepResearch Service dependencies
 
 fastapi==0.115.0
+fastapi-jwt
 uvicorn==0.31.0
 pydantic==2.10.1
 pydantic-settings==2.10.1
@@ -12,3 +13,5 @@ openai>=1.0.0
 redis==5.0.1
 markdown==3.7
 reportlab==4.2.2
+arxiv
+pyyaml

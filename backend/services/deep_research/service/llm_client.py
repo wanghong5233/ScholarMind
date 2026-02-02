@@ -1,6 +1,6 @@
 """Lightweight LLM client wrapper for report generation."""
 
-from typing import Optional
+from typing import Any, Callable, Dict, Optional
 
 import logging
 
@@ -18,6 +18,8 @@ class LLMClient:
         temperature: float,
         max_tokens: int,
         timeout: int,
+        usage_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        usage_label: Optional[str] = None,
     ) -> None:
         """Initialize the LLM client.
 
@@ -38,6 +40,14 @@ class LLMClient:
         self._timeout = timeout
         self._logger = logging.getLogger("deep_research.llm_client")
         self._client = None
+        self._usage_callback = usage_callback
+        self._usage_label = usage_label or "llm"
+        self._last_usage: Optional[Dict[str, Any]] = None
+
+    def get_last_usage(self) -> Optional[Dict[str, Any]]:
+        """Return the latest usage payload from the LLM call."""
+
+        return self._last_usage
 
     def is_configured(self) -> bool:
         """Check whether the client has the required credentials."""
@@ -75,8 +85,42 @@ class LLMClient:
                 max_tokens=self._max_tokens if max_tokens is None else max_tokens,
                 timeout=self._timeout,
             )
+            self._record_usage(response)
             content = response.choices[0].message.content if response.choices else None
             return content
         except Exception as exc:  # noqa: BLE001 - surface error for logging
             self._logger.warning("LLM generation failed: %s", exc)
             return None
+
+    def _record_usage(self, response: Any) -> None:
+        usage = getattr(response, "usage", None)
+        if not usage:
+            return
+        prompt_tokens = self._read_usage_value(usage, "prompt_tokens")
+        completion_tokens = self._read_usage_value(usage, "completion_tokens")
+        total_tokens = self._read_usage_value(usage, "total_tokens")
+        if prompt_tokens is None and completion_tokens is None and total_tokens is None:
+            return
+        prompt_tokens = int(prompt_tokens or 0)
+        completion_tokens = int(completion_tokens or 0)
+        if total_tokens is None:
+            total_tokens = prompt_tokens + completion_tokens
+        total_tokens = int(total_tokens or 0)
+        payload = {
+            "label": self._usage_label,
+            "model": getattr(response, "model", None) or self._model_name,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        }
+        self._last_usage = payload
+        if self._usage_callback:
+            self._usage_callback(payload)
+
+    @staticmethod
+    def _read_usage_value(usage: Any, key: str) -> Optional[int]:
+        if hasattr(usage, key):
+            return getattr(usage, key)
+        if isinstance(usage, dict):
+            return usage.get(key)
+        return None

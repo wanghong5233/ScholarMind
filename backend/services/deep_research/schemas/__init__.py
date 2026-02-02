@@ -1,14 +1,5 @@
 """Pydantic schemas for DeepResearch APIs."""
 
-from .co_writer import (
-    CoWriterRequest,
-    CoWriterResponse,
-    CoWriterTask,
-    CoWriterRunDetail,
-    CoWriterRunList,
-    CoWriterRunMeta,
-    CoWriterStatus,
-)
 from .common import (
     CitationOut,
     DeepResearchMode,
@@ -45,13 +36,6 @@ __all__ = [
     "DeepResearchQueueStatus",
     "DeepResearchPriorityUpdateRequest",
     "DeepResearchStatus",
-    "CoWriterRequest",
-    "CoWriterResponse",
-    "CoWriterTask",
-    "CoWriterRunDetail",
-    "CoWriterRunList",
-    "CoWriterRunMeta",
-    "CoWriterStatus",
     "IdeaGenerationRequest",
     "IdeaGenerationResponse",
     "IdeaGenerationRunDetail",

@@ -15,10 +15,38 @@ class ESIndexer:
         self.index_name = index_name or settings.ES_DEFAULT_INDEX
         self.es = ESConnection()
 
-    def index(self, *, records: Iterable[Dict], kb_id: int, document_id: int, session_index: Optional[str] = None) -> None:
+    @staticmethod
+    def build_chunk_id(
+        *,
+        kb_id: int,
+        document_id: int,
+        chunk_index: int,
+        text: str,
+        base_id: Optional[str] = None,
+    ) -> str:
+        if base_id:
+            return base_id
+        text_for_id = (text or "")[:2048]
+        raw = f"{kb_id}|{document_id}|{chunk_index}|{text_for_id}".encode("utf-8", errors="ignore")
+        return hashlib.sha256(raw).hexdigest()
+
+    def index(
+        self,
+        *,
+        records: Iterable[Dict],
+        kb_id: int,
+        document_id: int,
+        session_index: Optional[str] = None,
+        enable_multimodal_chunks: Optional[bool] = None,
+    ) -> None:
         docs = []
         records_list = list(records)  # 转换为列表以便访问相邻元素
-        if not settings.SM_ENABLE_MULTIMODAL_CHUNKS:
+        allow_multimodal = (
+            settings.SM_ENABLE_MULTIMODAL_CHUNKS
+            if enable_multimodal_chunks is None
+            else bool(enable_multimodal_chunks)
+        )
+        if not allow_multimodal:
             filtered_records = []
             for r in records_list:
                 meta = r.get("metadata", {})
@@ -49,13 +77,14 @@ class ESIndexer:
             meta["chunk_index"] = i  # 记录块在文档中的顺序
             
             # 生成幂等 chunk id（若上游未提供）：sha256(kb_id|doc_id|index|text[:2048])
-            base_id = meta.get("id")
-            if base_id:
-                chunk_id = base_id
-            else:
-                text_for_id = (r.get("text", "") or "")[:2048]
-                raw = f"{kb_id}|{document_id}|{i}|{text_for_id}".encode("utf-8", errors="ignore")
-                chunk_id = hashlib.sha256(raw).hexdigest()
+            base_id = meta.get("id") or meta.get("chunk_id")
+            chunk_id = self.build_chunk_id(
+                kb_id=kb_id,
+                document_id=document_id,
+                chunk_index=i,
+                text=r.get("text", "") or "",
+                base_id=base_id,
+            )
             
             # 生成相邻块的 ID
             prev_chunk_id = None
@@ -63,23 +92,31 @@ class ESIndexer:
             
             if i > 0:
                 prev_r = records_list[i - 1]
-                prev_base_id = prev_r.get("metadata", {}).get("id")
+                prev_meta = prev_r.get("metadata", {}) or {}
+                prev_base_id = prev_meta.get("id") or prev_meta.get("chunk_id")
                 if prev_base_id:
                     prev_chunk_id = prev_base_id
                 else:
-                    prev_text = (prev_r.get("text", "") or "")[:2048]
-                    prev_raw = f"{kb_id}|{document_id}|{i-1}|{prev_text}".encode("utf-8", errors="ignore")
-                    prev_chunk_id = hashlib.sha256(prev_raw).hexdigest()
+                    prev_chunk_id = self.build_chunk_id(
+                        kb_id=kb_id,
+                        document_id=document_id,
+                        chunk_index=i - 1,
+                        text=prev_r.get("text", "") or "",
+                    )
             
             if i < len(records_list) - 1:
                 next_r = records_list[i + 1]
-                next_base_id = next_r.get("metadata", {}).get("id")
+                next_meta = next_r.get("metadata", {}) or {}
+                next_base_id = next_meta.get("id") or next_meta.get("chunk_id")
                 if next_base_id:
                     next_chunk_id = next_base_id
                 else:
-                    next_text = (next_r.get("text", "") or "")[:2048]
-                    next_raw = f"{kb_id}|{document_id}|{i+1}|{next_text}".encode("utf-8", errors="ignore")
-                    next_chunk_id = hashlib.sha256(next_raw).hexdigest()
+                    next_chunk_id = self.build_chunk_id(
+                        kb_id=kb_id,
+                        document_id=document_id,
+                        chunk_index=i + 1,
+                        text=next_r.get("text", "") or "",
+                    )
             
             # 添加相邻块 ID 到元数据
             if prev_chunk_id:

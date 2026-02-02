@@ -8,7 +8,7 @@ declare namespace API {
   }
 
   interface SessionDefaults {
-    retrievalStrategy: 'multi_stage'
+    retrievalStrategy: 'multi_stage' | 'graph' | 'multimodal_graph'
     rerankerStrategy: 'none' | 'supervised' | 'rl'
     topK: number
     language: 'zh' | 'en'
@@ -31,6 +31,42 @@ declare namespace API {
     sessionName: string
   }
 
+  interface DeepResearchCardState {
+    status:
+      | 'plan'
+      | 'queued'
+      | 'running'
+      | 'completed'
+      | 'failed'
+      | 'cancelled'
+    topic: string
+    request: import('@/api/deepResearch').DeepResearchRequest
+    plan?: import('@/api/deepResearch').DeepResearchPlan
+    planError?: string
+    planLoading?: boolean
+    source?: 'composer' | 'suggestion'
+    userMessage?: string
+    researchId?: string
+    queuePosition?: number | null
+    activeRuns?: number | null
+    pendingRuns?: number | null
+    progress?: import('@/api/deepResearch').ProgressEvent[]
+    toolCounts?: Record<string, number>
+    blockStats?: {
+      total?: number
+      completed?: number
+      pending?: number
+      iteration?: number
+      maxIterations?: number
+      citations?: number
+    }
+    report?: import('@/api/deepResearch').DeepResearchReportPayload
+    citations?: import('@/api/deepResearch').DeepResearchCitation[]
+    statusMessage?: string
+    lastStage?: string
+    updatedAt?: string
+  }
+
   interface ChatItem {
     id: number
     role: import('@/configs').ChatRole
@@ -45,6 +81,7 @@ declare namespace API {
     reference?: Reference[]
     recommended_questions?: string[]
     attachments?: ChatAttachment[]
+    deepResearch?: DeepResearchCardState
   }
 
   interface ChatAttachment {

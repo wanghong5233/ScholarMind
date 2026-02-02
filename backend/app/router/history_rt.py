@@ -1,14 +1,12 @@
-from fastapi import APIRouter, Depends, Security, HTTPException
+from fastapi import APIRouter, Depends, Security, HTTPException, status
 from sqlalchemy.orm import Session
 from utils.database import get_db
-from models.knowledgebase import KnowledgeBase  
-from schemas.message import FilestResponse , SessionListResponse, SessionResponse
+from schemas.message import FilestResponse, SessionListResponse
 from fastapi_jwt import JwtAuthorizationCredentials
 from service.auth import access_security
 from typing import List
-from sqlalchemy import text ,select 
-from urllib.parse import unquote
-from fastapi import status
+
+from service.core.conversation.history_service import HistoryService
 
 router = APIRouter()
 
@@ -30,42 +28,8 @@ async def get_documents_by_user_id(
     - **认证**: 需要提供有效的Bearer Token。
     - **返回**: 一个包含文档信息的对象列表，如果用户没有上传过文档则返回空列表。
     """
-    try:
-        # 从 token 中获取用户 ID
-        user_id = str(credentials.subject.get("user_id"))
-        if not user_id:
-            raise HTTPException(status_code=401, detail="Invalid authentication credentials")
-
-        # 构建查询语句
-        stmt = select(KnowledgeBase).where(KnowledgeBase.user_id == user_id)
-        
-        # 执行查询
-        result = db.execute(stmt).scalars().all()
-
-        # 如果没有找到文档，返回空列表
-        if not result:
-            return []
-
-        # 将查询结果转换为 Pydantic 模型
-        documents = [
-            FilestResponse(
-                user_id=row.user_id,
-                file_name=row.file_name,
-                created_at=row.created_at.isoformat(),
-                updated_at=row.updated_at.isoformat()
-            )
-            for row in result
-        ]
-
-        return documents
-
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to retrieve documents: {str(e)}"
-        )
+    service = HistoryService(db=db, credentials=credentials)
+    return service.get_documents_by_user_id()
 
 ############################
 #   删除文档
@@ -103,64 +67,8 @@ async def get_messages_by_session_id(
     - **认证**: 需要提供有效的Bearer Token。
     - **返回**: 一个包含该会话所有消息对象的列表。
     """
-    try:
-        user_id = str(credentials.subject.get("user_id"))
-        if not user_id:
-            raise HTTPException(status_code=401, detail="Invalid authentication credentials")
-
-        # 查询 messages（新表结构：retrieval_content/create_time 等）
-        messages_data = db.execute(
-            text(
-                """
-                SELECT message_id,
-                       session_id,
-                       user_question,
-                       model_answer,
-                       retrieval_content,
-                       create_time
-                  FROM messages
-                 WHERE session_id = :session_id
-                 ORDER BY create_time ASC
-                """
-            ),
-            {"session_id": session_id},
-        ).fetchall()
-
-        # 构造返回数据
-        messages = []
-        import json as _json
-        for m in messages_data:
-            docs_field = None
-            try:
-                if m.retrieval_content:
-                    rc = _json.loads(m.retrieval_content)
-                    cits = rc.get("citations") or []
-                    if isinstance(cits, list):
-                        docs_field = _json.dumps(cits, ensure_ascii=False)
-            except Exception:
-                docs_field = None
-
-            messages.append(
-                {
-                    "message_id": m.message_id,
-                    "session_id": m.session_id,
-                    "user_question": m.user_question,
-                    "model_answer": m.model_answer,
-                    "documents": docs_field,  # 兼容旧前端字段
-                    "recommended_questions": None,
-                    "think": None,
-                    "created_at": m.create_time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "retrieval_content": m.retrieval_content,  # 添加完整的 retrieval_content
-                }
-            )
-
-        return messages
-
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to retrieve messages: {str(e)}"
-        )
+    service = HistoryService(db=db, credentials=credentials)
+    return service.get_messages_by_session_id(session_id=session_id)
     
 @router.get("/get_sessions", response_model=SessionListResponse)
 async def get_sessions_by_user_id(
@@ -175,37 +83,5 @@ async def get_sessions_by_user_id(
     - **认证**: 需要提供有效的Bearer Token。
     - **返回**: 包含用户ID和其所有会话列表的对象。
     """
-    try:
-        user_id = str(credentials.subject.get("user_id"))
-        if not user_id:
-            raise HTTPException(status_code=401, detail="Invalid authentication credentials")
-
-
-        # 查询 sessions 表中对应 user_id 的所有会话
-        sessions_data = db.execute(
-            text("SELECT * FROM sessions WHERE user_id = :user_id"),
-            {"user_id": user_id}
-        ).fetchall()
-
-        # 构造返回数据
-        sessions = []
-        for session in sessions_data:
-            sessions.append(
-                SessionResponse(
-                    session_id=session.session_id,
-                    session_name=session.session_name,
-                    user_id=session.user_id,
-                    created_at=session.created_at.strftime("%Y-%m-%d %H:%M:%S"),
-                    updated_at=session.updated_at.strftime("%Y-%m-%d %H:%M:%S")
-                )
-            )
-
-        return {"user_id": user_id, "sessions": sessions}
-
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=str(e)
-        )
+    service = HistoryService(db=db, credentials=credentials)
+    return service.get_sessions_by_user_id()

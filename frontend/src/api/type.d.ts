@@ -109,6 +109,77 @@ declare namespace LatexAgentAPI {
     plan?: AgentPlanStatus | null
     warnings?: string[]
     trace_id?: string
+    operation_id?: string
+    history_path?: string
+    episode_id?: string
+  }
+
+  interface OperationSummary {
+    operation_id: string
+    trace_id?: string
+    workspace_id: string
+    user_id: number
+    timestamp: string
+    success: boolean
+    intent_type?: string | null
+    user_intent: string
+    modified_files?: string[]
+    warnings?: string[]
+    snapshot?: Record<string, any> | null
+  }
+
+  interface RevertOperationResponse {
+    operation_id: string
+    reverted_files: string[]
+    deleted_files: string[]
+    skipped_files: string[]
+  }
+
+  interface LlmProviderHealth {
+    provider: string
+    available: boolean
+    in_cooldown: boolean
+    cooldown_remaining_seconds?: number
+    failures?: number
+    last_error?: string | null
+    last_success_at?: number | null
+    last_failure_at?: number | null
+  }
+
+  interface LlmHealthSummary {
+    preferred_provider?: string | null
+    available_providers?: string[]
+    providers: LlmProviderHealth[]
+    fallback_enabled: boolean
+    fallback_allow_explicit_provider: boolean
+    failure_threshold: number
+    cooldown_seconds: number
+    request_timeout: number
+    requested_by?: number
+  }
+
+  interface MetricsSummary {
+    tools: Record<string, {
+      success: number
+      failure: number
+      total: number
+      avg_duration_seconds: number
+    }>
+    intents: Record<string, { low: number; medium: number; high: number }>
+    plans: Record<string, { count: number; avg_tools: number; avg_duration_seconds: number }>
+    llm?: Record<string, {
+      success: number
+      failure: number
+      total: number
+      avg_duration_seconds: number
+      prompt_tokens: number
+      completion_tokens: number
+      total_tokens: number
+      total_cost: number
+    }>
+    workspace_scans: { count: number; total_duration_seconds: number }
+    workspace_cache_events: Record<string, number>
+    feedback: Record<string, number>
   }
 
   interface CompileLog {

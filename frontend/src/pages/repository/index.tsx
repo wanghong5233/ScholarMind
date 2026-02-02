@@ -7,7 +7,7 @@ import type {
 } from '@/api/repository'
 import IconDelete from '@/assets/repository/action/delete.svg'
 import { PlusOutlined } from '@ant-design/icons'
-import { Button, Modal, Popconfirm, Space, Table, Tag, Typography, message, Spin, Form, Input } from 'antd'
+import { Button, Modal, Popconfirm, Space, Table, Tag, Typography, message, Spin, Form, Input, Select } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import type { TableRowSelection } from 'antd/es/table/interface'
 import dayjs from 'dayjs'
@@ -31,6 +31,28 @@ const formatUTCToLocal = (utcTime: string | undefined): string => {
   if (!utcTime) return '-'
   return dayjs.utc(utcTime).local().format('YYYY/MM/DD HH:mm:ss')
 }
+
+const normalizeRagProvider = (value?: string | null): string => {
+  const normalized = (value || 'multi_stage').trim().toLowerCase()
+  return normalized || 'multi_stage'
+}
+
+const ragProviderMeta = {
+  multi_stage: { label: '标准', color: 'default' as const, desc: '多阶段检索' },
+  graph: { label: '图谱增强', color: 'geekblue' as const, desc: '文本图谱检索' },
+  multimodal_graph: { label: '多模态图谱', color: 'purple' as const, desc: '图/表/公式增强' },
+}
+
+const getRagProviderMeta = (value?: string | null) => {
+  const key = normalizeRagProvider(value) as keyof typeof ragProviderMeta
+  return ragProviderMeta[key] ?? ragProviderMeta.multi_stage
+}
+
+const ragProviderOptions = [
+  { value: 'multi_stage', label: '标准（多阶段检索）' },
+  { value: 'graph', label: '图谱增强（文本）' },
+  { value: 'multimodal_graph', label: '多模态图谱（图/表/公式）' },
+]
 
 export default function Index() {
   const navigate = useNavigate()
@@ -96,6 +118,10 @@ export default function Index() {
     if (!kbList) return null
     return kbList.find((kb: RepositoryKnowledgeBase) => kb.id === currentKbId) ?? null
   }, [kbList, currentKbId])
+  const currentProviderMeta = useMemo(
+    () => getRagProviderMeta(currentKb?.rag_provider),
+    [currentKb?.rag_provider],
+  )
 
   type TableItem = RepositoryDoc & {
     $suffix: FileIcon
@@ -130,6 +156,7 @@ export default function Index() {
     setKbModalMode('create')
     setEditingKb(null)
     kbForm.resetFields()
+    kbForm.setFieldsValue({ rag_provider: 'multi_stage' })
     setKbModalOpen(true)
   }, [kbForm])
 
@@ -140,6 +167,7 @@ export default function Index() {
       kbForm.setFieldsValue({
         name: kb.name,
         description: kb.description ?? '',
+        rag_provider: normalizeRagProvider(kb.rag_provider),
       })
       setKbModalOpen(true)
     },
@@ -151,22 +179,48 @@ export default function Index() {
     setKbModalOpen(false)
   }, [kbModalLoading])
 
+  const requestParseIndex = useCallback(async (kbId: number, docIds?: number[]) => {
+    try {
+      const payload = docIds && docIds.length ? { doc_ids: docIds } : {}
+      await api.repository.parseIndexDocuments(
+        {
+          kbId,
+          payload,
+        },
+        { errorToast: false },
+      )
+      message.success('解析任务已创建，可在任务记录查看进度')
+    } catch (error: any) {
+      const detail =
+        error?.response?.data?.detail ||
+        error?.response?.data?.message ||
+        error?.message
+      message.error(detail ? `解析任务创建失败：${detail}` : '解析任务创建失败')
+    }
+  }, [])
+
   const handleSubmitKbModal = useCallback(async () => {
     try {
       const values = await kbForm.validateFields()
+      const payload = {
+        ...values,
+        rag_provider: normalizeRagProvider(values.rag_provider),
+      }
       setKbModalLoading(true)
       if (kbModalMode === 'create') {
-        const { data } = await api.repository.createKnowledgeBase(values, { errorToast: false })
+        const { data } = await api.repository.createKnowledgeBase(payload, { errorToast: false })
         message.success('知识库创建成功')
         setKbModalOpen(false)
         kbForm.resetFields()
         await refreshKbList()
         handleSelectKnowledgeBase(data.id)
       } else if (editingKb) {
+        const previousProvider = normalizeRagProvider(editingKb.rag_provider)
+        const nextProvider = normalizeRagProvider(payload.rag_provider)
         await api.repository.updateKnowledgeBase(
           {
             kbId: editingKb.id,
-            payload: values,
+            payload,
           },
           { errorToast: false },
         )
@@ -175,6 +229,17 @@ export default function Index() {
         await refreshKbList()
         if (currentKbId === editingKb.id) {
           handleSelectKnowledgeBase(editingKb.id)
+        }
+        if (previousProvider !== nextProvider) {
+          Modal.confirm({
+            title: '检索模式已变更',
+            content: '切换检索模式后建议重新解析文档生成索引，是否立即执行？',
+            okText: '立即重新解析',
+            cancelText: '稍后再说',
+            onOk: async () => {
+              await requestParseIndex(editingKb.id)
+            },
+          })
         }
       }
     } catch (error: any) {
@@ -201,6 +266,7 @@ export default function Index() {
     refreshKbList,
     handleSelectKnowledgeBase,
     currentKbId,
+    requestParseIndex,
   ])
 
   const handleDeleteKnowledgeBase = useCallback(
@@ -238,6 +304,15 @@ export default function Index() {
         ellipsis: true,
         render(value: string | null) {
           return value || '-'
+        },
+      },
+      {
+        title: '检索模式',
+        dataIndex: 'rag_provider',
+        width: 140,
+        render(value: string | null) {
+          const meta = getRagProviderMeta(value)
+          return <Tag color={meta.color}>{meta.label}</Tag>
         },
       },
       {
@@ -431,6 +506,11 @@ export default function Index() {
   }, [columns])
 
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
+  const selectedDocIds = useMemo(() => {
+    return selectedRowKeys
+      .map((key) => Number(key))
+      .filter((value) => Number.isFinite(value))
+  }, [selectedRowKeys])
   const [jobModalOpen, setJobModalOpen] = useState(false)
   const [jobLoading, setJobLoading] = useState(false)
   const [jobList, setJobList] = useState<JobInfo[]>([])
@@ -447,6 +527,22 @@ export default function Index() {
     selectedRowKeys,
     onChange: onSelectChange,
   }
+  const handleReparseConfirm = useCallback(() => {
+    if (!currentKbId) return
+    const hasSelection = selectedDocIds.length > 0
+    const scopeLabel = hasSelection
+      ? `已选择的 ${selectedDocIds.length} 篇文档`
+      : '当前知识库全部文档'
+    Modal.confirm({
+      title: '重新解析入库',
+      content: `将重新解析${scopeLabel}，以刷新索引与图谱能力。是否继续？`,
+      okText: '开始解析',
+      cancelText: '取消',
+      onOk: async () => {
+        await requestParseIndex(currentKbId, hasSelection ? selectedDocIds : undefined)
+      },
+    })
+  }, [currentKbId, selectedDocIds, requestParseIndex])
 
   const parsePayload = (raw: unknown): any => {
     if (!raw) return null
@@ -629,6 +725,16 @@ export default function Index() {
             ? currentKb.description || '请在下方完成文档管理与导入。'
             : '在开始AI对话之前，请等待文档解析完成。'}
         </div>
+        {currentKb ? (
+          <div className={styles['meta']}>
+            <Space size={8}>
+              <Tag color={currentProviderMeta.color}>{currentProviderMeta.label}</Tag>
+              <Typography.Text type="secondary">
+                检索模式：{currentProviderMeta.desc}
+              </Typography.Text>
+            </Space>
+          </div>
+        ) : null}
       </div>
 
       <div className={styles['repository-page__body']}>
@@ -677,6 +783,12 @@ export default function Index() {
                   >
                     <PlusOutlined />
                     添加文档
+                  </Button>
+                  <Button
+                    disabled={!currentKbId || (documents?.length ?? 0) === 0}
+                    onClick={handleReparseConfirm}
+                  >
+                    重新解析入库
                   </Button>
                   <Button onClick={handleOpenJobModal} disabled={!currentKbId}>
                     查看任务记录
@@ -912,6 +1024,14 @@ export default function Index() {
             rules={[{ max: 500, message: '简介长度不能超过 500 个字符' }]}
           >
             <Input.TextArea rows={3} placeholder="请输入知识库简介（可选）" allowClear />
+          </Form.Item>
+          <Form.Item
+            label="检索模式"
+            name="rag_provider"
+            rules={[{ required: true, message: '请选择检索模式' }]}
+            extra="深度模式依赖图谱与多模态解析，切换后建议重新解析文档生成索引。"
+          >
+            <Select options={ragProviderOptions} />
           </Form.Item>
         </Form>
       </Modal>

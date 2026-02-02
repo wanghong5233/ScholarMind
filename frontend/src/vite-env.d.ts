@@ -9,7 +9,6 @@ interface Window {
 
 interface ImportMetaEnv {
   readonly VITE_LATEX_AGENT_BASE?: string
-  readonly VITE_LATEX_DEFAULT_USER_ID?: string
 }
 
 interface ImportMeta {
