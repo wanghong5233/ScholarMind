@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from config import settings
+from core.config import settings
 from service.state_store import StateStore
 
 

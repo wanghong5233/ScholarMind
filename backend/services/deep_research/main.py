@@ -7,7 +7,7 @@ import uuid
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from config import settings
+from core.config import settings
 from router import research_rt
 from utils.trace import clear_trace_id, get_trace_id, set_trace_id
 

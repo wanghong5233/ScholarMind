@@ -11,6 +11,14 @@ class Settings(BaseSettings):
     应用配置类，使用 Pydantic-settings 自动从环境变量加载配置。
     单一配置入口，避免多处加载 .env 造成的时序冲突。
     """
+    # Service identity
+    SERVICE_NAME: str = "scholarmind-api"
+    SERVICE_DISPLAY_NAME: str = "ScholarMind API"
+    SERVICE_DESCRIPTION: str = (
+        "ScholarMind 主站 API，提供 RAG 检索、会话管理、"
+        "知识库、文档处理与内部网关能力。"
+    )
+    SERVICE_VERSION: str = "0.1.0"
     # Semantic Scholar
     semantic_scholar_api_key: str | None = Field(None, env="SEMANTIC_SCHOLAR_API_KEY")
 
@@ -29,7 +37,7 @@ class Settings(BaseSettings):
     ROOT_PATH: str = ""
     # Internal service base URLs (Gateway/BFF)
     DEEP_RESEARCH_SERVICE_URL: str = "http://deep_research:8004"
-    LATEX_AGENT_SERVICE_URL: str = "http://latex_agent:8003"
+    DOC_STUDIO_SERVICE_URL: str = "http://doc_studio:8003"
 
     # Elasticsearch
     ES_HOST: str = "http://localhost:9200"

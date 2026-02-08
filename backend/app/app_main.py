@@ -22,8 +22,14 @@ from exceptions.base import APIException
 
 # 从配置获取 root_path
 root_path = settings.__dict__.get("ROOT_PATH", "")
+service_started_at = time.time()
 
-app = FastAPI(root_path=root_path)
+app = FastAPI(
+    title=settings.SERVICE_DISPLAY_NAME,
+    description=settings.SERVICE_DESCRIPTION,
+    version=settings.SERVICE_VERSION,
+    root_path=root_path,
+)
 
 # 定义请求处理中间件
 @app.middleware("http")
@@ -90,6 +96,18 @@ app.add_middleware(
     allow_methods=["*"],  # 允许所有方法
     allow_headers=["*"],  # 允许所有头
 )
+
+
+@app.get("/health")
+async def health_check():
+    """健康检查"""
+    return {
+        "status": "healthy",
+        "service": settings.SERVICE_NAME,
+        "display_name": settings.SERVICE_DISPLAY_NAME,
+        "version": settings.SERVICE_VERSION,
+        "uptime_secs": int(time.time() - service_started_at),
+    }
 
 # 包含各个模块的路由，并为它们设置统一的前缀和标签
 # 这有助于API文档的组织和URL的结构化

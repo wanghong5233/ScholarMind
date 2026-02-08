@@ -12,7 +12,7 @@ class NotebookNoteRequest(BaseModel):
 
     Args:
         selection (str): Selected text to summarize.
-        session_id (Optional[str]): Source session id.
+        session_id (str): Source session id.
         language (Optional[str]): Output language code.
         title (Optional[str]): Optional title hint.
         tags (List[str]): Optional tag hints.
@@ -24,7 +24,7 @@ class NotebookNoteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     selection: str = Field(..., min_length=1)
-    session_id: Optional[str] = None
+    session_id: str = Field(..., min_length=1)
     language: Optional[str] = None
     title: Optional[str] = None
     tags: List[str] = Field(default_factory=list)

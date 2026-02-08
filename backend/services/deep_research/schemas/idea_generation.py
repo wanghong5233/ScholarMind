@@ -26,7 +26,7 @@ class IdeaGenerationRequest(BaseModel):
 
     topic: Optional[str] = Field(default=None, min_length=1)
     idea_count: int = Field(default=5, ge=1, le=20)
-    session_id: Optional[str] = None
+    session_id: str = Field(..., min_length=1, description="Session id for ScholarMind RAG.")
     language: Optional[str] = None
     constraints: List[str] = Field(default_factory=list)
     notes: List[IdeaGenerationNote] = Field(default_factory=list)

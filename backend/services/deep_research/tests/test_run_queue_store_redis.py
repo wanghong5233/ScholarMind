@@ -6,7 +6,7 @@ from uuid import uuid4
 import pytest
 import redis
 
-from config import settings
+from core.config import settings
 from service.run_queue_store import RedisRunQueueStore
 
 

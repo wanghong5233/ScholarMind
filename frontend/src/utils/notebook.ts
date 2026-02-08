@@ -1,5 +1,5 @@
 import dayjs from 'dayjs'
-import { createFileOrDirectory, createWorkspace, fetchWorkspace } from '@/api/latexAgent'
+import { createFileOrDirectory, createWorkspace, fetchWorkspace } from '@/api/docStudio'
 
 export const NOTEBOOK_WORKSPACE_ID = 'notebook'
 export const NOTEBOOK_WORKSPACE_NAME = 'Notebook'

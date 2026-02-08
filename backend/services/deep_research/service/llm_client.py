@@ -6,6 +6,57 @@ import logging
 
 from openai import AsyncOpenAI
 
+from core.config import settings
+
+
+def resolve_llm_config(*, model_name_override: Optional[str] = None) -> tuple[Optional[str], str, str]:
+    """Resolve OpenAI-compatible LLM config with DashScope fallback."""
+
+    def is_placeholder(value: Optional[str]) -> bool:
+        if not value:
+            return True
+        raw = value.strip()
+        if raw in {"sk-...", "sk-xxxx", "sk-XXXXX"}:
+            return True
+        return raw.endswith("...")
+
+    openai_key = settings.OPENAI_API_KEY
+    dash_key = settings.DASHSCOPE_API_KEY
+    prefer = (settings.PREFERRED_LLM_PROVIDER or "dashscope").strip().lower()
+
+    has_openai = bool(openai_key) and not is_placeholder(openai_key)
+    has_dash = bool(dash_key) and not is_placeholder(dash_key)
+
+    if prefer == "openai" and has_openai:
+        return (
+            openai_key,
+            settings.OPENAI_BASE_URL,
+            model_name_override or settings.OPENAI_MODEL_NAME,
+        )
+    if has_dash:
+        return (
+            dash_key,
+            settings.DASHSCOPE_BASE_URL,
+            model_name_override or settings.DASHSCOPE_MODEL_NAME,
+        )
+    if has_openai:
+        return (
+            openai_key,
+            settings.OPENAI_BASE_URL,
+            model_name_override or settings.OPENAI_MODEL_NAME,
+        )
+    if prefer == "openai":
+        return (
+            openai_key,
+            settings.OPENAI_BASE_URL,
+            model_name_override or settings.OPENAI_MODEL_NAME,
+        )
+    return (
+        dash_key,
+        settings.DASHSCOPE_BASE_URL,
+        model_name_override or settings.DASHSCOPE_MODEL_NAME,
+    )
+
 
 class LLMClient:
     """Call an external LLM for report refinement."""

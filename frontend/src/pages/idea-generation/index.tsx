@@ -439,7 +439,7 @@ export default function IdeaGenerationPage() {
   const openNotebookInLatex = useCallback((path: string) => {
     if (typeof window === 'undefined') return
     const url = new URL(
-      `${import.meta.env.BASE_URL || '/'}latex-editor/${NOTEBOOK_WORKSPACE_ID}`,
+      `${import.meta.env.BASE_URL || '/'}doc-studio/${NOTEBOOK_WORKSPACE_ID}`,
       window.location.origin,
     )
     url.searchParams.set('file', path)

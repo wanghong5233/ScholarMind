@@ -2,6 +2,7 @@ import iconNewchat from '@/assets/layout/newchat.svg'
 import iconRepository from '@/assets/layout/repository.svg'
 import iconDebug from '@/assets/layout/debug.svg'
 import iconResearch from '@/assets/layout/debug.svg'
+import iconEdit from '@/assets/layout/edit.svg'
 import logo from '@/assets/logo.svg'
 import { deviceState } from '@/store/device'
 import { useLocation, useNavigate } from 'react-router-dom'
@@ -56,8 +57,8 @@ export function BaseLayout({ children }: { children?: React.ReactNode }) {
             </div>
 
           <div
-            className={`base-layout__nav-header ${isActive('/latex-editor') ? 'is-active' : ''}`}
-            onClick={() => (device.chatting ? null : navigate('/latex-editor'))}
+            className={`base-layout__nav-header ${isActive('/doc-studio') ? 'is-active' : ''}`}
+            onClick={() => (device.chatting ? null : navigate('/doc-studio'))}
           >
               <img
                 className="base-layout__nav-header-icon"

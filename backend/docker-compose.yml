@@ -183,12 +183,12 @@ services: # 定义一系列的服务（容器）
     networks:
       - scholarmind_net
 
-  latex_agent: # LaTeX 编辑 Agent 服务
-    container_name: scholarmind_latex_agent
+  doc_studio: # Doc Studio 服务
+    container_name: scholarmind_doc_studio
     build:
-      context: ./services/latex_agent
+      context: ./services/doc_studio
       dockerfile: Dockerfile
-    hostname: latex_agent
+    hostname: doc_studio
     env_file:
       - .env  # 加载 .env 文件，包含 LLM_API_KEY 等配置
     environment:
@@ -201,7 +201,7 @@ services: # 定义一系列的服务（容器）
       - "8003:8003"  # 暴露端口供调试
     volumes:
       - latex_workspaces:/app/workspaces  # 工作区文件存储
-      - ./services/latex_agent:/app  # 代码热更新（开发环境）
+      - ./services/doc_studio:/app  # 代码热更新（开发环境）
     command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8003", "--reload"]  # 开启热重载
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8003/health || exit 1"]

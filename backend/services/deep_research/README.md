@@ -103,6 +103,8 @@ uvicorn main:app --reload --port 8004
 Key request flags:
 - `use_web_search`: enable web search tools per run
 - `use_code_exec`: enable code execution tools per run
+- `metadata.deep_research_preset`: `quick`/`medium`/`deep` (server-side preset mapping when params use defaults)
+- `session_id` is required for `/idea-generation` and `/notebook` to provide RAG context
 
 Streaming progress:
 - `GET /api/deep-research/{research_id}/progress/stream?user_id=1`
@@ -112,14 +114,18 @@ Progress retention:
 - `PROGRESS_TAIL_LINES` controls how many recent events are kept after trimming.
 
 ## Report LLM Refinement (Optional)
-Set the following environment variables to enable LLM-based report generation:
+Set the following environment variables to enable LLM-based report generation (OpenAI-compatible, DashScope supported):
 
 - `REPORT_LLM_ENABLED=true`
 - `REPORT_LLM_SECTIONAL=true` (optional; generate section-by-section and write partial `report.json` for live preview)
 - `REPORT_LLM_SECTION_MAX_TOKENS=1024` (optional per-section budget)
-- `OPENAI_API_KEY=...`
-- `OPENAI_BASE_URL=https://api.openai.com/v1`
-- `OPENAI_MODEL_NAME=gpt-4o`
+- `PREFERRED_LLM_PROVIDER=dashscope|openai` (default: dashscope)
+- `DASHSCOPE_API_KEY=...`
+- `DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1`
+- `DASHSCOPE_MODEL_NAME=qwen-plus`
+- `OPENAI_API_KEY=...` (optional)
+- `OPENAI_BASE_URL=https://api.openai.com/v1` (optional)
+- `OPENAI_MODEL_NAME=gpt-4o` (optional)
 
 ## Research Decision LLM (Optional)
 Enable LLM-driven tool selection and sufficiency checks:

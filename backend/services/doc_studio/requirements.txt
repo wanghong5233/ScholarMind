@@ -1,0 +1,33 @@
+# Doc Studio Service 依赖
+
+# Web 框架
+fastapi==0.115.0
+uvicorn==0.31.0
+pydantic==2.10.1
+pydantic-settings==2.10.1
+
+# HTTP 客户端（用于调用主应用 API）
+httpx==0.28.1
+
+# LaTeX 处理
+pylatexenc==2.10
+
+# LLM 客户端（根据实际使用的 LLM 选择）
+openai>=1.0.0
+dashscope>=1.17.0
+
+# 工具库
+python-multipart==0.0.11
+
+# 数据库与 ORM
+SQLAlchemy==2.0.36
+psycopg2-binary==2.9.10
+
+# 日志
+loguru==0.7.3
+
+# 其他工具
+python-dotenv==1.0.0
+fastapi-jwt==0.3.0
+pyyaml
+

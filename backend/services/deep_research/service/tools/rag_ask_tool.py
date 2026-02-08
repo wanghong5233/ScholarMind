@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from config import settings
+from core.config import settings
 from service.citation_manager import AsyncCitationManagerWrapper
 from service.citation_utils import register_rag_citations
 from service.data_structures import ScholarCitation, ToolTrace, ToolType
-from service.llm_client import LLMClient
+from service.llm_client import LLMClient, resolve_llm_config
 from service.rag_client import RAGClient
 from service.tools.base_tool import BaseTool, ToolContext, ToolResult
 
@@ -40,10 +40,11 @@ class RagAskTool(BaseTool):
         )
         self._rag_client = rag_client
         self._citation_manager = citation_manager
+        api_key, base_url, model_name = resolve_llm_config()
         self._llm_client = llm_client or LLMClient(
-            api_key=settings.OPENAI_API_KEY,
-            base_url=settings.OPENAI_BASE_URL,
-            model_name=settings.OPENAI_MODEL_NAME,
+            api_key=api_key,
+            base_url=base_url,
+            model_name=model_name,
             temperature=0.2,
             max_tokens=512,
             timeout=settings.REQUEST_TIMEOUT,

@@ -1,6 +1,6 @@
 """
 内部服务 API 路由
-专门用于服务间调用（如 LaTeX Agent）
+专门用于服务间调用（如 Doc Studio）
 """
 import json
 from dataclasses import asdict
@@ -30,7 +30,7 @@ router = APIRouter(prefix="/internal", tags=["Internal Services"])
 
 def _is_service_token(user_name: str) -> bool:
     """Check if the token subject indicates a service caller."""
-    prefixes = ("deep-research-", "latex-agent-", "service-")
+    prefixes = ("deep-research-", "doc-studio-", "service-")
     return any((user_name or "").startswith(prefix) for prefix in prefixes)
 
 
@@ -97,7 +97,7 @@ def internal_retrieve(
     """
     内部服务专用检索接口（无需 session_id）
     
-    用于 LaTeX Agent 等内部服务直接基于 kb_id 进行检索
+    用于 Doc Studio 等内部服务直接基于 kb_id 进行检索
     不依赖 session，直接使用 global_only 模式
     """
     # 验证知识库归属

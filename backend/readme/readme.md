@@ -24,6 +24,7 @@ ScholarMind 后端是一个基于 **FastAPI** 构建的 Python 服务，旨在�
   - 元数据增强的排序
   - 语义感知分块（Semantic-Aware Chunking）
   - 多模态信息提取（图表、表格）
+- **图谱增强检索（可选）**: 支持 `graph`/`multimodal_graph` provider，结合实体关系抽取提升召回质量。
 - **多轮对话与上下文管理**: 支持长会话的 Token 预算控制与滚动摘要。
 - **可配置与可观测**: 通过特征旗标 (Feature Flags) 实现策略灰度，通过结构化日志与指标接口保障系统可维护性。
 - **产品化 API**: 提供跨论文对比、批判性问题生成等实用功能。
@@ -31,9 +32,10 @@ ScholarMind 后端是一个基于 **FastAPI** 构建的 Python 服务，旨在�
 ### 规划中功能 🚧
 
 - **RL 重排器 (Reranker)**: 基于隐式用户反馈（点击、停留）训练的强化学习模型，动态优化检索结果排序。
-- **LLM Agent 自动化**: 支持工具调用 (Tool Calling) 的 Agent 系统，用于复杂任务如自动化 Related Work 撰写。
 - **Agent 策略优化**: 使用 PPO/REINFORCE 优化 Agent 的规划与推理策略。
-- **知识图谱**: 从文献中自动抽取实体与关系，构建可视化的学术知识图谱。
+
+> 说明：Agent 能力已由独立服务提供（`backend/services/deep_research` 与
+> `backend/services/doc_studio`），主站 RAG 保持工具化与可复用。
 
 ## 3. 技术架构详解
 

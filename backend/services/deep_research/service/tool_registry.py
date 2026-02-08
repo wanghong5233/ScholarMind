@@ -18,7 +18,7 @@ from service.tools import (
     WebSearchTool,
 )
 from service.web_search_client import WebSearchClient
-from config import settings
+from core.config import settings
 
 logger = logging.getLogger(__name__)
 

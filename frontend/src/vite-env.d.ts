@@ -8,7 +8,7 @@ interface Window {
 }
 
 interface ImportMetaEnv {
-  readonly VITE_LATEX_AGENT_BASE?: string
+  readonly VITE_DOC_STUDIO_BASE?: string
 }
 
 interface ImportMeta {

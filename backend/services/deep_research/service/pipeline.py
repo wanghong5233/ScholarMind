@@ -22,7 +22,7 @@ from schemas.common import (
     DeepResearchStatus,
 )
 from service.citation_manager import AsyncCitationManagerWrapper, CitationManager
-from service.llm_client import LLMClient
+from service.llm_client import LLMClient, resolve_llm_config
 from service.data_structures import DynamicTopicQueue, TopicStatus
 from service.code_exec_client import CodeExecClient
 from service.rag_client import RAGClient
@@ -36,7 +36,7 @@ from service.tool_registry import create_tool_registry
 from service.tool_router import ToolRouter
 from service.web_search_client import WebSearchClient
 from utils.language import guess_language
-from config import settings
+from core.config import settings
 
 
 class ResearchPipeline:
@@ -723,10 +723,11 @@ class ResearchPipeline:
                         max_code_chars=settings.CODE_EXEC_MAX_CODE_CHARS,
                     )
 
+                rag_api_key, rag_base_url, rag_model_name = resolve_llm_config()
                 rag_llm_client = LLMClient(
-                    api_key=settings.OPENAI_API_KEY,
-                    base_url=settings.OPENAI_BASE_URL,
-                    model_name=settings.OPENAI_MODEL_NAME,
+                    api_key=rag_api_key,
+                    base_url=rag_base_url,
+                    model_name=rag_model_name,
                     temperature=0.2,
                     max_tokens=512,
                     timeout=self._request_timeout,
@@ -1087,10 +1088,13 @@ class ResearchPipeline:
             for item in settings.COMPARE_DIMENSIONS_ZH.split(",")
             if item.strip()
         ]
+        decision_api_key, decision_base_url, decision_model_name = resolve_llm_config(
+            model_name_override=settings.DECISION_LLM_MODEL_NAME or None
+        )
         llm_client = LLMClient(
-            api_key=settings.OPENAI_API_KEY,
-            base_url=settings.OPENAI_BASE_URL,
-            model_name=settings.DECISION_LLM_MODEL_NAME or settings.OPENAI_MODEL_NAME,
+            api_key=decision_api_key,
+            base_url=decision_base_url,
+            model_name=decision_model_name,
             temperature=settings.DECISION_LLM_TEMPERATURE,
             max_tokens=settings.DECISION_LLM_MAX_TOKENS,
             timeout=self._request_timeout,
@@ -1187,10 +1191,11 @@ class ResearchPipeline:
         if not getattr(settings, "REPORT_LLM_ENABLED", False):
             return None
 
+        report_api_key, report_base_url, report_model_name = resolve_llm_config()
         client = LLMClient(
-            api_key=settings.OPENAI_API_KEY,
-            base_url=settings.OPENAI_BASE_URL,
-            model_name=settings.OPENAI_MODEL_NAME,
+            api_key=report_api_key,
+            base_url=report_base_url,
+            model_name=report_model_name,
             temperature=settings.REPORT_LLM_TEMPERATURE,
             max_tokens=settings.REPORT_LLM_MAX_TOKENS,
             timeout=self._request_timeout,
@@ -1254,10 +1259,11 @@ class ResearchPipeline:
         if not getattr(settings, "REPORT_LLM_ENABLED", False):
             return None
 
+        section_api_key, section_base_url, section_model_name = resolve_llm_config()
         client = LLMClient(
-            api_key=settings.OPENAI_API_KEY,
-            base_url=settings.OPENAI_BASE_URL,
-            model_name=settings.OPENAI_MODEL_NAME,
+            api_key=section_api_key,
+            base_url=section_base_url,
+            model_name=section_model_name,
             temperature=settings.REPORT_LLM_TEMPERATURE,
             max_tokens=settings.REPORT_LLM_MAX_TOKENS,
             timeout=self._request_timeout,

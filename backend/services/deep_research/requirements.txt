@@ -1,7 +1,7 @@
 # DeepResearch Service dependencies
 
 fastapi==0.115.0
-fastapi-jwt
+fastapi-jwt==0.3.0
 uvicorn==0.31.0
 pydantic==2.10.1
 pydantic-settings==2.10.1

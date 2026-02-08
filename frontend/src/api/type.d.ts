@@ -5,7 +5,7 @@ declare namespace API {
   }
 }
 
-declare namespace LatexAgentAPI {
+declare namespace DocStudioAPI {
   interface WorkspaceSummary {
     workspaceId: string
     name: string

@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from config import settings
+from core.config import settings
 from schemas.common import CitationOut
 from schemas.idea_generation import (
     IdeaCandidate,
@@ -454,7 +454,7 @@ class IdeaGenerationPipeline:
         stage: str,
     ) -> Any:
         answer = await rag_client.ask(
-            session_id=request.session_id or "",
+            session_id=request.session_id,
             question=prompt,
             user_id=user_id,
             top_k=request.top_k,
@@ -470,7 +470,7 @@ class IdeaGenerationPipeline:
             return payload
         repair_prompt = self._build_repair_prompt(answer.answer or "")
         repaired = await rag_client.ask(
-            session_id=request.session_id or "",
+            session_id=request.session_id,
             question=repair_prompt,
             user_id=user_id,
             top_k=request.top_k,
@@ -493,7 +493,7 @@ class IdeaGenerationPipeline:
         stage: str,
     ) -> str:
         answer = await rag_client.ask(
-            session_id=request.session_id or "",
+            session_id=request.session_id,
             question=prompt,
             user_id=user_id,
             top_k=request.top_k,

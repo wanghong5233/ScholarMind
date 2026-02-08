@@ -3,7 +3,7 @@
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from config import settings
+from core.config import settings
 from main import app
 from schemas.common import DeepResearchStatus
 from service.state_store import StateStore

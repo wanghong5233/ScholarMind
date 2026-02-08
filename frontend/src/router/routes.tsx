@@ -7,7 +7,7 @@ import Repository from '@/pages/repository'
 import ParseDebugPage from '@/pages/debug/parse'
 import RetrievalDebugPage from '@/pages/debug/retrieval'
 import RepositoryOnlineImport from '@/pages/repository/OnlineImport'
-import LatexEditorPage from '@/pages/latex-editor'
+import DocStudioPage from '@/pages/doc-studio'
 import DeepResearchPage from '@/pages/deep-research'
 import IdeaGenerationPage from '@/pages/idea-generation'
 import {
@@ -52,8 +52,8 @@ export const routes: IRouteObject[] = [
     Component: RetrievalDebugPage,
   },
   {
-    path: '/latex-editor/:workspaceId?',
-    Component: LatexEditorPage,
+    path: '/doc-studio/:workspaceId?',
+    Component: DocStudioPage,
   },
   {
     path: '/deep-research',

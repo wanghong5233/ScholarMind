@@ -10,7 +10,7 @@ from typing import Any, AsyncGenerator, Dict, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from config import settings
+from core.config import settings
 from schemas.common import (
     BlockEvidence,
     DeepResearchRequest,
@@ -52,6 +52,7 @@ from service.rag_client import RAGClient
 from service.report_exporter import render_html, render_pdf
 from service.run_manager import RunManager
 from service.state_store import StateStore
+from utils.request_normalizer import apply_deep_research_preset
 
 router = APIRouter()
 run_manager = RunManager(
@@ -102,6 +103,7 @@ async def preview_deep_research_plan(
     user_id: int = Depends(get_user_id),
 ) -> DeepResearchPlan:
     """Generate a preview plan for a DeepResearch run."""
+    payload = apply_deep_research_preset(payload)
 
     planner = PlannerAgent(
         depth=payload.depth,
@@ -151,6 +153,7 @@ async def run_deep_research(
             status_code=409,
             detail="Synchronous run disabled; use /deep-research/submit",
         )
+    payload = apply_deep_research_preset(payload)
     pipeline = ResearchPipeline(
         rag_service_url=settings.RAG_SERVICE_URL,
         data_root=settings.DATA_ROOT,
@@ -170,6 +173,7 @@ async def submit_deep_research(
 ) -> DeepResearchSubmitResponse:
     """Submit a DeepResearch run in the background."""
 
+    payload = apply_deep_research_preset(payload)
     try:
         research_id, status, queue_position, active_runs, pending_runs = await run_manager.submit(
             payload, user_id=user_id

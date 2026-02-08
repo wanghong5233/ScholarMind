@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from config import settings
+from core.config import settings
 from schemas.common import DeepResearchRequest, DeepResearchStatus
 from service.pipeline import ResearchPipeline
 from service.run_queue_store import create_queue_store

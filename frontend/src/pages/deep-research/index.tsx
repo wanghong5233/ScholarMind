@@ -15,7 +15,7 @@ import type {
 } from '@/api/deepResearch'
 import Markdown from '@/components/markdown'
 import { exportToPdf } from '@/utils/pdfExport'
-import { createWorkspace, updateFileContent } from '@/api/latexAgent'
+import { createWorkspace, updateFileContent } from '@/api/docStudio'
 import { useRequest } from 'ahooks'
 import dayjs from 'dayjs'
 import {
@@ -1582,7 +1582,7 @@ export default function DeepResearchPage() {
         content: reportMarkdown,
       })
       message.success('已导入到 Doc Studio')
-      navigate(`/latex-editor/${workspace.workspaceId}?file=report.md`)
+      navigate(`/doc-studio/${workspace.workspaceId}?file=report.md`)
     } catch (error) {
       message.error('导入到 Doc Studio 失败')
     } finally {

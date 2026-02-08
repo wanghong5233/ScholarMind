@@ -6,7 +6,7 @@ from datetime import datetime
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from config import settings
+from core.config import settings
 from main import app
 from router import research_rt
 from schemas.common import DeepResearchStatus

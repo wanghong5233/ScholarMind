@@ -137,15 +137,15 @@ async def proxy_deep_research(
 
 
 @router.api_route(
-    "/latex-agent/{path:path}",
+    "/doc-studio/{path:path}",
     methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
 )
-async def proxy_latex_agent(
+async def proxy_doc_studio(
     request: Request,
     path: str,
     current_user: User = Depends(get_current_user),
 ):
-    """Proxy LaTeX Agent service requests."""
-    base = settings.LATEX_AGENT_SERVICE_URL.rstrip("/")
+    """Proxy Doc Studio service requests."""
+    base = settings.DOC_STUDIO_SERVICE_URL.rstrip("/")
     upstream_path = f"/api/{path}" if path else "/api"
     return await _proxy_request(request, f"{base}{upstream_path}", current_user)

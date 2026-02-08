@@ -6,7 +6,7 @@ from datetime import datetime
 
 import pytest
 
-from config import settings
+from core.config import settings
 from schemas.common import DeepResearchMode, DeepResearchRequest
 from service.pipeline import ResearchPipeline
 from service.run_manager import RunManager

@@ -7,7 +7,7 @@
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100%2B-009688.svg)](https://fastapi.tiangolo.com/)
 [![React](https://img.shields.io/badge/React-18.0%2B-61DAFB.svg)](https://react.dev/)
 [![RAG](https://img.shields.io/badge/RAG-Advanced-orange.svg)](#)
-[![RL](https://img.shields.io/badge/Reranker-RL--Powered-red.svg)](#)
+[![RL](https://img.shields.io/badge/Reranker-Roadmap-lightgrey.svg)](#)
 [![Agent](https://img.shields.io/badge/LLM-Agent-purple.svg)](#)
 
 ScholarMind is an advanced research assistant designed for academic literature analysis. It goes beyond simple document Q&A by deeply understanding multi-modal academic papers, helping researchers with literature reviews, cross-paper comparison, and critical thinking.
@@ -19,6 +19,9 @@ ScholarMind is an advanced research assistant designed for academic literature a
   - Multi-Query retrieval with RRF fusion
   - Semantic-aware chunking for better context coherence
   - Metadata-enriched hierarchical retrieval
+- **🕸️ Graph-Enhanced Retrieval (Optional)**: LightRAG-style graph provider for concept-level evidence
+- **🧭 DeepResearch Pipeline**: Queue-based orchestration, progress tracking, exports, and run comparison
+- **📝 Doc Studio Workspace**: Markdown/LaTeX editing with diff/rollback and operation history
 - **🔒 Private & Offline First**: Support for local LLM/Embedding models (no data leakage)
 - **🔧 Pluggable Architecture**: Easily switch between different models (Embedders, Rerankers, LLMs)
 - **📊 Scholar-Oriented Features**:
@@ -74,11 +77,12 @@ This project is containerized using Docker. Ensure you have Docker and Docker Co
 
 ## 🔬 Research & Innovation
 
-This project explores cutting-edge techniques at the intersection of **RAG, RL, and LLM Agents**:
+This project combines production-ready RAG/Agent systems with a roadmap for RL-driven optimization:
 
-- **Reinforcement Learning for Information Retrieval**: Training rerankers on implicit user signals to maximize user satisfaction
-- **LLM Agent Optimization**: Applying RL (PPO/REINFORCE) to improve multi-step planning and tool use in complex research tasks
+- **Graph-Enhanced Retrieval (LightRAG-style)**: Optional graph provider for concept-level evidence
 - **Multimodal RAG**: Treating figures and tables as first-class knowledge units alongside text
+- **Reinforcement Learning for Information Retrieval (Roadmap)**: Rerankers trained on implicit user signals
+- **LLM Agent Optimization (Roadmap)**: RL (PPO/REINFORCE) for multi-step planning/tool use
 
 These innovations aim to bridge the gap between academic research and production systems, demonstrating how advanced ML techniques can be applied to real-world problems.
 
@@ -109,15 +113,16 @@ This project demonstrates production-level engineering practices in RAG systems:
 - 📝 **Academic Language Polishing**: Transform drafts into publication-ready prose
 - 📝 **Context-Aware Writing**: Generate paper sections grounded in your knowledge base
 
-#### **Phase 4: Agentic Automation**
-- 🤖 **Agent-Powered Related Work Generation**: Autonomous multi-step planning with tool calling
+#### **Phase 4: Advanced Agentic Automation (Roadmap)**
+- 🤖 **Agent-Powered Related Work Generation**: Autonomous multi-step drafting pipelines
   - Tools: `search_papers`, `read_and_summarize`, `synthesize_content`, `format_bibliography`
   - **Target**: Generate 80% ready-to-use Related Work sections
-- 🤖 **Agent Planning Optimization via RL**: Fine-tune agent decision-making policies using PPO/REINFORCE
+- 🤖 **Agent Planning Optimization via RL**: Fine-tune decision-making with PPO/REINFORCE
   - Optimize tool selection and parameter generation for complex research tasks
+> Base agentic workflows already exist in DeepResearch and Doc Studio; this phase focuses on full automation.
 
-#### **Phase 5: Knowledge Intelligence**
-- 🕸️ **Knowledge Graph Construction**: LLM-powered entity and relation extraction
+#### **Phase 5: Knowledge Intelligence (Roadmap)**
+- 🕸️ **Graph Analytics & Visualization**: Extend beyond current graph-enhanced retrieval
   - Visualize author networks, research trends, and paper relationships
 - 📊 **Literature Analytics**: Topic modeling, citation impact analysis, research gap detection
 

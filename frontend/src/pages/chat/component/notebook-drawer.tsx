@@ -1,5 +1,5 @@
 import * as api from '@/api'
-import { fetchFileContent, fetchWorkspaceFiles } from '@/api/latexAgent'
+import { fetchFileContent, fetchWorkspaceFiles } from '@/api/docStudio'
 import {
   NOTEBOOK_WORKSPACE_ID,
   createNotebookNoteFile,
@@ -103,9 +103,9 @@ function parseNoteMeta(content: string) {
   }
 }
 
-function flattenFiles(nodes: LatexAgentAPI.FileNode[]): LatexAgentAPI.FileNode[] {
-  const result: LatexAgentAPI.FileNode[] = []
-  const walk = (items: LatexAgentAPI.FileNode[]) => {
+function flattenFiles(nodes: DocStudioAPI.FileNode[]): DocStudioAPI.FileNode[] {
+  const result: DocStudioAPI.FileNode[] = []
+  const walk = (items: DocStudioAPI.FileNode[]) => {
     items.forEach((node) => {
       if (node.type === 'file') {
         result.push(node)
@@ -263,7 +263,7 @@ export default function NotebookDrawer(props: NotebookDrawerProps) {
   const handleOpenNote = useCallback(
     (note: NotebookNoteEntry) => {
       navigate(
-        `/latex-editor/${NOTEBOOK_WORKSPACE_ID}?file=${encodeURIComponent(note.path)}`,
+        `/doc-studio/${NOTEBOOK_WORKSPACE_ID}?file=${encodeURIComponent(note.path)}`,
       )
     },
     [navigate],

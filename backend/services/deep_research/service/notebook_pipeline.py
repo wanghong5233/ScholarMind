@@ -7,7 +7,7 @@ from datetime import datetime
 import uuid
 from typing import Any, Dict, List
 
-from config import settings
+from core.config import settings
 from schemas.notebook import NotebookNoteRequest, NotebookNoteResponse
 from schemas.common import CitationOut
 from service.rag_client import RAGClient
@@ -124,7 +124,7 @@ class NotebookPipeline:
         """
 
         answer = await rag_client.ask(
-            session_id=request.session_id or "",
+            session_id=request.session_id,
             question=prompt,
             user_id=user_id,
             top_k=request.top_k,
@@ -135,7 +135,7 @@ class NotebookPipeline:
             return payload, self._normalize_citations(answer.citations)
         repair_prompt = self._build_repair_prompt(answer.answer or "")
         repaired = await rag_client.ask(
-            session_id=request.session_id or "",
+            session_id=request.session_id,
             question=repair_prompt,
             user_id=user_id,
             top_k=request.top_k,
