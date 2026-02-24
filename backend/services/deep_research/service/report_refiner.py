@@ -35,7 +35,8 @@ class ReportRefiner:
         citation_table: List[str],
         report_style: Optional[str] = None,
         context_text: Optional[str] = None,
-    ) -> Optional[str]:
+        input_token_budget: Optional[int] = None,
+    ) -> str:
         """Generate a refined report with the LLM.
 
         Args:
@@ -47,7 +48,7 @@ class ReportRefiner:
             context_text (Optional[str]): Optional conversation context.
 
         Returns:
-            Optional[str]: Refined report markdown, or None on failure.
+            str: Refined report markdown.
         """
 
         prompt = self._template_builder.build_prompt(
@@ -57,8 +58,9 @@ class ReportRefiner:
             citation_table=citation_table,
             report_style=report_style,
             context_text=context_text,
+            input_token_budget=input_token_budget,
         )
         output = await self._llm_client.generate(prompt)
-        if not output:
-            self._logger.warning("LLM report generation failed; using draft report.")
+        if not output or not output.strip():
+            raise RuntimeError("LLM report generation returned empty output.")
         return output

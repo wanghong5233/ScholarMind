@@ -1,9 +1,9 @@
 import * as api from '@/api'
-import IconRecorder from '@/assets/component/recorder.svg'
-import IconRecorderActive from '@/assets/component/recorder@active.svg'
+import { AudioOutlined } from '@ant-design/icons'
 import { useUnmount } from 'ahooks'
 import { Button } from 'antd'
 import { LabASR } from 'byted-ailab-speech-sdk'
+import classNames from 'classnames'
 import { useRef, useState } from 'react'
 
 function buildFullUrl(url: string, auth: Record<string, string>) {
@@ -16,8 +16,18 @@ function buildFullUrl(url: string, auth: Record<string, string>) {
 
 export default function Recorder(props: {
   onMessage?: (text: string, fullData: Record<string, any>) => void
+  buttonClassName?: string
+  activeButtonClassName?: string
+  disabled?: boolean
+  title?: string
 }) {
-  const { onMessage } = props
+  const {
+    onMessage,
+    buttonClassName,
+    activeButtonClassName,
+    disabled,
+    title,
+  } = props
 
   const recordStopping = useRef(false)
   const fullResponseRef = useRef<any>()
@@ -106,13 +116,28 @@ export default function Recorder(props: {
 
   useUnmount(stopASR)
 
-  return recording ? (
-    <Button shape="circle" variant="filled" danger onClick={stopASR}>
-      <img src={IconRecorderActive} style={{ width: 20, height: 20 }} />
-    </Button>
-  ) : (
-    <Button shape="circle" variant="filled" color="default" onClick={startASR}>
-      <img src={IconRecorder} />
-    </Button>
+  return (
+    <Button
+      type="text"
+      shape="circle"
+      className={classNames(
+        buttonClassName,
+        {
+          'sender-recorder--recording': recording,
+        },
+        recording ? activeButtonClassName : undefined,
+      )}
+      icon={
+        recording ? (
+          <span className="sender-recorder__stop-icon" />
+        ) : (
+          <AudioOutlined />
+        )
+      }
+      title={recording ? '停止语音输入' : title || '语音输入'}
+      loading={starting}
+      disabled={Boolean(disabled) || starting}
+      onClick={recording ? stopASR : startASR}
+    />
   )
 }

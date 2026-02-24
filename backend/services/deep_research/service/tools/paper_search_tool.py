@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import math
 import re
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -16,6 +17,7 @@ except ImportError:  # pragma: no cover - optional dependency
 from service.citation_manager import AsyncCitationManagerWrapper
 from service.citation_utils import register_paper_citations
 from service.data_structures import ScholarCitation, ToolTrace, ToolType
+from service.llm_client import LLMClient
 from service.rag_client import RAGClient
 from service.tools.base_tool import BaseTool, ToolContext, ToolResult
 
@@ -37,6 +39,7 @@ class PaperSearchTool(BaseTool):
         arxiv_timeout_seconds: int = 20,
         arxiv_retries: int = 2,
         arxiv_delay_seconds: float = 0.5,
+        query_rewrite_llm_client: Optional[LLMClient] = None,
     ) -> None:
         """Initialize the paper search tool."""
 
@@ -80,6 +83,7 @@ class PaperSearchTool(BaseTool):
         self._arxiv_timeout_seconds = max(1, int(arxiv_timeout_seconds))
         self._arxiv_retries = max(0, int(arxiv_retries))
         self._arxiv_delay_seconds = max(0.0, float(arxiv_delay_seconds))
+        self._query_rewrite_llm_client = query_rewrite_llm_client
         self._arxiv_client = (
             arxiv.Client(
                 page_size=self._arxiv_max_results,
@@ -95,26 +99,12 @@ class PaperSearchTool(BaseTool):
 
         query = (parameters.get("query") or context.block.question or "").strip()
         if not query:
-            return ToolResult(
-                success=False,
-                summary="Missing query for paper search.",
-                raw={},
-                citations=[],
-                trace=None,
-                error="missing_query",
-            )
+            raise ValueError("Missing query for paper search.")
 
         kb_id = parameters.get("kb_id")
         if kb_id is None:
             if not context.session_id:
-                return ToolResult(
-                    success=False,
-                    summary="Missing session_id for paper search.",
-                    raw={},
-                    citations=[],
-                    trace=None,
-                    error="missing_session_id",
-                )
+                raise ValueError("Missing session_id for paper search.")
             try:
                 session_detail = await self._rag_client.get_session_detail(
                     session_id=context.session_id,
@@ -122,24 +112,10 @@ class PaperSearchTool(BaseTool):
                 )
                 kb_id = session_detail.get("kbId")
             except Exception as exc:  # noqa: BLE001 - surface error for logging
-                return ToolResult(
-                    success=False,
-                    summary="Failed to resolve session knowledge base.",
-                    raw={"error": str(exc)},
-                    citations=[],
-                    trace=None,
-                    error="session_lookup_failed",
-                )
+                raise RuntimeError(f"Failed to resolve session knowledge base: {exc}") from exc
 
         if not kb_id:
-            return ToolResult(
-                success=False,
-                summary="Missing knowledge base binding for paper search.",
-                raw={},
-                citations=[],
-                trace=None,
-                error="missing_kb_id",
-            )
+            raise RuntimeError("Missing knowledge base binding for paper search.")
 
         limit = int(parameters.get("limit") or self._max_results)
         limit = max(1, min(limit, 50))
@@ -151,49 +127,62 @@ class PaperSearchTool(BaseTool):
         if rank_by not in {"hybrid", "recent", "citations", "relevance"}:
             rank_by = "hybrid"
 
-        errors: Dict[str, str] = {}
-        results: List[Dict[str, Any]] = []
+        errors, results = await self._collect_results_from_providers(
+            query=query,
+            kb_id=int(kb_id),
+            user_id=context.user_id,
+            limit=limit,
+            year_filter=year_filter,
+            providers=providers,
+            rank_by=rank_by,
+        )
 
-        if "semantic_scholar" in providers:
-            try:
-                semantic_papers = await self._rag_client.search_online_papers(
+        if not results and self._contains_cjk(query):
+            rewritten_query = await self._rewrite_query_for_global_search(query)
+            if rewritten_query and rewritten_query.strip().lower() != query.strip().lower():
+                rewrite_errors, rewrite_results = await self._collect_results_from_providers(
+                    query=rewritten_query,
                     kb_id=int(kb_id),
-                    query=query,
                     user_id=context.user_id,
-                    limit=max(limit, self._max_results),
-                    year=year_filter,
+                    limit=limit,
+                    year_filter=year_filter,
+                    providers=providers,
+                    rank_by=rank_by,
                 )
-                results.extend(
-                    self._normalize_semantic_scholar(semantic_papers, provider_rank_offset=0)
-                )
-            except Exception as exc:  # noqa: BLE001 - surface error for logging
-                errors["semantic_scholar"] = str(exc)
-
-        if "arxiv" in providers:
-            if not self._arxiv_client:
-                errors["arxiv"] = "arxiv library not available"
-            else:
-                try:
-                    arxiv_results = await self._search_arxiv(query, year_filter, limit, rank_by)
-                    results.extend(
-                        self._normalize_arxiv(arxiv_results, provider_rank_offset=len(results))
-                    )
-                except Exception as exc:  # noqa: BLE001 - surface error for logging
-                    errors["arxiv"] = str(exc)
+                errors["query_rewrite"] = rewritten_query
+                for provider, detail in rewrite_errors.items():
+                    errors[f"rewrite:{provider}"] = detail
+                if rewrite_results:
+                    results = rewrite_results
 
         if not results:
-            summary = "No paper search results."
+            if errors:
+                normalized_errors = "; ".join(f"{name}={detail}" for name, detail in errors.items())
+                raise RuntimeError(f"paper.search provider errors: {normalized_errors}")
+            # Empty search result is a valid outcome in real-world research flows.
+            # Treat it as a non-fatal tool completion so the agent can continue
+            # with other evidence channels (web search / follow-up / compare).
+            summary = "No relevant papers found for this query."
+            trace = self._build_trace(context, query, summary, [])
             return ToolResult(
-                success=False,
+                success=True,
                 summary=summary,
                 raw={"providers": providers, "errors": errors, "papers": []},
                 citations=[],
-                trace=self._build_trace(context, query, summary, []),
-                error="paper_search_failed",
+                trace=trace,
             )
 
         deduped = self._dedupe_results(results)
-        ranked = self._rank_results(deduped, rank_by=rank_by, providers=providers)
+        ranked = self._rank_results(
+            deduped,
+            rank_by=rank_by,
+            providers=providers,
+            query=query,
+        )
+        ranked = self._filter_low_relevance(
+            ranked,
+            min_items=max(3, min(limit, self._max_results)),
+        )
         selected = self._select_with_diversity(
             ranked,
             limit=limit,
@@ -222,6 +211,121 @@ class PaperSearchTool(BaseTool):
             citations=citations,
             trace=trace,
         )
+
+    async def _collect_results_from_providers(
+        self,
+        *,
+        query: str,
+        kb_id: int,
+        user_id: int,
+        limit: int,
+        year_filter: str,
+        providers: List[str],
+        rank_by: str,
+    ) -> tuple[Dict[str, str], List[Dict[str, Any]]]:
+        """Fetch paper candidates from configured providers."""
+
+        errors: Dict[str, str] = {}
+        results: List[Dict[str, Any]] = []
+
+        if "semantic_scholar" in providers:
+            try:
+                semantic_papers = await self._rag_client.search_online_papers(
+                    kb_id=kb_id,
+                    query=query,
+                    user_id=user_id,
+                    limit=max(limit, self._max_results),
+                    year=year_filter,
+                    providers=["semantic_scholar"],
+                    rank_by=rank_by,
+                )
+                results.extend(
+                    self._normalize_semantic_scholar(semantic_papers, provider_rank_offset=0)
+                )
+            except Exception as exc:  # noqa: BLE001 - surface error for logging
+                errors["semantic_scholar"] = str(exc)
+
+        if "arxiv" in providers:
+            try:
+                arxiv_papers = await self._rag_client.search_online_papers(
+                    kb_id=kb_id,
+                    query=query,
+                    user_id=user_id,
+                    limit=max(limit, self._max_results),
+                    year=year_filter,
+                    providers=["arxiv"],
+                    rank_by=rank_by,
+                )
+                results.extend(
+                    self._normalize_provider_results(
+                        arxiv_papers,
+                        provider_name="arxiv",
+                        provider_rank_offset=len(results),
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - surface error for logging
+                errors["arxiv"] = str(exc)
+
+        return errors, results
+
+    @staticmethod
+    def _is_provider_auth_error(error_text: str) -> bool:
+        """Detect semantic provider auth failures for fast failover."""
+
+        normalized = str(error_text or "").lower()
+        markers = (
+            "401",
+            "403",
+            "forbidden",
+            "unauthorized",
+            "invalid api key",
+            "permission denied",
+        )
+        return any(marker in normalized for marker in markers)
+
+    @staticmethod
+    def _is_provider_rate_limit_error(error_text: str) -> bool:
+        """Detect provider-side rate limit errors."""
+
+        normalized = str(error_text or "").lower()
+        markers = (
+            "429",
+            "rate limit",
+            "too many requests",
+            "throttle",
+            "quota exceeded",
+        )
+        return any(marker in normalized for marker in markers)
+
+    async def _rewrite_query_for_global_search(self, query: str) -> Optional[str]:
+        """Rewrite non-English queries into concise English paper-search keywords."""
+
+        client = self._query_rewrite_llm_client
+        if not client or not client.is_configured():
+            raise RuntimeError("Query rewrite LLM is not configured for paper.search.")
+        prompt = (
+            "Rewrite the following research question into concise English keywords suitable for "
+            "Semantic Scholar/arXiv search. Keep key technical terms and venue hints. "
+            "Return ONLY one line of rewritten query text.\n\n"
+            f"Question: {query}\n\n"
+            "Rewritten query:"
+        )
+        rewritten = await client.generate(prompt)
+        text = (rewritten or "").strip()
+        if not text:
+            raise RuntimeError("Query rewrite LLM returned empty output.")
+        first_line = text.splitlines()[0].strip()
+        if first_line.startswith(("Rewritten query:", "Query:")):
+            first_line = first_line.split(":", 1)[1].strip()
+        if not first_line:
+            raise RuntimeError("Query rewrite LLM produced an invalid rewritten query.")
+        return first_line
+
+    @staticmethod
+    def _contains_cjk(text: str) -> bool:
+        """Return True when text includes common CJK characters."""
+
+        return bool(re.search(r"[\u3040-\u30ff\u3400-\u9fff\uf900-\ufaff]", text or ""))
 
     @staticmethod
     def _summarize_results(results: List[Dict[str, Any]]) -> str:
@@ -300,6 +404,7 @@ class PaperSearchTool(BaseTool):
             payload = dict(item)
             payload.pop("_provider_rank", None)
             payload.pop("_score", None)
+            payload.pop("_query_relevance", None)
             cleaned.append(payload)
         return cleaned
 
@@ -307,10 +412,25 @@ class PaperSearchTool(BaseTool):
     def _normalize_semantic_scholar(
         results: List[Dict[str, Any]], *, provider_rank_offset: int
     ) -> List[Dict[str, Any]]:
+        return PaperSearchTool._normalize_provider_results(
+            results,
+            provider_name="semantic_scholar",
+            provider_rank_offset=provider_rank_offset,
+        )
+
+    @staticmethod
+    def _normalize_provider_results(
+        results: List[Dict[str, Any]],
+        *,
+        provider_name: str,
+        provider_rank_offset: int,
+    ) -> List[Dict[str, Any]]:
+        """Normalize provider results and stamp fallback provider metadata."""
+
         normalized: List[Dict[str, Any]] = []
         for idx, item in enumerate(results or []):
             payload = dict(item)
-            payload.setdefault("provider", "semantic_scholar")
+            payload.setdefault("provider", provider_name)
             payload["_provider_rank"] = provider_rank_offset + idx
             normalized.append(payload)
         return normalized
@@ -444,9 +564,18 @@ class PaperSearchTool(BaseTool):
         *,
         rank_by: str,
         providers: List[str],
+        query: str,
     ) -> List[Dict[str, Any]]:
+        query_terms = self._query_terms(query)
+
         if rank_by == "relevance":
-            return sorted(results, key=lambda x: x.get("_provider_rank", 0))
+            for item in results:
+                provider_rank = item.get("_provider_rank", 0)
+                provider_score = 1.0 / (1.0 + provider_rank)
+                relevance = self._query_relevance(item, query_terms)
+                item["_query_relevance"] = relevance
+                item["_score"] = 0.85 * relevance + 0.15 * provider_score
+            return sorted(results, key=lambda x: x.get("_score", 0.0), reverse=True)
 
         current_year = datetime.utcnow().year
         for item in results:
@@ -460,16 +589,95 @@ class PaperSearchTool(BaseTool):
             quality = 0.1 if item.get("highLight") else 0.0
             provider_rank = item.get("_provider_rank", 0)
             provider_score = 1.0 / (1.0 + provider_rank)
+            relevance = self._query_relevance(item, query_terms)
+            item["_query_relevance"] = relevance
 
             if rank_by == "recent":
-                score = recency + 0.05 * provider_score
+                score = 0.6 * recency + 0.3 * relevance + 0.1 * provider_score
             elif rank_by == "citations":
-                score = citation_score + 0.05 * provider_score
+                score = 0.6 * citation_score + 0.3 * relevance + 0.1 * provider_score
             else:
-                score = 0.55 * recency + 0.35 * citation_score + 0.1 * provider_score + quality
+                score = (
+                    0.4 * relevance
+                    + 0.28 * recency
+                    + 0.22 * citation_score
+                    + 0.05 * provider_score
+                    + 0.05 * quality
+                )
             item["_score"] = score
 
         return sorted(results, key=lambda x: x.get("_score", 0.0), reverse=True)
+
+    @staticmethod
+    def _query_terms(query: str) -> List[str]:
+        """Extract meaningful query terms for relevance scoring."""
+
+        tokens = re.findall(r"[A-Za-z0-9_]{3,}|[\u4e00-\u9fff]{2,}", str(query or ""))
+        stopwords = {
+            "the",
+            "and",
+            "for",
+            "with",
+            "from",
+            "that",
+            "this",
+            "are",
+            "was",
+            "were",
+            "how",
+            "what",
+            "which",
+            "when",
+            "where",
+            "research",
+            "paper",
+            "study",
+            "method",
+            "methods",
+            "approach",
+            "analysis",
+            "问题",
+            "方法",
+            "研究",
+            "论文",
+        }
+        seen: set[str] = set()
+        terms: List[str] = []
+        for token in tokens:
+            normalized = token.strip().lower()
+            if not normalized or normalized in stopwords or normalized in seen:
+                continue
+            seen.add(normalized)
+            terms.append(normalized)
+            if len(terms) >= 18:
+                break
+        return terms
+
+    @staticmethod
+    def _query_relevance(item: Dict[str, Any], query_terms: List[str]) -> float:
+        """Compute lexical overlap relevance between query and paper text."""
+
+        if not query_terms:
+            return 0.0
+        title = str(item.get("title") or "").lower()
+        abstract = str(item.get("abstract") or "").lower()
+        venue = str(item.get("journal_or_conference") or "").lower()
+        payload = f"{title} {abstract} {venue}"
+        if not payload.strip():
+            return 0.0
+        matched = sum(1 for term in query_terms if term in payload)
+        return matched / max(1, len(query_terms))
+
+    @staticmethod
+    def _filter_low_relevance(results: List[Dict[str, Any]], *, min_items: int) -> List[Dict[str, Any]]:
+        """Drop very low-relevance papers when enough strong candidates exist."""
+
+        if not results:
+            return results
+        strong = [item for item in results if float(item.get("_query_relevance", 0.0)) >= 0.18]
+        if len(strong) >= max(1, int(min_items)):
+            return strong
+        return results
 
     @staticmethod
     def _select_with_diversity(

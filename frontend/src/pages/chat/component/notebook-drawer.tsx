@@ -1,6 +1,7 @@
 import * as api from '@/api'
 import { fetchFileContent, fetchWorkspaceFiles } from '@/api/docStudio'
 import {
+  NOTEBOOK_MAIN_FILE,
   NOTEBOOK_WORKSPACE_ID,
   createNotebookNoteFile,
   ensureNotebookWorkspace,
@@ -27,6 +28,7 @@ import styles from './notebook-drawer.module.scss'
 const { Text } = Typography
 
 const NOTEBOOK_MAX_LIST = 100
+const IDEAGEN_DISABLED_TIP = 'IdeaGen 功能暂时关闭，后续开放'
 
 type NotebookNoteEntry = {
   id: string
@@ -138,6 +140,7 @@ export default function NotebookDrawer(props: NotebookDrawerProps) {
       const data = await fetchWorkspaceFiles({ workspaceId: NOTEBOOK_WORKSPACE_ID })
       const files = flattenFiles(data.files)
         .filter((node) => node.path.toLowerCase().endsWith('.md'))
+        .filter((node) => node.path.toLowerCase() !== NOTEBOOK_MAIN_FILE.toLowerCase())
         .sort((a, b) => (b.modifiedAt || 0) - (a.modifiedAt || 0))
         .slice(0, NOTEBOOK_MAX_LIST)
       const items = await Promise.all(
@@ -297,27 +300,8 @@ export default function NotebookDrawer(props: NotebookDrawerProps) {
   )
 
   const handleStartIdeaGen = useCallback(() => {
-    if (!sessionId) {
-      message.warning('需要会话 ID 才能发起 IdeaGen')
-      return
-    }
-    if (!selectedNotes.length) {
-      message.warning('请先选择笔记')
-      return
-    }
-    navigate('/idea-generation', {
-      state: {
-        prefill: { sessionId },
-        notes: selectedNotes.map((note) => ({
-          id: note.id,
-          title: note.title,
-          content: note.content,
-          tags: note.tags,
-          source: note.path,
-        })),
-      },
-    })
-  }, [navigate, selectedNotes, sessionId])
+    message.info(IDEAGEN_DISABLED_TIP)
+  }, [])
 
   const handleSelectAll = useCallback(() => {
     setSelectedIds(new Set(filteredNotes.map((note) => note.id)))

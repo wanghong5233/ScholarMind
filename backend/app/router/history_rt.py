@@ -1,10 +1,10 @@
-from fastapi import APIRouter, Depends, Security, HTTPException, status
+from fastapi import APIRouter, Depends, Security, HTTPException, status, Query
 from sqlalchemy.orm import Session
 from utils.database import get_db
 from schemas.message import FilestResponse, SessionListResponse
 from fastapi_jwt import JwtAuthorizationCredentials
 from service.auth import access_security
-from typing import List
+from typing import List, Optional, Literal
 
 from service.core.conversation.history_service import HistoryService
 
@@ -72,6 +72,10 @@ async def get_messages_by_session_id(
     
 @router.get("/get_sessions", response_model=SessionListResponse)
 async def get_sessions_by_user_id(
+    surface: Optional[Literal["deep_chat", "doc_studio"]] = Query(
+        default="deep_chat",
+        description="按会话所属产品面过滤",
+    ),
     credentials: JwtAuthorizationCredentials = Security(access_security),
     db: Session = Depends(get_db)
 ):
@@ -84,4 +88,4 @@ async def get_sessions_by_user_id(
     - **返回**: 包含用户ID和其所有会话列表的对象。
     """
     service = HistoryService(db=db, credentials=credentials)
-    return service.get_sessions_by_user_id()
+    return service.get_sessions_by_user_id(surface=surface)

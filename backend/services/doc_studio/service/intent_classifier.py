@@ -61,6 +61,7 @@ class RobustIntentClassifier:
         text = user_intent.strip()
         normalized = text.lower()
         has_selection = bool(context and context.get("selection", {}).get("text"))
+        has_file_mentions = bool(context and context.get("file_mentions"))
 
         best_result = IntentClassificationResult(intent=fallback_type, confidence=0.0, reason=fallback_config.get("reason"))
 
@@ -72,6 +73,7 @@ class RobustIntentClassifier:
                 text,
                 rule,
                 has_selection,
+                has_file_mentions,
             )
             if score > best_result.confidence:
                 best_result = IntentClassificationResult(
@@ -91,6 +93,7 @@ class RobustIntentClassifier:
         raw_text: str,
         rule: Dict[str, any],
         has_selection: bool,
+        has_file_mentions: bool,
     ) -> tuple[float, List[str], List[str]]:
         keywords = [kw.lower() for kw in rule.get("keywords", []) if kw]
         patterns = rule.get("patterns", [])
@@ -117,6 +120,9 @@ class RobustIntentClassifier:
         context_score = 0.0
         if intent == IntentType.EDIT and has_selection:
             context_score += 0.25
+        if intent == IntentType.EDIT and has_file_mentions:
+            # @file 引用代表明确的文件编辑上下文，提升编辑意图置信度。
+            context_score += 0.22
         if intent == IntentType.QA and raw_text.rstrip().endswith(("?", "？")):
             context_score += 0.2
         if intent == IntentType.SUGGEST and not has_selection and "检查" in normalized_text:

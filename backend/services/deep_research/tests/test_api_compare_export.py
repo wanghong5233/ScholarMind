@@ -1,18 +1,19 @@
 """API tests for run comparison export."""
 
 import pytest
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient
 
 from core.config import settings
 from schemas.common import DeepResearchStatus
 from main import app
 from service.state_store import StateStore
+from tests.httpx_compat import create_asgi_transport
 
 
 @pytest.mark.asyncio
 async def test_compare_export_markdown_html(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(settings, "DATA_ROOT", str(tmp_path))
-    transport = ASGITransport(app=app, lifespan="on")
+    transport = create_asgi_transport(app=app)
     client = AsyncClient(transport=transport, base_url="http://test")
     headers = {"X-User-Id": "1"}
     try:
@@ -77,7 +78,7 @@ async def test_compare_export_markdown_html(tmp_path, monkeypatch) -> None:
 async def test_compare_export_pdf(tmp_path, monkeypatch) -> None:
     pytest.importorskip("reportlab")
     monkeypatch.setattr(settings, "DATA_ROOT", str(tmp_path))
-    transport = ASGITransport(app=app, lifespan="on")
+    transport = create_asgi_transport(app=app)
     client = AsyncClient(transport=transport, base_url="http://test")
     headers = {"X-User-Id": "1"}
     try:

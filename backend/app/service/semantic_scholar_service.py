@@ -7,6 +7,7 @@ from utils.get_logger import logger
 from models.document import DocumentIngestionSource
 from service.core.api.utils.ccf_whitelist import is_high_quality_venue
 from urllib.parse import quote
+from core.config import settings
 
 
 class SemanticScholarService:
@@ -41,7 +42,7 @@ class SemanticScholarService:
         api_key: Optional[str] = None,
         base_url: str = "https://api.semanticscholar.org/graph/v1",
         timeout: int = 20,
-        max_retries: int = 3,
+        max_retries: int = 5,
         backoff_factor: float = 0.5,
     ) -> None:
         self.api_key = api_key
@@ -50,6 +51,11 @@ class SemanticScholarService:
         self.max_retries = max_retries
         self.backoff_factor = backoff_factor
         self.headers = {"x-api-key": self.api_key} if self.api_key else {}
+        # 如果 key 已被服务端拒绝（401/403），在当前进程内禁用该 key，
+        # 避免每次请求都先吃一次 403 再触发匿名链路。
+        self._key_disabled = False
+        # 匿名模式全局退避窗口，避免短时间内连续撞 429。
+        self._anonymous_next_allowed_at = 0.0
 
     def _make_request(self, endpoint: str, params: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -58,13 +64,21 @@ class SemanticScholarService:
         """
         url_path = endpoint if endpoint.startswith("/") else f"/{endpoint}"
         last_error: Optional[Exception] = None
+        auth_failed = False
+
+        auth_headers = self.headers if self.headers and not self._key_disabled else {}
+        if not auth_headers:
+            return self._make_request_without_api_key(url_path, params)
 
         for attempt in range(self.max_retries):
             try:
-                with httpx.Client(base_url=self.base_url, timeout=self.timeout, headers=self.headers) as client:
+                with httpx.Client(base_url=self.base_url, timeout=self.timeout, headers=auth_headers) as client:
                     response = client.get(url_path, params=params)
                     if response.status_code == 429:
-                        sleep_s = self.backoff_factor * (2 ** attempt)
+                        sleep_s = self._resolve_retry_delay(
+                            retry_after=response.headers.get("retry-after"),
+                            attempt=attempt,
+                        )
                         logger.warning(f"Semantic Scholar rate limited (429). retry in {sleep_s:.2f}s")
                         time.sleep(sleep_s)
                         continue
@@ -72,16 +86,78 @@ class SemanticScholarService:
                     return response.json()
             except httpx.HTTPError as http_err:
                 last_error = http_err
+                status_code = getattr(getattr(http_err, "response", None), "status_code", None)
+                if status_code in {401, 403} and auth_headers:
+                    auth_failed = True
+                    self._key_disabled = True
+                    logger.warning(
+                        f"Semantic Scholar key auth failed ({status_code}), disable key for current process "
+                        f"and retry without API key."
+                    )
+                    break
                 # 非 429 的错误直接退避后重试（有限次）
                 sleep_s = self.backoff_factor * (2 ** attempt)
                 logger.error(f"Semantic Scholar request failed (attempt {attempt + 1}/{self.max_retries}): {http_err}")
                 time.sleep(sleep_s)
+
+        if auth_failed:
+            return self._make_request_without_api_key(url_path, params)
 
         # 所有重试失败
         if last_error is not None:
             raise last_error
         # 理论不会到达此处
         return {}
+
+    def _make_request_without_api_key(self, url_path: str, params: Dict[str, Any]) -> Dict[str, Any]:
+        """当 API key 鉴权失败时，回退到匿名请求（与历史知识库链路行为一致）。"""
+
+        last_error: Optional[Exception] = None
+        for attempt in range(self.max_retries):
+            now_ts = time.time()
+            if now_ts < self._anonymous_next_allowed_at:
+                time.sleep(max(0.0, self._anonymous_next_allowed_at - now_ts))
+            try:
+                with httpx.Client(base_url=self.base_url, timeout=self.timeout, headers={}) as client:
+                    response = client.get(url_path, params=params)
+                    if response.status_code == 429:
+                        sleep_s = self._resolve_retry_delay(
+                            retry_after=response.headers.get("retry-after"),
+                            attempt=attempt,
+                        )
+                        self._anonymous_next_allowed_at = time.time() + sleep_s
+                        logger.warning(
+                            f"Semantic Scholar anonymous request rate limited (429). retry in {sleep_s:.2f}s"
+                        )
+                        time.sleep(sleep_s)
+                        continue
+                    response.raise_for_status()
+                    return response.json()
+            except httpx.HTTPError as http_err:
+                last_error = http_err
+                sleep_s = self.backoff_factor * (2 ** attempt)
+                logger.error(
+                    f"Semantic Scholar anonymous request failed "
+                    f"(attempt {attempt + 1}/{self.max_retries}): {http_err}"
+                )
+                time.sleep(sleep_s)
+
+        if last_error is not None:
+            raise last_error
+        return {}
+
+    def _resolve_retry_delay(self, retry_after: Optional[str], attempt: int) -> float:
+        """Resolve retry delay with Retry-After header and exponential backoff."""
+
+        header_delay = 0.0
+        if retry_after:
+            try:
+                header_delay = float(str(retry_after).strip())
+            except ValueError:
+                header_delay = 0.0
+        exp_delay = self.backoff_factor * (2 ** attempt)
+        # 控制上限，避免阻塞过长。
+        return max(0.25, min(8.0, max(header_delay, exp_delay)))
 
     def search_papers(self, query: str, limit: int = 100, year: Optional[str] = None) -> List[DocumentCreate]:
         params: Dict[str, Any] = {
@@ -167,5 +243,7 @@ class SemanticScholarService:
         return transformed
 
 
-# 单例（可按需改为依赖注入创建）
-semantic_scholar_service = SemanticScholarService()
+# 单例（使用应用配置中的 API Key，避免无 Key 导致频繁限流）
+semantic_scholar_service = SemanticScholarService(
+    api_key=settings.semantic_scholar_api_key,
+)

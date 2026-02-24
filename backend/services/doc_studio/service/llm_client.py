@@ -6,7 +6,8 @@ LLM 客户端
 1. API 模式：调用 DashScope/OpenAI API（当前使用）
 2. 本地模型模式：加载微调的 Qwen-7B 模型（未来升级）
 """
-from typing import Dict, Any, Optional, List
+from typing import Awaitable, Callable, Dict, Any, Optional, List
+import asyncio
 import logging
 import os
 import json
@@ -82,15 +83,15 @@ class LLMClient:
             self.mode = "api"
 
         if self.mode == "api":
-            # API 模式：优先使用 DashScope，如果没有则尝试 OpenAI
-            self.api_key = settings.DASHSCOPE_API_KEY or settings.OPENAI_API_KEY
+            # API 模式：优先使用 OpenAI，如果没有则尝试 DashScope
+            self.api_key = settings.OPENAI_API_KEY or settings.DASHSCOPE_API_KEY
             self.base_url = (
-                settings.DASHSCOPE_BASE_URL if settings.DASHSCOPE_API_KEY else settings.OPENAI_BASE_URL
+                settings.OPENAI_BASE_URL if settings.OPENAI_API_KEY else settings.DASHSCOPE_BASE_URL
             )
             self.model = (
-                settings.DASHSCOPE_MODEL_NAME if settings.DASHSCOPE_API_KEY else settings.OPENAI_MODEL_NAME
+                settings.OPENAI_MODEL_NAME if settings.OPENAI_API_KEY else settings.DASHSCOPE_MODEL_NAME
             )
-            self.provider = "DashScope" if settings.DASHSCOPE_API_KEY else "OpenAI"
+            self.provider = "OpenAI" if settings.OPENAI_API_KEY else "DashScope"
 
             if not self.api_key:
                 logger.warning("LLM API key not configured. LLM calls will fail.")
@@ -159,6 +160,11 @@ class LLMClient:
         except (TypeError, ValueError):
             return fallback
 
+    @staticmethod
+    def _uses_max_completion_tokens(model_name: Optional[str]) -> bool:
+        name = str(model_name or "").strip().lower()
+        return name.startswith("gpt-5")
+
     def _resolve_llm_config(
         self,
         llm_options: Optional[Dict[str, Any]],
@@ -172,7 +178,7 @@ class LLMClient:
             if provider_override and str(provider_override).lower() != "auto":
                 resolved_provider = str(provider_override)
             else:
-                resolved_provider = "dashscope" if settings.DASHSCOPE_API_KEY else "openai"
+                resolved_provider = "openai" if settings.OPENAI_API_KEY else "dashscope"
 
         config = self._get_provider_config(self._normalize_provider_key(resolved_provider))
         model_override = (llm_options or {}).get("llm_model")
@@ -204,7 +210,7 @@ class LLMClient:
         if normalized_override and normalized_override != "auto":
             preferred = normalized_override
         else:
-            preferred = "dashscope" if settings.DASHSCOPE_API_KEY else "openai"
+            preferred = "openai" if settings.OPENAI_API_KEY else "dashscope"
 
         available = self._get_available_providers()
         if preferred and preferred not in available and available:
@@ -361,6 +367,8 @@ class LLMClient:
         tools: Optional[list] = None,
         temperature: float = 0.3,
         llm_options: Optional[Dict[str, Any]] = None,
+        image_attachments: Optional[List[Dict[str, Any]]] = None,
+        stream_text_callback: Optional[Callable[[str], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         """
         生成回复（支持 API 和本地模型两种模式）
@@ -375,7 +383,7 @@ class LLMClient:
         """
         if self.mode == "local":
             # 本地模型模式（未来实现）
-            return await self._generate_local(prompt, tools, temperature)
+            return await self._generate_local(prompt, tools, temperature, image_attachments=image_attachments)
         else:
             # API 模式（当前使用）
             candidates = self._get_provider_candidates(llm_options)
@@ -409,6 +417,8 @@ class LLMClient:
                         resolved_temp,
                         llm_config,
                         resolved_max_tokens,
+                        image_attachments=image_attachments,
+                        stream_text_callback=stream_text_callback,
                     )
                     self._mark_provider_success(provider_key)
                     if provider_key != primary_provider:
@@ -419,6 +429,8 @@ class LLMClient:
                         )
                     return response
                 except Exception as exc:
+                    if isinstance(exc, asyncio.CancelledError) or exc.__class__.__name__ == "AgentCancelledError":
+                        raise
                     last_error = exc
                     self._mark_provider_failure(provider_key, exc)
                     logger.warning("LLM provider %s failed: %s", provider_key, exc)
@@ -435,6 +447,8 @@ class LLMClient:
         temperature: float = 0.3,
         llm_config: Optional[Dict[str, Any]] = None,
         max_tokens: Optional[int] = None,
+        image_attachments: Optional[List[Dict[str, Any]]] = None,
+        stream_text_callback: Optional[Callable[[str], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         """
         使用 API 生成回复（DashScope/OpenAI）
@@ -452,47 +466,106 @@ class LLMClient:
 
         start_time = time.perf_counter()
         try:
+            messages = self._build_messages_for_chat(prompt, image_attachments)
+            should_stream_text = bool(stream_text_callback and not tools)
+            token_key = (
+                "max_completion_tokens"
+                if self._uses_max_completion_tokens(str(model))
+                else "max_tokens"
+            )
             # 构建请求参数（和主 API 服务保持一致）
             kwargs = {
                 "model": model,
-                "messages": [{"role": "user", "content": prompt}],
+                "messages": messages,
                 "temperature": temperature,
-                "max_tokens": max_tokens or self.max_tokens,
-                "stream": False
+                "stream": should_stream_text,
             }
+            kwargs[token_key] = max_tokens or self.max_tokens
             
             # 如果提供了工具，添加到请求中
             if tools:
                 kwargs["tools"] = tools
                 kwargs["tool_choice"] = "auto"
-            
-            # 调用 OpenAI SDK（自带重试和超时管理）
-            response = await client.chat.completions.create(**kwargs)
 
-            # 解析响应
-            if not response.choices:
-                raise ValueError("No choices in LLM response")
-            
-            message = response.choices[0].message
-            content = message.content or ""
-            tool_calls = message.tool_calls
-            
-            # 转换 tool_calls 为标准格式
+            content = ""
             formatted_tool_calls = None
-            if tool_calls:
-                formatted_tool_calls = [
-                    {
-                        "id": tc.id,
-                        "type": tc.type,
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments
-                        }
-                    }
-                    for tc in tool_calls
-                ]
+            usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
-            usage = self._extract_usage(getattr(response, "usage", None))
+            if should_stream_text:
+                # Ask 模式正文流式输出：按 token/delta 回调到上层（SSE 再转发给前端）
+                kwargs["stream_options"] = {"include_usage": True}
+                try:
+                    stream_response = await client.chat.completions.create(**kwargs)
+                except Exception:
+                    # 兼容部分 OpenAI-Compatible 服务不支持 stream_options 的情况
+                    kwargs.pop("stream_options", None)
+                    stream_response = await client.chat.completions.create(**kwargs)
+                chunks: List[str] = []
+                received_any_chunk = False
+                async for chunk in stream_response:
+                    received_any_chunk = True
+                    chunk_usage = self._extract_usage(getattr(chunk, "usage", None))
+                    if chunk_usage["total_tokens"] > 0:
+                        usage = chunk_usage
+
+                    choices = getattr(chunk, "choices", None) or []
+                    if not choices:
+                        continue
+
+                    delta = getattr(choices[0], "delta", None)
+                    if not delta:
+                        continue
+
+                    delta_content = getattr(delta, "content", None)
+                    delta_text = ""
+                    if isinstance(delta_content, str):
+                        delta_text = delta_content
+                    elif isinstance(delta_content, list):
+                        delta_text = "".join(
+                            str(part.get("text", ""))
+                            for part in delta_content
+                            if isinstance(part, dict)
+                        )
+
+                    if not delta_text:
+                        continue
+                    chunks.append(delta_text)
+                    if stream_text_callback:
+                        await stream_text_callback(delta_text)
+
+                if not received_any_chunk:
+                    raise ValueError("No stream chunks in LLM response")
+                content = "".join(chunks)
+                if not content.strip():
+                    raise ValueError("Empty streamed content in LLM response")
+            else:
+                # 调用 OpenAI SDK（自带重试和超时管理）
+                response = await client.chat.completions.create(**kwargs)
+
+                # 解析响应
+                if not response.choices:
+                    raise ValueError("No choices in LLM response")
+
+                message = response.choices[0].message
+                content = message.content or ""
+                tool_calls = message.tool_calls
+
+                # 转换 tool_calls 为标准格式
+                if tool_calls:
+                    formatted_tool_calls = [
+                        {
+                            "id": tc.id,
+                            "type": tc.type,
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in tool_calls
+                    ]
+
+                usage = self._extract_usage(getattr(response, "usage", None))
+
             duration = time.perf_counter() - start_time
             cost = self._estimate_cost(provider, model, usage["prompt_tokens"], usage["completion_tokens"])
             record_llm_usage(
@@ -516,6 +589,8 @@ class LLMClient:
             }
         
         except Exception as e:
+            if isinstance(e, asyncio.CancelledError) or e.__class__.__name__ == "AgentCancelledError":
+                raise
             duration = time.perf_counter() - start_time
             record_llm_usage(
                 provider=self._normalize_provider_key(provider),
@@ -530,7 +605,8 @@ class LLMClient:
         self,
         prompt: str,
         tools: Optional[list] = None,
-        temperature: float = 0.3
+        temperature: float = 0.3,
+        image_attachments: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """
         使用本地模型生成回复（未来实现）
@@ -544,6 +620,47 @@ class LLMClient:
             "本地模型模式尚未实现。请设置 RL_MODEL_ENABLED=False 使用 API 模式，"
             "或等待本地模型推理功能开发完成。"
         )
+
+    @staticmethod
+    def _normalize_image_attachments(
+        image_attachments: Optional[List[Dict[str, Any]]],
+    ) -> List[str]:
+        urls: List[str] = []
+        if not image_attachments:
+            return urls
+        for item in image_attachments:
+            if not isinstance(item, dict):
+                continue
+            url = str(item.get("data_url") or item.get("url") or "").strip()
+            if not url:
+                continue
+            if not (
+                url.startswith("data:image/")
+                or url.startswith("http://")
+                or url.startswith("https://")
+            ):
+                continue
+            urls.append(url)
+        return urls
+
+    def _build_messages_for_chat(
+        self,
+        prompt: str,
+        image_attachments: Optional[List[Dict[str, Any]]] = None,
+    ) -> List[Dict[str, Any]]:
+        image_urls = self._normalize_image_attachments(image_attachments)
+        if not image_urls:
+            return [{"role": "user", "content": prompt}]
+
+        content_parts: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
+        for url in image_urls:
+            content_parts.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": url},
+                }
+            )
+        return [{"role": "user", "content": content_parts}]
     
     async def reason_and_act(
         self,
@@ -551,6 +668,7 @@ class LLMClient:
         available_tools: list,
         history: Optional[list] = None,
         llm_options: Optional[Dict[str, Any]] = None,
+        image_attachments: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """
         推理并决定下一步行动（Tool Calling）
@@ -600,6 +718,7 @@ class LLMClient:
                 tools=available_tools,
                 temperature=self.temperature,
                 llm_options=llm_options,
+                image_attachments=image_attachments,
             )
             
             if settings.LOG_FULL_PROMPT:

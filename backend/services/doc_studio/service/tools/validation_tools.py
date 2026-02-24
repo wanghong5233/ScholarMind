@@ -6,6 +6,7 @@ from pathlib import Path
 import asyncio
 import logging
 import os
+import re
 import shutil
 import subprocess
 
@@ -74,16 +75,67 @@ class CompileLaTeXTool(BaseTool):
         """检测 LaTeX 文件是否包含中文支持包"""
         try:
             content = file_path.read_text(encoding='utf-8', errors='ignore')
-            # 检查是否包含常见的中文支持包
-            chinese_packages = [
-                '\\usepackage{ctex}',
-                '\\usepackage{xeCJK}',
-                '\\usepackage{CJK}',
-                '\\usepackage[utf8]{inputenc}',  # 虽然不完全支持中文，但至少尝试了
+            chinese_support_patterns = [
+                r'\\usepackage(?:\[[^\]]*\])?\{ctex\}',
+                r'\\usepackage(?:\[[^\]]*\])?\{xeCJK\}',
+                r'\\usepackage(?:\[[^\]]*\])?\{CJK\}',
+                r'\\begin\{CJK\}',
+                r'\\setCJKmainfont',
             ]
-            return any(pkg in content for pkg in chinese_packages)
+            return any(re.search(pattern, content, flags=re.IGNORECASE) for pattern in chinese_support_patterns)
         except Exception:
             return False
+
+    def _build_auto_chinese_wrapper(
+        self,
+        workspace_path: Path,
+        source_file: Path,
+    ) -> Path | None:
+        """生成临时编译包装文件：在不修改原文件的情况下注入 ctex。"""
+        try:
+            content = source_file.read_text(encoding="utf-8", errors="ignore")
+        except Exception as exc:
+            logger.warning("读取主文件失败，跳过中文自动包装: %s", exc)
+            return None
+
+        # 只有存在正文结构时才做注入，避免破坏非标准文件
+        if "\\begin{document}" not in content:
+            return None
+
+        insertion = (
+            "\n% ScholarMind auto-injected for Chinese compile compatibility\n"
+            "\\usepackage[UTF8]{ctex}\n"
+        )
+
+        documentclass_match = re.search(
+            r'\\documentclass(?:\[[^\]]*\])?\{[^}]+\}',
+            content,
+            flags=re.IGNORECASE,
+        )
+        if documentclass_match:
+            insert_at = documentclass_match.end()
+            patched = content[:insert_at] + insertion + content[insert_at:]
+        else:
+            # 兜底：找不到 documentclass，仍在正文前注入
+            begin_document = content.find("\\begin{document}")
+            patched = content[:begin_document] + insertion + content[begin_document:]
+
+        wrapper_name = f".scholarmind_compile_wrapper_{source_file.stem}.tex"
+        wrapper_path = workspace_path / wrapper_name
+        wrapper_path.write_text(patched, encoding="utf-8")
+        return wrapper_path
+
+    def _dedupe_messages(self, items: List[str]) -> List[str]:
+        """编译多轮会重复产生日志，按顺序去重以减少前端噪音。"""
+        seen = set()
+        deduped: List[str] = []
+        for item in items:
+            key = (item or "").strip()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(key)
+        return deduped
     
     async def execute(
         self,
@@ -119,12 +171,24 @@ class CompileLaTeXTool(BaseTool):
                 if workspace_path:
                     resolved_main = resolve_path_within_workspace(workspace_path, main_file)
                     if resolved_main.exists():
-                        # 优先检测 IEEEtran 模板，强制使用 pdflatex
+                        has_unicode_content = self._detect_unicode_content(resolved_main)
+                        # IEEEtran 英文稿默认走 pdflatex；若含中文则切换到 xelatex/lualatex
                         if self._detect_ieeetran_template(resolved_main):
-                            default_compiler = "pdflatex"
-                            logger.info(f"检测到 IEEEtran 模板，强制使用 pdflatex 编译器（最佳兼容性）")
-                        # 然后检测中文内容
-                        elif self._detect_unicode_content(resolved_main):
+                            if has_unicode_content:
+                                if shutil.which("xelatex"):
+                                    default_compiler = "xelatex"
+                                    logger.info("检测到 IEEEtran + 中文内容，自动选择 xelatex 编译器")
+                                elif shutil.which("lualatex"):
+                                    default_compiler = "lualatex"
+                                    logger.warning("检测到 IEEEtran + 中文内容，但 xelatex 不可用，改用 lualatex")
+                                else:
+                                    default_compiler = "pdflatex"
+                                    logger.warning("检测到 IEEEtran + 中文内容，但缺少 xelatex/lualatex，退回 pdflatex")
+                            else:
+                                default_compiler = "pdflatex"
+                                logger.info("检测到 IEEEtran 英文模板，默认使用 pdflatex 编译器")
+                        # 非 IEEEtran，检测中文内容
+                        elif has_unicode_content:
                             # 检测到中文，优先使用 xelatex（对中文支持最好）
                             if shutil.which("xelatex"):
                                 default_compiler = "xelatex"
@@ -229,120 +293,116 @@ class CompileLaTeXTool(BaseTool):
         logs: List[Dict[str, Any]] = []
         errors: List[str] = []
         warnings: List[str] = []
-        
+        compile_target = relative_main
+        compile_jobname = None
         compiled = True
-        run_result = self._run_compiler(compiler_path, relative_main, workspace_path)
-        logs.append(run_result)
-        errors.extend(self._extract_errors(run_result["log"]))
-        warnings.extend(self._extract_warnings(run_result["log"]))
-        if run_result["returncode"] != 0:
-            compiled = False
-            return {
-                "compiled": False,
-                "pdf_path": None,
-                "logs": logs,
-                "errors": errors,
-                "warnings": warnings
-            }
-        
-        aux_path = resolved_main.with_suffix(".aux")
-        bbl_path = resolved_main.with_suffix(".bbl")
-        bib_path = resolve_path_within_workspace(workspace_path, bibliography_file)
-        
-        # 在运行 BibTeX 之前，强制删除旧的 .bbl 文件，确保使用最新的 .bib 文件重新生成
-        # 这样可以避免旧的 .bbl 文件格式错误导致的问题
-        if bbl_path.exists():
-            try:
-                bbl_path.unlink()
-                logger.info(f"已删除旧的 .bbl 文件，将使用最新的 .bib 文件重新生成: {bbl_path}")
-            except Exception as e:
-                logger.warning(f"无法删除旧的 .bbl 文件: {e}")
-        
-        if (
-            bib_path.exists()
-            and aux_path.exists()
-            and self._aux_requires_bibtex(aux_path)
-        ):
-            bibtex_path = shutil.which("bibtex")
-            if bibtex_path:
-                # bibtex 不支持 -interaction/-halt-on-error 这些 pdftex 参数，单独处理
-                bib_result = self._run_compiler(
-                    bibtex_path,
-                    main_stem,
-                    workspace_path,
-                    use_standard_flags=False
-                )
-                logs.append(bib_result)
-                errors.extend(self._extract_errors(bib_result["log"]))
-                warnings.extend(self._extract_warnings(bib_result["log"]))
-                if bib_result["returncode"] != 0:
-                    compiled = False
-                    # BibTeX 失败时删除可能损坏的 .bbl 文件，防止后续编译报错
-                    if bbl_path.exists():
-                        try:
-                            bbl_path.unlink()
-                            logger.info(f"BibTeX 失败，已删除损坏的 .bbl 文件: {bbl_path}")
-                        except Exception as e:
-                            logger.warning(f"无法删除 .bbl 文件: {e}")
-                else:
-                    # BibTeX 成功运行后，再次验证生成的 .bbl 文件
+        auto_wrapper_path: Path | None = None
+
+        try:
+            # 中文自动兼容：仅在包含中文且未配置中文包时注入临时 ctex 包装文件
+            if (
+                compiler in {"xelatex", "lualatex"}
+                and self._detect_unicode_content(resolved_main)
+                and not self._has_chinese_support_package(resolved_main)
+            ):
+                auto_wrapper_path = self._build_auto_chinese_wrapper(workspace_path, resolved_main)
+                if auto_wrapper_path:
+                    compile_target = os.path.relpath(auto_wrapper_path, workspace_path)
+                    compile_jobname = main_stem
+                    logger.info(
+                        "检测到中文但缺少中文包，已启用临时 ctex 包装编译: source=%s wrapper=%s",
+                        relative_main,
+                        compile_target,
+                    )
+                    warnings.append("已自动启用中文兼容（临时注入 ctex 包，不会修改源文件）")
+
+            run_result = self._run_compiler(
+                compiler_path,
+                compile_target,
+                workspace_path,
+                jobname=compile_jobname,
+            )
+            logs.append(run_result)
+            errors.extend(self._extract_errors(run_result["log"]))
+            warnings.extend(self._extract_warnings(run_result["log"]))
+            if run_result["returncode"] != 0:
+                compiled = False
+                return {
+                    "compiled": False,
+                    "pdf_path": None,
+                    "logs": logs,
+                    "errors": self._dedupe_messages(errors),
+                    "warnings": self._dedupe_messages(warnings),
+                }
+            
+            aux_path = resolved_main.with_suffix(".aux")
+            bbl_path = resolved_main.with_suffix(".bbl")
+            bib_path = resolve_path_within_workspace(workspace_path, bibliography_file)
+            
+            # 在运行 BibTeX 之前，强制删除旧的 .bbl 文件，确保使用最新的 .bib 文件重新生成
+            # 这样可以避免旧的 .bbl 文件格式错误导致的问题
+            if bbl_path.exists():
+                try:
+                    bbl_path.unlink()
+                    logger.info(f"已删除旧的 .bbl 文件，将使用最新的 .bib 文件重新生成: {bbl_path}")
+                except Exception as e:
+                    logger.warning(f"无法删除旧的 .bbl 文件: {e}")
+            
+            if (
+                bib_path.exists()
+                and aux_path.exists()
+                and self._aux_requires_bibtex(aux_path)
+            ):
+                bibtex_path = shutil.which("bibtex")
+                if bibtex_path:
+                    # bibtex 不支持 -interaction/-halt-on-error 这些 pdftex 参数，单独处理
+                    bib_result = self._run_compiler(
+                        bibtex_path,
+                        main_stem,
+                        workspace_path,
+                        use_standard_flags=False
+                    )
+                    logs.append(bib_result)
+                    errors.extend(self._extract_errors(bib_result["log"]))
+                    warnings.extend(self._extract_warnings(bib_result["log"]))
+                    if bib_result["returncode"] != 0:
+                        compiled = False
+                        # BibTeX 失败时删除可能损坏的 .bbl 文件，防止后续编译报错
+                        if bbl_path.exists():
+                            try:
+                                bbl_path.unlink()
+                                logger.info(f"BibTeX 失败，已删除损坏的 .bbl 文件: {bbl_path}")
+                            except Exception as e:
+                                logger.warning(f"无法删除 .bbl 文件: {e}")
+                    else:
+                        # BibTeX 成功运行后，再次验证生成的 .bbl 文件
+                        if bbl_path.exists() and not self._is_bbl_file_valid(bbl_path):
+                            try:
+                                bbl_path.unlink()
+                                logger.warning(f"BibTeX 生成的 .bbl 文件格式无效，已删除: {bbl_path}")
+                                compiled = False
+                            except Exception as e:
+                                logger.warning(f"无法删除无效的 .bbl 文件: {e}")
+            elif bbl_path.exists() and not bib_path.exists():
+                # 如果 .bib 文件不存在但有旧的 .bbl 文件，删除它防止冲突
+                try:
+                    bbl_path.unlink()
+                    logger.info(f"检测到缺少 .bib 文件，已删除旧的 .bbl 文件: {bbl_path}")
+                except Exception as e:
+                    logger.warning(f"无法删除 .bbl 文件: {e}")
+            
+            if compiled:
+                for run_idx in range(max_runs):
+                    # 在每次 rerun 前检查 .bbl 文件有效性（如果存在）
                     if bbl_path.exists() and not self._is_bbl_file_valid(bbl_path):
                         try:
                             bbl_path.unlink()
-                            logger.warning(f"BibTeX 生成的 .bbl 文件格式无效，已删除: {bbl_path}")
-                            compiled = False
-                        except Exception as e:
-                            logger.warning(f"无法删除无效的 .bbl 文件: {e}")
-        elif bbl_path.exists() and not bib_path.exists():
-            # 如果 .bib 文件不存在但有旧的 .bbl 文件，删除它防止冲突
-            try:
-                bbl_path.unlink()
-                logger.info(f"检测到缺少 .bib 文件，已删除旧的 .bbl 文件: {bbl_path}")
-            except Exception as e:
-                logger.warning(f"无法删除 .bbl 文件: {e}")
-        
-        if compiled:
-            for run_idx in range(max_runs):
-                # 在每次 rerun 前检查 .bbl 文件有效性（如果存在）
-                if bbl_path.exists() and not self._is_bbl_file_valid(bbl_path):
-                    try:
-                        bbl_path.unlink()
-                        logger.warning(f"Rerun {run_idx + 1} 前检测到无效的 .bbl 文件，已删除: {bbl_path}")
-                        # 如果 .bbl 文件无效，可能需要重新运行 BibTeX
-                        if bib_path.exists() and aux_path.exists() and self._aux_requires_bibtex(aux_path):
-                            bibtex_path = shutil.which("bibtex")
-                            if bibtex_path:
-                                logger.info(f"重新运行 BibTeX 以生成有效的 .bbl 文件")
-                                bib_result = self._run_compiler(
-                                    bibtex_path,
-                                    main_stem,
-                                    workspace_path,
-                                    use_standard_flags=False
-                                )
-                                logs.append(bib_result)
-                                errors.extend(self._extract_errors(bib_result["log"]))
-                                warnings.extend(self._extract_warnings(bib_result["log"]))
-                    except Exception as e:
-                        logger.warning(f"无法删除无效的 .bbl 文件: {e}")
-                
-                rerun_result = self._run_compiler(compiler_path, relative_main, workspace_path)
-                logs.append(rerun_result)
-                rerun_errors = self._extract_errors(rerun_result["log"])
-                errors.extend(rerun_errors)
-                warnings.extend(self._extract_warnings(rerun_result["log"]))
-                
-                # 检查是否有 "missing \item" 错误，这通常表示 .bbl 文件格式错误
-                if any("missing \\item" in err.lower() or "missing \\item" in err for err in rerun_errors):
-                    logger.warning(f"检测到 'missing \\item' 错误，删除 .bbl 文件并重新运行 BibTeX")
-                    if bbl_path.exists():
-                        try:
-                            bbl_path.unlink()
-                            logger.info(f"已删除导致错误的 .bbl 文件: {bbl_path}")
-                            # 重新运行 BibTeX
+                            logger.warning(f"Rerun {run_idx + 1} 前检测到无效的 .bbl 文件，已删除: {bbl_path}")
+                            # 如果 .bbl 文件无效，可能需要重新运行 BibTeX
                             if bib_path.exists() and aux_path.exists() and self._aux_requires_bibtex(aux_path):
                                 bibtex_path = shutil.which("bibtex")
                                 if bibtex_path:
-                                    logger.info(f"重新运行 BibTeX 以修复 .bbl 文件")
+                                    logger.info(f"重新运行 BibTeX 以生成有效的 .bbl 文件")
                                     bib_result = self._run_compiler(
                                         bibtex_path,
                                         main_stem,
@@ -352,43 +412,84 @@ class CompileLaTeXTool(BaseTool):
                                     logs.append(bib_result)
                                     errors.extend(self._extract_errors(bib_result["log"]))
                                     warnings.extend(self._extract_warnings(bib_result["log"]))
-                                    # 如果 BibTeX 成功，继续下一次 rerun
-                                    if bib_result["returncode"] == 0:
-                                        continue
                         except Exception as e:
-                            logger.warning(f"无法删除导致错误的 .bbl 文件: {e}")
-                
-                if rerun_result["returncode"] != 0:
-                    compiled = False
-                    break
-        
-        # 最终判断：以 PDF 是否成功生成为准，而不是单纯依赖退出码
-        # 因为某些情况下（如简单文档无需多次编译），后续 rerun 可能返回非零但 PDF 已存在
-        pdf_path = resolved_main.with_suffix(".pdf")
-        pdf_exists = pdf_path.exists()
-        relative_pdf = (
-            os.path.relpath(pdf_path, workspace_path)
-            if pdf_exists
-            else None
-        )
-        
-        # 如果 PDF 生成成功，即使中间某次 rerun 失败也认为编译成功
-        final_success = pdf_exists
-        
-        return {
-            "compiled": final_success,
-            "pdf_path": relative_pdf,
-            "logs": logs,
-            "errors": errors,
-            "warnings": warnings
-        }
+                            logger.warning(f"无法删除无效的 .bbl 文件: {e}")
+                    
+                    rerun_result = self._run_compiler(
+                        compiler_path,
+                        compile_target,
+                        workspace_path,
+                        jobname=compile_jobname,
+                    )
+                    logs.append(rerun_result)
+                    rerun_errors = self._extract_errors(rerun_result["log"])
+                    errors.extend(rerun_errors)
+                    warnings.extend(self._extract_warnings(rerun_result["log"]))
+                    
+                    # 检查是否有 "missing \item" 错误，这通常表示 .bbl 文件格式错误
+                    if any("missing \\item" in err.lower() or "missing \\item" in err for err in rerun_errors):
+                        logger.warning(f"检测到 'missing \\item' 错误，删除 .bbl 文件并重新运行 BibTeX")
+                        if bbl_path.exists():
+                            try:
+                                bbl_path.unlink()
+                                logger.info(f"已删除导致错误的 .bbl 文件: {bbl_path}")
+                                # 重新运行 BibTeX
+                                if bib_path.exists() and aux_path.exists() and self._aux_requires_bibtex(aux_path):
+                                    bibtex_path = shutil.which("bibtex")
+                                    if bibtex_path:
+                                        logger.info(f"重新运行 BibTeX 以修复 .bbl 文件")
+                                        bib_result = self._run_compiler(
+                                            bibtex_path,
+                                            main_stem,
+                                            workspace_path,
+                                            use_standard_flags=False
+                                        )
+                                        logs.append(bib_result)
+                                        errors.extend(self._extract_errors(bib_result["log"]))
+                                        warnings.extend(self._extract_warnings(bib_result["log"]))
+                                        # 如果 BibTeX 成功，继续下一次 rerun
+                                        if bib_result["returncode"] == 0:
+                                            continue
+                            except Exception as e:
+                                logger.warning(f"无法删除导致错误的 .bbl 文件: {e}")
+                    
+                    if rerun_result["returncode"] != 0:
+                        compiled = False
+                        break
+            
+            # 最终判断：以 PDF 是否成功生成为准，而不是单纯依赖退出码
+            pdf_path = resolved_main.with_suffix(".pdf")
+            pdf_exists = pdf_path.exists()
+            relative_pdf = (
+                os.path.relpath(pdf_path, workspace_path)
+                if pdf_exists
+                else None
+            )
+            
+            # 如果 PDF 生成成功，即使中间某次 rerun 失败也认为编译成功
+            final_success = pdf_exists
+            
+            return {
+                "compiled": final_success,
+                "pdf_path": relative_pdf,
+                "logs": logs,
+                "errors": self._dedupe_messages(errors),
+                "warnings": self._dedupe_messages(warnings),
+            }
+        finally:
+            if auto_wrapper_path and auto_wrapper_path.exists():
+                try:
+                    auto_wrapper_path.unlink()
+                except Exception as exc:
+                    logger.warning("清理临时中文包装文件失败 %s: %s", auto_wrapper_path, exc)
     
     def _run_compiler(
         self,
         executable: str,
         target: str,
         cwd: Path,
-        use_standard_flags: bool = True
+        use_standard_flags: bool = True,
+        jobname: str | None = None,
     ) -> Dict[str, Any]:
         """运行单次编译命令"""
         command = [executable]
@@ -397,6 +498,8 @@ class CompileLaTeXTool(BaseTool):
             "-interaction=nonstopmode",
             "-halt-on-error",
             ])
+            if jobname:
+                command.append(f"-jobname={jobname}")
         command.append(target)
         process = subprocess.run(
             command,

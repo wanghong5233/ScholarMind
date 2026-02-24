@@ -1,9 +1,12 @@
 declare namespace API {
+  type SessionSurface = 'deep_chat' | 'doc_studio'
+
   interface Session {
     created_at: string
     session_id: string
     session_name: string
     updated_at: string
+    surface?: SessionSurface
     // user_id: string
   }
 
@@ -16,6 +19,14 @@ declare namespace API {
     useSessionKnowledgeBase: boolean
     useUserKnowledgeBase: boolean
     userKnowledgeBaseId?: number | null
+    llmProvider?: 'dashscope' | 'openai' | 'local'
+    llmModel?: string | null
+  }
+
+  interface ChatUsage {
+    prompt_tokens: number
+    completion_tokens: number
+    total_tokens: number
   }
 
   interface CreateSessionResponse {
@@ -23,12 +34,14 @@ declare namespace API {
     kbId?: number | null
     ephemeral: boolean
     defaults: SessionDefaults
+    surface?: SessionSurface
   }
 
   interface SessionDetail {
     sessionId: string
     kbId?: number | null
     sessionName: string
+    surface?: SessionSurface
   }
 
   interface DeepResearchCardState {
@@ -60,6 +73,8 @@ declare namespace API {
       maxIterations?: number
       citations?: number
     }
+    snapshotQueue?: import('@/api/deepResearch').DeepResearchTrace['queue']
+    snapshotOutline?: import('@/api/deepResearch').DeepResearchPlan
     report?: import('@/api/deepResearch').DeepResearchReportPayload
     citations?: import('@/api/deepResearch').DeepResearchCitation[]
     statusMessage?: string
@@ -81,6 +96,9 @@ declare namespace API {
     reference?: Reference[]
     recommended_questions?: string[]
     attachments?: ChatAttachment[]
+    images?: ChatImageAttachment[]
+    usage?: ChatUsage
+    elapsed_seconds?: number
     deepResearch?: DeepResearchCardState
   }
 
@@ -88,6 +106,14 @@ declare namespace API {
     id: number
     title: string
     knowledgeBaseId?: number
+  }
+
+  interface ChatImageAttachment {
+    id: string
+    name: string
+    dataUrl: string
+    mimeType: string
+    size: number
   }
 
   interface Document {

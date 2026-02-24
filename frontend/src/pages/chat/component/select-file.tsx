@@ -3,7 +3,7 @@ import IconFile from '@/assets/chat/file.svg'
 import IconSelectFile from '@/assets/chat/select-file.svg'
 import { RightOutlined } from '@ant-design/icons'
 import { Button, Checkbox } from 'antd'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import styles from './select-file.module.scss'
 
 export default function ChooseFile(props: {
@@ -61,11 +61,26 @@ export default function ChooseFile(props: {
   )
 }
 
-function SelectFileSearching() {
+function SelectFileSearching(props: { message?: string }) {
+  const { message } = props
+  const [elapsedSeconds, setElapsedSeconds] = useState(0)
+
+  useEffect(() => {
+    const startedAt = Date.now()
+    const timer = window.setInterval(() => {
+      const next = Math.max(0, Math.floor((Date.now() - startedAt) / 1000))
+      setElapsedSeconds(next)
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [])
+
   return (
     <div className={styles['select-file-searching']}>
       <div className={styles['icon']}></div>
-      <div className={styles['title']}>正在搜索知识库</div>
+      <div className={styles['title']}>
+        {message?.trim() || '正在搜索知识库'}
+        <span className={styles['duration']}> · {elapsedSeconds}s</span>
+      </div>
     </div>
   )
 }

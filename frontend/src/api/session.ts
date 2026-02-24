@@ -1,7 +1,12 @@
 import { AxiosRequestConfig } from 'axios'
 import { request } from './request'
 
-export function list(params?: {}, options?: AxiosRequestConfig) {
+export function list(
+  params?: {
+    surface?: API.SessionSurface
+  },
+  options?: AxiosRequestConfig,
+) {
   return request.get<{
     sessions: API.Session[]
   }>('history/get_sessions', {
@@ -75,6 +80,20 @@ export function info(
   })
 }
 
+export function rename(
+  params: { sessionId: string; sessionName: string },
+  options?: AxiosRequestConfig,
+) {
+  const { sessionId, sessionName } = params
+  return request.put<API.SessionDetail>(
+    `sessions/${sessionId}/name`,
+    {
+      session_name: sessionName,
+    },
+    options,
+  )
+}
+
 export function getDefaults(
   params: { sessionId: string },
   options?: AxiosRequestConfig,
@@ -103,15 +122,18 @@ export function create(
     kbId?: number
     ephemeral?: boolean
     defaults?: Partial<API.SessionDefaults>
+    surface?: API.SessionSurface
   } = {
     ephemeral: true,
+    surface: 'deep_chat',
   },
   options?: AxiosRequestConfig,
 ) {
   const payload = {
-    ephemeral: params?.kbId ? false : params.ephemeral ?? true,
+    ephemeral: params?.ephemeral ?? true,
     kbId: params?.kbId,
     defaults: params?.defaults,
+    surface: params?.surface ?? 'deep_chat',
   }
   return request.post<API.CreateSessionResponse>('sessions', payload, options)
 }
@@ -126,8 +148,18 @@ export function chat(
     temperature?: number
     maxTokens?: number
     compressHistory?: boolean
-    indexMode?: 'auto' | 'session_only' | 'global_only' | 'hybrid'
+    indexMode?: 'auto' | 'session_only' | 'global_only' | 'hybrid' | 'disabled'
     replaceFromMessageId?: string
+    runId?: string
+    llmProvider?: 'dashscope' | 'openai' | 'local'
+    llmModel?: string
+    imageAttachments?: {
+      id?: string
+      name: string
+      dataUrl: string
+      mimeType?: string
+      size?: number
+    }[]
   },
   options?: AxiosRequestConfig,
 ) {
@@ -148,6 +180,75 @@ export function chat(
       loading: false,
       ...options,
     },
+  )
+}
+
+export function chatReplay(
+  params: {
+    id: string
+    runId: string
+    sinceSeq?: number
+  },
+  options?: AxiosRequestConfig,
+) {
+  const { id, runId, sinceSeq = -1 } = params
+  return request.get<ReadableStream>(
+    `sessions/${id}/ask/replay/${runId}`,
+    {
+      headers: {
+        Accept: 'text/event-stream',
+        'Content-Type': 'application/json',
+      },
+      responseType: 'stream',
+      adapter: 'fetch',
+      loading: false,
+      params: {
+        since_seq: sinceSeq,
+      },
+      ...options,
+    },
+  )
+}
+
+export function chatCancel(
+  params: {
+    id: string
+    runId: string
+  },
+  options?: AxiosRequestConfig,
+) {
+  const { id, runId } = params
+  return request.post<{ run_id: string; cancelled: boolean }>(
+    `sessions/${id}/ask/cancel/${runId}`,
+    {},
+    {
+      loading: false,
+      ...options,
+    },
+  )
+}
+
+export function rewind(
+  params: {
+    sessionId: string
+    beforeMessageId?: string
+    keepMessages?: number
+  },
+  options?: AxiosRequestConfig,
+) {
+  const { sessionId, beforeMessageId, keepMessages } = params
+  return request.post<{
+    deleted: boolean
+    deleted_messages: number
+    kept_messages: number
+    before_message_id?: string
+  }>(
+    `sessions/${sessionId}/rewind`,
+    {
+      before_message_id: beforeMessageId,
+      keep_messages: keepMessages,
+    },
+    options,
   )
 }
 

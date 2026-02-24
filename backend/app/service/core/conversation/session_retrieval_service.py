@@ -9,7 +9,9 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from core.config import settings
+from models.session import Session as SessionModel
 from models.user import User
+from schemas.knowledge_base import KnowledgeBaseCreate
 from schemas.rag import Chunk as RagChunk
 from service.core.rag.retriever import RAGRetriever
 from service.core.rag.graph.graph_service import KnowledgeGraphService
@@ -113,4 +115,20 @@ class SessionRetrievalService:
             raise HTTPException(status_code=404, detail="会话不存在")
         if str(self.current_user.id) != str(s.user_id):
             raise HTTPException(status_code=403, detail="无权访问该会话")
+        self._ensure_session_kb(s)
         return s
+
+    def _ensure_session_kb(self, session_obj: SessionModel) -> None:
+        """Backfill session KB for legacy sessions without bound KB."""
+        if session_obj.knowledge_base_id is not None:
+            return
+        kb_name = f"session_kb_for_{session_obj.session_id}"
+        kb = knowledgebase_service.create_kb_for_user(
+            db=self.db,
+            kb_create=KnowledgeBaseCreate(name=kb_name, description=None, is_ephemeral=True),
+            user_id=self.current_user.id,
+        )
+        session_obj.knowledge_base_id = kb.id
+        self.db.add(session_obj)
+        self.db.commit()
+        self.db.refresh(session_obj)

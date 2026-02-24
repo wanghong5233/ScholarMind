@@ -141,7 +141,8 @@ class KnowledgeGraphEvidence(Base):
     chunk_id = Column(String(128), nullable=True, comment="关联chunk_id")
     score = Column(Float, nullable=True, comment="证据权重")
     evidence_text = Column(Text, nullable=True, comment="证据文本")
-    metadata = Column(JSON, nullable=True, comment="证据元数据")
+    # "metadata" 在 SQLAlchemy Declarative Base 中是保留属性名
+    metadata_ = Column("metadata", JSON, nullable=True, comment="证据元数据")
 
     created_at = Column(TIMESTAMP, nullable=False, server_default=func.now(), comment="创建时间")
 

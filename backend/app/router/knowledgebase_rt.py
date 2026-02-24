@@ -79,8 +79,8 @@ class CleanupRequest(BaseModel):
 
 @router.post(
     "/cleanup-ephemeral",
-    summary="清理过期的临时知识库",
-    description="按时间阈值（小时）清理当前用户的临时知识库及其文档/向量等资源。",
+    summary="清理过期的会话知识库",
+    description="按时间阈值（小时）清理当前用户的会话知识库（ephemeral）及其文档/向量等资源。",
 )
 def cleanup_ephemeral_kbs(
     payload: CleanupRequest,

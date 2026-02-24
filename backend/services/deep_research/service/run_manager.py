@@ -93,6 +93,14 @@ class RunManager:
                         "priority": priority,
                     }
                 )
+            StateStore.register_session_run(
+                self._data_root,
+                session_id=request.session_id,
+                research_id=run_id,
+                user_id=user_id,
+                topic=request.topic,
+                submitted_at=now,
+            )
             self._queue_store.enqueue(run_id, priority, now)
             pending_entries = self._queue_store.list_pending(settings.QUEUE_PRIORITY_AGING_SECONDS)
             pending_ids = [entry.research_id for entry in pending_entries]
@@ -392,7 +400,7 @@ class RunManager:
         watchdog.add_done_callback(lambda _: self._watchdogs.pop(research_id, None))
 
     async def _watch_run(self, research_id: str) -> None:
-        interval = max(2, settings.RUN_WATCHDOG_INTERVAL_SECONDS)
+        interval = max(1, settings.RUN_WATCHDOG_INTERVAL_SECONDS)
         while True:
             await asyncio.sleep(interval)
             task = self._tasks.get(research_id)
@@ -580,6 +588,24 @@ class RunManager:
             )
             self._append_control_event(research_id, message)
             raise
+        except Exception as exc:  # noqa: BLE001 - convert runtime failure into visible control event
+            store = StateStore(self._data_root, research_id)
+            meta = store.load_meta() or {}
+            status_value = str(meta.get("status") or "").strip().lower()
+            if status_value not in {
+                DeepResearchStatus.COMPLETED.value,
+                DeepResearchStatus.CANCELLED.value,
+                DeepResearchStatus.FAILED.value,
+            }:
+                store.update_meta(
+                    {
+                        "status": DeepResearchStatus.FAILED.value,
+                        "finished_at": datetime.utcnow().isoformat(),
+                        "error": str(exc),
+                    }
+                )
+            error_text = str(exc).strip() or exc.__class__.__name__
+            self._append_control_event(research_id, f"Run failed: {error_text[:320]}")
 
     def _append_control_event(self, research_id: str, message: str) -> None:
         store = StateStore(self._data_root, research_id)
@@ -587,6 +613,7 @@ class RunManager:
             {
                 "research_id": research_id,
                 "stage": "control",
+                "event_type": "control.event",
                 "message": message,
                 "timestamp": datetime.utcnow().isoformat(),
                 "payload": {},
@@ -642,6 +669,7 @@ class RunManager:
             {
                 "research_id": research_id,
                 "stage": "control",
+                "event_type": "control.event",
                 "message": f"Run interrupted: {reason}",
                 "timestamp": now,
                 "payload": {},

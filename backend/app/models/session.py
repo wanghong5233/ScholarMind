@@ -23,7 +23,12 @@ class Session(Base):
     # user_id: 该会话所属用户的ID（暂保留为字符串以兼容现有数据）。
     user_id = Column(String(255), nullable=False)
 
-    # knowledge_base_id: 该会话绑定的知识库ID（可为空，向后兼容）。
+    # surface: 会话所属产品面（用于会话宇宙隔离）。
+    # - deep_chat: 主站对话宇宙（含 deep_research / idea_gen 等能力）
+    # - doc_studio: Doc Studio 编辑宇宙
+    surface = Column(String(32), nullable=False, server_default="deep_chat")
+
+    # knowledge_base_id: 该会话绑定的 Session KB ID（历史数据可能为空，运行时自动补齐）。
     knowledge_base_id = Column(Integer, ForeignKey('knowledgebases.id', ondelete='SET NULL'), nullable=True)
     
     # created_at: 会话记录的创建时间戳。

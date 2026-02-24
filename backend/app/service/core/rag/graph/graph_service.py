@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 import logging
+import time
 
 from sqlalchemy.orm import Session
 
@@ -78,10 +79,27 @@ class KnowledgeGraphService:
         if not self._graph_enabled(provider, rag_config):
             return [], [], [], {}
         try:
+            t0 = time.perf_counter()
             max_entities = int(getattr(settings, "SM_GRAPH_QUERY_MAX_ENTITIES", 6) or 6)
             entities = self.extractor.extract_query_entities(query, max_entities=max_entities)
             if not entities:
-                return [], [], [], {"entities": []}
+                debug = {
+                    "entities": [],
+                    "nodes": [],
+                    "edges": [],
+                    "boost_doc_ids": [],
+                    "boost_chunk_ids": [],
+                    "boost_chunk_count": 0,
+                    "query_variants": [],
+                    "graph_status": "no_entities",
+                    "fallback_entity_variants": False,
+                    "elapsed_ms": int((time.perf_counter() - t0) * 1000),
+                }
+                try:
+                    self.logger.info(f"[GRAPH_BOOST] kb={kb_id} status=no_entities elapsed_ms={debug['elapsed_ms']}")
+                except Exception:
+                    pass
+                return [], [], [], debug
             normalized = [normalize_entity_name(name) for name in entities if name]
             normalized = [name for name in normalized if name]
             nodes = self.store.query_nodes(
@@ -120,6 +138,28 @@ class KnowledgeGraphService:
                     edges=edge_list,
                     max_variants=max_variants,
                 )
+            fallback_entity_variants = False
+            if (
+                not query_variants
+                and bool(getattr(settings, "SM_GRAPH_ENTITY_VARIANT_FALLBACK", True))
+            ):
+                max_variants = int(getattr(settings, "SM_GRAPH_QUERY_MAX_VARIANTS", 6) or 6)
+                query_variants = self._build_entity_only_variants(
+                    entities=entities,
+                    max_variants=max_variants,
+                )
+                fallback_entity_variants = bool(query_variants)
+
+            if not nodes:
+                graph_status = "no_nodes_matched"
+            elif not edge_list:
+                graph_status = "no_edges_matched"
+            elif not boost_doc_ids and not boost_chunk_ids:
+                graph_status = "no_evidence_matched"
+            else:
+                graph_status = "ok"
+
+            elapsed_ms = int((time.perf_counter() - t0) * 1000)
             debug = {
                 "entities": entities,
                 "nodes": [node.name for node in nodes],
@@ -128,7 +168,18 @@ class KnowledgeGraphService:
                 "boost_chunk_ids": boost_chunk_ids[: min(len(boost_chunk_ids), 10)],
                 "boost_chunk_count": len(boost_chunk_ids),
                 "query_variants": [v.get("text") for v in query_variants[:10]],
+                "graph_status": graph_status,
+                "fallback_entity_variants": fallback_entity_variants,
+                "elapsed_ms": elapsed_ms,
             }
+            try:
+                self.logger.info(
+                    f"[GRAPH_BOOST] kb={kb_id} status={graph_status} entities={len(entities)} "
+                    f"nodes={len(nodes)} edges={len(edge_list)} docs={len(boost_doc_ids)} chunks={len(boost_chunk_ids)} "
+                    f"variants={len(query_variants)} fallback_variants={fallback_entity_variants} elapsed_ms={elapsed_ms}"
+                )
+            except Exception:
+                pass
             return boost_doc_ids, boost_chunk_ids, query_variants, debug
         except Exception as exc:
             try:
@@ -216,6 +267,23 @@ class KnowledgeGraphService:
             seen.add(key)
             variants.append(
                 {"text": phrase, "tag": "graph_relation", "synthetic": True}
+            )
+            if len(variants) >= max_variants:
+                break
+        return variants
+
+    @staticmethod
+    def _build_entity_only_variants(*, entities: List[str], max_variants: int) -> List[Dict[str, Any]]:
+        variants: List[Dict[str, Any]] = []
+        seen: set[str] = set()
+        for entity in entities:
+            text = str(entity or "").strip()
+            key = text.casefold()
+            if not text or key in seen:
+                continue
+            seen.add(key)
+            variants.append(
+                {"text": text, "tag": "graph_entity_fallback", "synthetic": True}
             )
             if len(variants) >= max_variants:
                 break

@@ -1,10 +1,12 @@
 import iconNewchat from '@/assets/layout/newchat.svg'
 import iconRepository from '@/assets/layout/repository.svg'
-import iconDebug from '@/assets/layout/debug.svg'
-import iconResearch from '@/assets/layout/debug.svg'
 import iconEdit from '@/assets/layout/edit.svg'
 import logo from '@/assets/logo.svg'
-import { deviceState } from '@/store/device'
+import { NOTEBOOK_WORKSPACE_ID, ensureNotebookWorkspace } from '@/utils/notebook'
+import { deviceActions, deviceState } from '@/store/device'
+import { BookOutlined, BulbOutlined, MenuFoldOutlined, MenuUnfoldOutlined } from '@ant-design/icons'
+import { Button, Tooltip, message } from 'antd'
+import { useCallback, useEffect } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { useSnapshot } from 'valtio'
 import { Background } from './background'
@@ -13,6 +15,8 @@ import './index.scss'
 import { Nav } from './nav'
 
 const TITLE = import.meta.env.VITE_TITLE
+const IDEAGEN_TEMP_DISABLED = true
+const IDEAGEN_DISABLED_TIP = 'IdeaGen 功能暂时关闭，后续开放'
 
 export function BaseLayout({ children }: { children?: React.ReactNode }) {
   const navigate = useNavigate()
@@ -20,35 +24,88 @@ export function BaseLayout({ children }: { children?: React.ReactNode }) {
   const location = useLocation()
 
   const isActive = (path: string) => location.pathname.startsWith(path)
+  const isNotebookRoute = location.pathname.startsWith(`/doc-studio/${NOTEBOOK_WORKSPACE_ID}`)
+  const isDocStudioRoute = isActive('/doc-studio') && !isNotebookRoute
+
+  const handleOpenNotebook = useCallback(async () => {
+    if (device.chatting) return
+    try {
+      await ensureNotebookWorkspace()
+      navigate(`/doc-studio/${NOTEBOOK_WORKSPACE_ID}`)
+    } catch (error: any) {
+      const detail = error?.response?.data?.detail || error?.response?.data?.message || error?.message
+      message.error(detail ? `打开笔记本失败：${detail}` : '打开笔记本失败')
+    }
+  }, [device.chatting, navigate])
+
+  const handleOpenIdeaGen = useCallback(() => {
+    if (device.chatting) return
+    if (IDEAGEN_TEMP_DISABLED) {
+      message.info(IDEAGEN_DISABLED_TIP)
+      return
+    }
+    navigate('/idea-generation')
+  }, [device.chatting, navigate])
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === '\\') {
+        e.preventDefault()
+        deviceActions.toggleSidebar()
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [])
 
   return (
-    <div className="base-layout">
+    <div className={`base-layout ${device.sidebarCollapsed ? 'base-layout--sidebar-collapsed' : ''}`}>
       <div className="base-layout__sidebar">
-        <div className="base-layout__logo">
-          <img
-            className="logo"
-            src={logo}
-            onClick={() => (device.chatting ? null : navigate('/'))}
-          />
-          <span className="title">{TITLE}</span>
+        <div
+          className="base-layout__logo"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            width: '100%',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <img
+              className="logo"
+              src={logo}
+              onClick={() => (device.chatting ? null : navigate('/chat'))}
+            />
+            <span className="title">{TITLE}</span>
+          </div>
+          {!device.sidebarCollapsed && (
+            <div style={{ flexShrink: 0, marginLeft: 16 }}>
+              <Tooltip title="收起导航">
+                <Button
+                  type="text"
+                  className="base-layout__sidebar-toggle"
+                  icon={<MenuFoldOutlined />}
+                  onClick={() => deviceActions.toggleSidebar()}
+                />
+              </Tooltip>
+            </div>
+          )}
         </div>
 
-        <div className="base-layout__sidebar-main scrollbar-style">
-          <div className="base-layout__sidebar-main-content">
+        <div className="base-layout__sidebar-main">
+          <div className="base-layout__sidebar-main-content scrollbar-style">
             <div
-              className="base-layout__nav-header"
-              onClick={() => (device.chatting ? null : navigate('/'))}
+              className="base-layout__new-chat"
+              onClick={() => (device.chatting ? null : navigate('/chat'))}
             >
-              <img className="base-layout__nav-header-icon" src={iconNewchat} />
-              <span className="base-layout__nav-header-title">新对话</span>
+              <img className="base-layout__new-chat-icon" src={iconNewchat} />
+              <span className="base-layout__new-chat-title">新对话</span>
             </div>
 
-            <Nav />
-
-          <div
-            className={`base-layout__nav-header ${isActive('/repository') ? 'is-active' : ''}`}
-            onClick={() => (device.chatting ? null : navigate('/repository'))}
-          >
+            <div
+              className={`base-layout__nav-header ${isActive('/repository') ? 'is-active' : ''}`}
+              onClick={() => (device.chatting ? null : navigate('/repository'))}
+            >
               <img
                 className="base-layout__nav-header-icon"
                 src={iconRepository}
@@ -56,10 +113,30 @@ export function BaseLayout({ children }: { children?: React.ReactNode }) {
               <span className="base-layout__nav-header-title">知识库</span>
             </div>
 
-          <div
-            className={`base-layout__nav-header ${isActive('/doc-studio') ? 'is-active' : ''}`}
-            onClick={() => (device.chatting ? null : navigate('/doc-studio'))}
-          >
+            <div
+              className={`base-layout__nav-header ${isActive('/idea-generation') ? 'is-active' : ''} ${
+                IDEAGEN_TEMP_DISABLED ? 'is-disabled' : ''
+              }`}
+              onClick={handleOpenIdeaGen}
+            >
+              <BulbOutlined className="base-layout__nav-header-icon base-layout__nav-header-icon--antd" />
+              <span className="base-layout__nav-header-title">IdeaGen</span>
+            </div>
+
+            <div
+              className={`base-layout__nav-header ${isNotebookRoute ? 'is-active' : ''}`}
+              onClick={() => {
+                void handleOpenNotebook()
+              }}
+            >
+              <BookOutlined className="base-layout__nav-header-icon base-layout__nav-header-icon--antd" />
+              <span className="base-layout__nav-header-title">笔记本</span>
+            </div>
+
+            <div
+              className={`base-layout__nav-header ${isDocStudioRoute ? 'is-active' : ''}`}
+              onClick={() => (device.chatting ? null : navigate('/doc-studio'))}
+            >
               <img
                 className="base-layout__nav-header-icon"
                 src={iconEdit}
@@ -67,54 +144,25 @@ export function BaseLayout({ children }: { children?: React.ReactNode }) {
               <span className="base-layout__nav-header-title">Doc Studio</span>
             </div>
 
-          <div
-            className={`base-layout__nav-header ${isActive('/deep-research') ? 'is-active' : ''}`}
-            onClick={() => (device.chatting ? null : navigate('/deep-research'))}
-          >
-              <img
-                className="base-layout__nav-header-icon"
-                src={iconResearch}
-              />
-              <span className="base-layout__nav-header-title">DeepResearch</span>
-            </div>
-
-          <div
-            className={`base-layout__nav-header ${isActive('/idea-generation') ? 'is-active' : ''}`}
-            onClick={() => (device.chatting ? null : navigate('/idea-generation'))}
-          >
-              <img
-                className="base-layout__nav-header-icon"
-                src={iconResearch}
-              />
-              <span className="base-layout__nav-header-title">研究想法生成</span>
-            </div>
-
-          <div
-            className={`base-layout__nav-header ${isActive('/debug/parse') ? 'is-active' : ''}`}
-            onClick={() => (device.chatting ? null : navigate('/debug/parse'))}
-          >
-              <img
-                className="base-layout__nav-header-icon"
-                src={iconDebug}
-              />
-              <span className="base-layout__nav-header-title">解析调试</span>
-            </div>
-
-          <div
-            className={`base-layout__nav-header ${isActive('/debug/retrieval') ? 'is-active' : ''}`}
-            onClick={() => (device.chatting ? null : navigate('/debug/retrieval'))}
-          >
-              <img
-                className="base-layout__nav-header-icon"
-                src={iconDebug}
-              />
-              <span className="base-layout__nav-header-title">检索调试</span>
-            </div>
+            <Nav />
           </div>
 
           <Footer />
         </div>
       </div>
+
+      {device.sidebarCollapsed && (
+        <Tooltip title="展开导航栏 (Ctrl+\ 可切换)" placement="right">
+          <button
+            type="button"
+            className="base-layout__sidebar-trigger"
+            onClick={() => deviceActions.setSidebarCollapsed(false)}
+            aria-label="展开导航栏"
+          >
+            <MenuUnfoldOutlined />
+          </button>
+        </Tooltip>
+      )}
 
       <div className="base-layout__content">{children}</div>
 

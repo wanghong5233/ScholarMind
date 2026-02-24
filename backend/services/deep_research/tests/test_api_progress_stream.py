@@ -5,12 +5,13 @@ import json
 from datetime import datetime
 
 import pytest
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient
 
 from core.config import settings
 from main import app
 from schemas.common import DeepResearchStatus
 from service.state_store import StateStore
+from tests.httpx_compat import create_asgi_transport
 
 
 async def _read_first_data_line(response) -> str:
@@ -23,7 +24,7 @@ async def _read_first_data_line(response) -> str:
 @pytest.mark.asyncio
 async def test_progress_stream_last_event_id(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(settings, "DATA_ROOT", str(tmp_path))
-    transport = ASGITransport(app=app, lifespan="on")
+    transport = create_asgi_transport(app=app)
     client = AsyncClient(transport=transport, base_url="http://test")
     headers = {"X-User-Id": "1"}
 
@@ -62,6 +63,7 @@ async def test_progress_stream_last_event_id(tmp_path, monkeypatch) -> None:
         async with client.stream(
             "GET",
             f"/api/deep-research/{research_id}/progress/stream",
+            params={"once": "1"},
             headers={**headers, "Last-Event-ID": str(first_offset)},
         ) as response:
             assert response.status_code == 200
@@ -76,7 +78,7 @@ async def test_progress_stream_last_event_id(tmp_path, monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_progress_stream_last_event_id_query_user(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(settings, "DATA_ROOT", str(tmp_path))
-    transport = ASGITransport(app=app, lifespan="on")
+    transport = create_asgi_transport(app=app)
     client = AsyncClient(transport=transport, base_url="http://test")
 
     try:
@@ -114,7 +116,7 @@ async def test_progress_stream_last_event_id_query_user(tmp_path, monkeypatch) -
         async with client.stream(
             "GET",
             f"/api/deep-research/{research_id}/progress/stream",
-            params={"user_id": "1", "last_event_id": str(first_offset)},
+            params={"user_id": "1", "last_event_id": str(first_offset), "once": "1"},
         ) as response:
             assert response.status_code == 200
             line = await asyncio.wait_for(_read_first_data_line(response), timeout=1.0)
@@ -128,7 +130,7 @@ async def test_progress_stream_last_event_id_query_user(tmp_path, monkeypatch) -
 @pytest.mark.asyncio
 async def test_progress_stream_forbidden(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(settings, "DATA_ROOT", str(tmp_path))
-    transport = ASGITransport(app=app, lifespan="on")
+    transport = create_asgi_transport(app=app)
     client = AsyncClient(transport=transport, base_url="http://test")
     try:
         research_id = "dr_stream_forbidden"
@@ -154,7 +156,7 @@ async def test_progress_stream_forbidden(tmp_path, monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_progress_stream_last_event_id_forbidden(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(settings, "DATA_ROOT", str(tmp_path))
-    transport = ASGITransport(app=app, lifespan="on")
+    transport = create_asgi_transport(app=app)
     client = AsyncClient(transport=transport, base_url="http://test")
     try:
         research_id = "dr_stream_forbidden_last_event"
@@ -189,7 +191,7 @@ async def test_progress_stream_last_event_id_forbidden(tmp_path, monkeypatch) ->
 @pytest.mark.asyncio
 async def test_progress_stream_not_found(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(settings, "DATA_ROOT", str(tmp_path))
-    transport = ASGITransport(app=app, lifespan="on")
+    transport = create_asgi_transport(app=app)
     client = AsyncClient(transport=transport, base_url="http://test")
     try:
         async with client.stream(

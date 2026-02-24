@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Tuple
 
 
 _CLICKABLE_CITATION_RE = re.compile(r"\[\[(\d+)\]\]\(#ref-\1\)")
+_PLACEHOLDER_CITATION_RE = re.compile(r"\[(?:N|n|\?)\]")
 
 
 def analyze_report(report_markdown: str) -> Dict[str, Any]:
@@ -33,6 +34,7 @@ def analyze_report(report_markdown: str) -> Dict[str, Any]:
     paragraphs_with_citations = sum(1 for refs in citations_by_para if refs)
     paragraphs_without_citations = paragraphs_total - paragraphs_with_citations
     mention_count = sum(len(refs) for refs in citations_by_para)
+    placeholder_markers_count = len(_PLACEHOLDER_CITATION_RE.findall(main_text))
 
     distinct: List[int] = []
     seen = set()
@@ -92,6 +94,7 @@ def analyze_report(report_markdown: str) -> Dict[str, Any]:
         "paragraphs_without_citations": paragraphs_without_citations,
         "citation_paragraph_coverage": coverage,
         "citations_mentions": mention_count,
+        "placeholder_citation_markers": placeholder_markers_count,
         "citations_distinct_count": len(distinct),
         "citations_distinct": distinct,
         "uncited_examples": uncited_examples,

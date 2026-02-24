@@ -129,6 +129,7 @@ class NotebookPipeline:
             user_id=user_id,
             top_k=request.top_k,
             index_mode=request.index_mode,
+            persist_history=False,
         )
         payload = extract_json_from_text(answer.answer or "")
         if payload is not None:
@@ -140,6 +141,7 @@ class NotebookPipeline:
             user_id=user_id,
             top_k=request.top_k,
             index_mode=request.index_mode,
+            persist_history=False,
         )
         return extract_json_from_text(repaired.answer or ""), self._normalize_citations(repaired.citations)
 

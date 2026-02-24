@@ -119,10 +119,10 @@ const actions = {
     buffer.content = content
     buffer.dirty = content !== buffer.savedContent
   },
-  markFileSaved(path: string) {
+  markFileSaved(path: string, savedContent?: string) {
     const buffer = actions.ensureFileBuffer(path)
-    buffer.dirty = false
-    buffer.savedContent = buffer.content
+    buffer.savedContent = typeof savedContent === 'string' ? savedContent : buffer.content
+    buffer.dirty = buffer.content !== buffer.savedContent
   },
   appendChatMessage(message: Omit<DocStudioChatMessage, 'id' | 'createdAt'> & { id?: string; createdAt?: number }) {
     const id = message.id || (crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`)
@@ -145,6 +145,22 @@ const actions = {
       ...(target.meta || {}),
       feedback: rating,
     }
+  },
+  updateMessageMeta(messageId: string, patch: Record<string, any>) {
+    const target = state.chatMessages.find((msg) => msg.id === messageId)
+    if (!target) return
+    target.meta = { ...(target.meta || {}), ...patch }
+  },
+  removeChatMessageById(messageId: string) {
+    if (!messageId) return
+    state.chatMessages = state.chatMessages.filter((msg) => msg.id !== messageId)
+  },
+  truncateMessagesFromIndex(startIndex: number) {
+    if (!Number.isFinite(startIndex) || startIndex <= 0) {
+      state.chatMessages = []
+      return
+    }
+    state.chatMessages = state.chatMessages.slice(0, Math.floor(startIndex))
   },
   setExecutionHistory(history: DocStudioAPI.AgentStep[]) {
     state.executionHistory = history

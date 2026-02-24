@@ -19,8 +19,8 @@ class DashScopeEmbedder(BaseEmbedder):
             api_key=settings.DASHSCOPE_API_KEY,
             base_url=settings.DASHSCOPE_BASE_URL
         )
-        self.model_name = "text-embedding-v2" # 通义千问 embedding 模型的固定名称
-        log.info("DashScopeEmbedder initialized.")
+        self.model_name = str(getattr(settings, "SM_EMBEDDING_MODEL", "text-embedding-v3") or "text-embedding-v3")
+        log.info(f"DashScopeEmbedder initialized model={self.model_name}.")
 
     async def embed_documents(self, documents: List[Document]) -> List[Chunk]:
         log.warning("embed_documents is not fully implemented in DashScopeEmbedder. It returns an empty list.")

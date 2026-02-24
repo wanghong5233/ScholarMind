@@ -2,6 +2,7 @@
 响应类工具
 用于 Agent 回复用户、总结操作等
 """
+import re
 from typing import Dict, Any
 import logging
 
@@ -84,6 +85,15 @@ class ReplyToUserTool(BaseTool):
         # 记录回复日志
         logger.info(f"Agent reply: {summary}")
         logger.debug(f"Full reply: {reply[:200]}...")
+        # 调试：输出原始内容中的换行结构，便于排查渲染间距问题
+        nl_count = reply.count("\n")
+        double_nl = reply.count("\n\n")
+        triple_plus = len(list(re.finditer(r"\n{3,}", reply)))
+        logger.info(
+            "Agent reply raw stats: len=%d, \\n=%d, \\n\\n=%d, \\n{3+}=%d, sample_repr=%s",
+            len(reply), nl_count, double_nl, triple_plus,
+            repr(reply[:300]) if len(reply) > 300 else repr(reply),
+        )
         
         # 返回回复内容
         return ToolResult(

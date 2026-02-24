@@ -40,7 +40,7 @@ class GraphExtractor:
     """Extract entities and relations for knowledge graph building."""
 
     def __init__(self, llm_client: Optional[LLMClient] = None) -> None:
-        self.llm = llm_client or LLMClient()
+        self.llm = llm_client or LLMClient(task="graph")
 
     def extract_from_text(
         self,

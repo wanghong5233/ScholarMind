@@ -25,6 +25,7 @@ class JobStatus(enum.Enum):
     PARTIAL = "partial"
     SUCCESS = "success"
     FAILED = "failed"
+    CANCELLED = "cancelled"
 
 
 class Job(Base):

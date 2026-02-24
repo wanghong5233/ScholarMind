@@ -58,7 +58,10 @@ async def _build_client(tmp_path, monkeypatch) -> AsyncClient:
     monkeypatch.setattr(research_rt, "run_manager", manager)
     monkeypatch.setattr(ResearchPipeline, "run", fake_run)
 
-    transport = ASGITransport(app=app, lifespan="on")
+    try:
+        transport = ASGITransport(app=app, lifespan="on")
+    except TypeError:
+        transport = ASGITransport(app=app)
     return AsyncClient(transport=transport, base_url="http://test")
 
 
@@ -242,5 +245,205 @@ async def test_replay_and_resume(tmp_path, monkeypatch) -> None:
         await _wait_until(
             lambda: StateStore(tmp_path, resume_id).load_meta().get("resume_pending") is True
         )
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_endpoint_requires_owner(tmp_path, monkeypatch) -> None:
+    client = await _build_client(tmp_path, monkeypatch)
+    try:
+        research_id = "dr_snapshot_forbidden"
+        store = StateStore(tmp_path, research_id)
+        store.save_meta(
+            {
+                "research_id": research_id,
+                "status": DeepResearchStatus.RUNNING.value,
+                "user_id": 2,
+                "request": {"topic": "Topic", "mode": "queue"},
+            }
+        )
+        store.save_json("report.json", {"report_markdown": "hello"})
+
+        res = await client.get(
+            f"/api/deep-research/{research_id}/snapshot",
+            headers={"X-User-Id": "1"},
+        )
+        assert res.status_code == 403
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_endpoint_returns_payload_for_owner(tmp_path, monkeypatch) -> None:
+    client = await _build_client(tmp_path, monkeypatch)
+    try:
+        research_id = "dr_snapshot_owner"
+        store = StateStore(tmp_path, research_id)
+        store.save_meta(
+            {
+                "research_id": research_id,
+                "status": DeepResearchStatus.COMPLETED.value,
+                "user_id": 1,
+                "request": {"topic": "Topic", "mode": "queue"},
+            }
+        )
+        store.save_json("outline.json", {"items": []})
+        store.save_json("queue.json", {"blocks": []})
+        store.save_json("citations.json", {"citations": []})
+        store.save_json("report.json", {"report_markdown": "# report"})
+
+        res = await client.get(
+            f"/api/deep-research/{research_id}/snapshot",
+            headers={"X-User-Id": "1"},
+        )
+        assert res.status_code == 200
+        payload = res.json()
+        assert payload["research_id"] == research_id
+        assert payload["report"]["report_markdown"] == "# report"
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_session_runs_and_context_endpoints(tmp_path, monkeypatch) -> None:
+    client = await _build_client(tmp_path, monkeypatch)
+    headers = {"X-User-Id": "1"}
+    try:
+        session_id = "sess_ctx_001"
+        completed_id = "dr_ctx_completed"
+        running_id = "dr_ctx_running"
+        foreign_id = "dr_ctx_foreign"
+        other_session_id = "dr_ctx_other_session"
+        other_session_run = "dr_ctx_other"
+
+        completed_store = StateStore(tmp_path, completed_id)
+        completed_store.save_meta(
+            {
+                "research_id": completed_id,
+                "status": DeepResearchStatus.COMPLETED.value,
+                "topic": "Completed topic",
+                "user_id": 1,
+                "submitted_at": "2026-02-21T10:00:00",
+                "finished_at": "2026-02-21T10:10:00",
+                "request": {
+                    "topic": "Completed topic",
+                    "mode": "queue",
+                    "session_id": session_id,
+                },
+            }
+        )
+        completed_store.save_json(
+            "report.json",
+            {"report_markdown": "# 结论\n这是已完成深度研究报告摘要。"},
+        )
+        completed_store.save_json(
+            "citations.json",
+            {"citations": [{"citation_id": "c1"}]},
+        )
+        StateStore.register_session_run(
+            tmp_path,
+            session_id=session_id,
+            research_id=completed_id,
+            user_id=1,
+            topic="Completed topic",
+            submitted_at="2026-02-21T10:00:00",
+        )
+
+        running_store = StateStore(tmp_path, running_id)
+        running_store.save_meta(
+            {
+                "research_id": running_id,
+                "status": DeepResearchStatus.RUNNING.value,
+                "topic": "Running topic",
+                "user_id": 1,
+                "submitted_at": "2026-02-21T11:00:00",
+                "request": {
+                    "topic": "Running topic",
+                    "mode": "queue",
+                    "session_id": session_id,
+                },
+            }
+        )
+        StateStore.register_session_run(
+            tmp_path,
+            session_id=session_id,
+            research_id=running_id,
+            user_id=1,
+            topic="Running topic",
+            submitted_at="2026-02-21T11:00:00",
+        )
+
+        foreign_store = StateStore(tmp_path, foreign_id)
+        foreign_store.save_meta(
+            {
+                "research_id": foreign_id,
+                "status": DeepResearchStatus.COMPLETED.value,
+                "topic": "Foreign topic",
+                "user_id": 2,
+                "submitted_at": "2026-02-21T12:00:00",
+                "request": {
+                    "topic": "Foreign topic",
+                    "mode": "queue",
+                    "session_id": session_id,
+                },
+            }
+        )
+        StateStore.register_session_run(
+            tmp_path,
+            session_id=session_id,
+            research_id=foreign_id,
+            user_id=2,
+            topic="Foreign topic",
+            submitted_at="2026-02-21T12:00:00",
+        )
+
+        other_store = StateStore(tmp_path, other_session_run)
+        other_store.save_meta(
+            {
+                "research_id": other_session_run,
+                "status": DeepResearchStatus.COMPLETED.value,
+                "topic": "Other session topic",
+                "user_id": 1,
+                "submitted_at": "2026-02-21T13:00:00",
+                "request": {
+                    "topic": "Other session topic",
+                    "mode": "queue",
+                    "session_id": other_session_id,
+                },
+            }
+        )
+        StateStore.register_session_run(
+            tmp_path,
+            session_id=other_session_id,
+            research_id=other_session_run,
+            user_id=1,
+            topic="Other session topic",
+            submitted_at="2026-02-21T13:00:00",
+        )
+
+        runs_res = await client.get(
+            f"/api/deep-research/session/{session_id}/runs",
+            params={"limit": 20},
+            headers=headers,
+        )
+        assert runs_res.status_code == 200
+        run_ids = {item["research_id"] for item in runs_res.json()["items"]}
+        assert completed_id in run_ids
+        assert running_id in run_ids
+        assert foreign_id not in run_ids
+        assert other_session_run not in run_ids
+
+        ctx_res = await client.get(
+            f"/api/deep-research/session/{session_id}/context",
+            params={"limit": 5, "max_summary_chars": 200},
+            headers=headers,
+        )
+        assert ctx_res.status_code == 200
+        ctx_items = ctx_res.json()["items"]
+        assert len(ctx_items) == 1
+        assert ctx_items[0]["research_id"] == completed_id
+        assert ctx_items[0]["citations_total"] == 1
+        assert "深度研究报告摘要" in ctx_items[0]["summary"]
     finally:
         await client.aclose()

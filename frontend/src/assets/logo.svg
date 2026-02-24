@@ -1,55 +1,40 @@
 <svg width="40" height="40" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <!-- 渐变定义 -->
   <defs>
-    <linearGradient id="grad1" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#667eea;stop-opacity:1" />
-      <stop offset="100%" style="stop-color:#764ba2;stop-opacity:1" />
+    <linearGradient id="smLogoBg" x1="6" y1="4" x2="34" y2="36" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0B6BFF" />
+      <stop offset="0.56" stop-color="#1E86FF" />
+      <stop offset="1" stop-color="#4CB4FF" />
     </linearGradient>
-    <linearGradient id="grad2" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#f093fb;stop-opacity:0.3" />
-      <stop offset="100%" style="stop-color:#f5576c;stop-opacity:0.3" />
-    </linearGradient>
+    <radialGradient id="smLogoGlow" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(14 10) rotate(38) scale(26)">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.42" />
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0" />
+    </radialGradient>
   </defs>
-  
-  <!-- 主背景圆形 -->
-  <circle cx="20" cy="20" r="19" fill="url(#grad1)" opacity="0.95"/>
-  
-  <!-- 装饰性光晕 -->
-  <circle cx="20" cy="20" r="16" fill="url(#grad2)" opacity="0.4"/>
-  
-  <!-- 书本图标 -->
-  <g transform="translate(10, 11)">
-    <!-- 左侧书页 -->
-    <path d="M2 2 L2 16 L8 14 L8 0 Z" fill="white" opacity="0.9"/>
-    <!-- 右侧书页 -->
-    <path d="M12 0 L12 14 L18 16 L18 2 Z" fill="white" opacity="0.9"/>
-    <!-- 书脊 -->
-    <rect x="8" y="0" width="4" height="14" fill="white" opacity="0.95"/>
-    <!-- 书本装饰线 -->
-    <line x1="8" y1="4" x2="12" y2="4" stroke="#667eea" stroke-width="0.8" opacity="0.6"/>
-    <line x1="8" y1="7" x2="12" y2="7" stroke="#667eea" stroke-width="0.8" opacity="0.6"/>
-    <line x1="8" y1="10" x2="12" y2="10" stroke="#667eea" stroke-width="0.8" opacity="0.6"/>
+
+  <circle cx="20" cy="20" r="18.5" fill="url(#smLogoBg)" />
+  <circle cx="20" cy="20" r="18.5" fill="url(#smLogoGlow)" />
+  <circle cx="20" cy="20" r="17.7" stroke="#FFFFFF" stroke-opacity="0.32" stroke-width="1.2" />
+
+  <g fill="#FFFFFF">
+    <path d="M11.8 13.2C11.8 12.26 12.56 11.5 13.5 11.5H18.55C19.43 11.5 20.25 11.91 20.8 12.61V27.9C20.2 27.34 19.4 27 18.55 27H13.5C12.56 27 11.8 26.24 11.8 25.3V13.2Z" opacity="0.96" />
+    <path d="M28.2 13.2C28.2 12.26 27.44 11.5 26.5 11.5H21.45C20.57 11.5 19.75 11.91 19.2 12.61V27.9C19.8 27.34 20.6 27 21.45 27H26.5C27.44 27 28.2 26.24 28.2 25.3V13.2Z" opacity="0.92" />
+    <rect x="19.1" y="12.2" width="1.8" height="15.3" rx="0.9" opacity="0.98" />
   </g>
-  
-  <!-- AI 神经网络节点 -->
-  <g opacity="0.85">
-    <!-- 节点 -->
-    <circle cx="13" cy="28" r="1.5" fill="white"/>
-    <circle cx="20" cy="30" r="1.5" fill="white"/>
-    <circle cx="27" cy="28" r="1.5" fill="white"/>
-    <circle cx="16.5" cy="32" r="1.2" fill="white" opacity="0.7"/>
-    <circle cx="23.5" cy="32" r="1.2" fill="white" opacity="0.7"/>
-    
-    <!-- 连接线 -->
-    <line x1="13" y1="28" x2="20" y2="30" stroke="white" stroke-width="0.8" opacity="0.5"/>
-    <line x1="20" y1="30" x2="27" y2="28" stroke="white" stroke-width="0.8" opacity="0.5"/>
-    <line x1="13" y1="28" x2="16.5" y2="32" stroke="white" stroke-width="0.6" opacity="0.4"/>
-    <line x1="20" y1="30" x2="16.5" y2="32" stroke="white" stroke-width="0.6" opacity="0.4"/>
-    <line x1="20" y1="30" x2="23.5" y2="32" stroke="white" stroke-width="0.6" opacity="0.4"/>
-    <line x1="27" y1="28" x2="23.5" y2="32" stroke="white" stroke-width="0.6" opacity="0.4"/>
+
+  <g stroke="#DFF2FF" stroke-width="0.9" stroke-linecap="round" opacity="0.88">
+    <line x1="20" y1="30" x2="14.2" y2="27.9" />
+    <line x1="20" y1="30" x2="25.8" y2="27.9" />
+    <line x1="14.2" y1="27.9" x2="12.4" y2="31.7" />
+    <line x1="25.8" y1="27.9" x2="27.6" y2="31.7" />
   </g>
-  
-  <!-- 闪光效果 -->
-  <circle cx="28" cy="12" r="1.5" fill="white" opacity="0.8"/>
-  <circle cx="30" cy="14" r="0.8" fill="white" opacity="0.6"/>
+
+  <g fill="#FFFFFF">
+    <circle cx="20" cy="30" r="1.65" />
+    <circle cx="14.2" cy="27.9" r="1.3" opacity="0.92" />
+    <circle cx="25.8" cy="27.9" r="1.3" opacity="0.92" />
+    <circle cx="12.4" cy="31.7" r="1.1" opacity="0.78" />
+    <circle cx="27.6" cy="31.7" r="1.1" opacity="0.78" />
+  </g>
+
+  <circle cx="28.8" cy="9.8" r="1.35" fill="#FFFFFF" fill-opacity="0.9" />
 </svg>

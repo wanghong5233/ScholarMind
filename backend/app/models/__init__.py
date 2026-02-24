@@ -6,6 +6,7 @@ from models.knowledgebase import KnowledgeBase
 from models.document import Document
 from models.job import Job
 from models.memory import Memory
+from models.admin_audit_log import AdminAuditLog
 from models.knowledge_graph import KnowledgeGraphNode, KnowledgeGraphEdge, KnowledgeGraphEvidence
 from models.base import Base
 
@@ -19,6 +20,7 @@ __all__ = [
     "Document",
     "Job",
     "Memory",
+    "AdminAuditLog",
     "KnowledgeGraphNode",
     "KnowledgeGraphEdge",
     "KnowledgeGraphEvidence",

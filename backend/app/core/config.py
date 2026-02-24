@@ -34,6 +34,17 @@ class Settings(BaseSettings):
     JWT_SECRET_KEY: Optional[str] = None
     JWT_ACCESS_TOKEN_EXPIRE_DAYS: int = 30  # 生产环境：7天，开发环境可设为30天
     JWT_ALGORITHM: str = "HS256"
+    # Admin access allowlist（逗号分隔）
+    # MVP 阶段采用配置白名单；后续 phase2 可平滑升级到 RBAC 模型。
+    SM_ADMIN_USERNAMES: str = ""
+    SM_ADMIN_USER_IDS: str = ""
+    # Admin Console 独立登录账号（与主站用户体系解耦）
+    SM_ADMIN_CONSOLE_USERNAME: str = "admin"
+    SM_ADMIN_CONSOLE_PASSWORD: str = "admin123456"
+    # Internal service token allowlist（逗号分隔）
+    SM_INTERNAL_SERVICE_ALLOWLIST: str = "doc_studio,deep_research"
+    # 是否保留旧的 /api/debug 路由（生产建议 false，仅保留 /api/admin/debug）
+    ENABLE_DEBUG_ROUTES: bool = False
     ROOT_PATH: str = ""
     # Internal service base URLs (Gateway/BFF)
     DEEP_RESEARCH_SERVICE_URL: str = "http://deep_research:8004"
@@ -46,6 +57,9 @@ class Settings(BaseSettings):
     # 兼容旧代码（等全仓清理后可移除）
     ELASTICSEARCH_URL: Optional[str] = None
     ES_DEFAULT_INDEX: str = "scholarmind_default"
+    SM_ES_CLIENT_TIMEOUT_SECS: int = 60
+    SM_ES_SEARCH_TIMEOUT_SECS: int = 20
+    SM_ES_SEARCH_RETRY_TIMES: int = 1
 
     @model_validator(mode="after")
     def build_es_url(self) -> "Settings":
@@ -70,14 +84,31 @@ class Settings(BaseSettings):
     OPENAI_BASE_URL: Optional[str] = "https://api.openai.com/v1"
 
     # 模型名称
-    DASHSCOPE_MODEL_NAME: str = "qwen-plus"
-    OPENAI_MODEL_NAME: str = "gpt-4o"
+    DASHSCOPE_MODEL_NAME: str = "qwen3-max"
+    OPENAI_MODEL_NAME: str = "gpt-5.2"
+    # 按任务拆分模型（为空时回退到 DASHSCOPE_MODEL_NAME / OPENAI_MODEL_NAME）
+    SM_LLM_MODEL_ANSWER: Optional[str] = None
+    SM_LLM_MODEL_AUX: Optional[str] = None
+    SM_LLM_MODEL_GRAPH: Optional[str] = None
+    SM_LLM_MODEL_SUMMARY: Optional[str] = None
+    SM_LLM_REQUEST_TIMEOUT_SECS: int = 60
 
     # 组件选择
-    SM_EMBEDDER_TYPE: Literal["local", "dashscope"] = "local"
-    SM_RERANKER_TYPE: Literal["local", "dashscope"] = "local"  # local=本地独立服务（HTTP调用），dashscope=云端API
+    SM_EMBEDDER_TYPE: Literal["local", "dashscope"] = "dashscope"
+    SM_RERANKER_TYPE: Literal["local", "dashscope"] = "dashscope"  # local=本地独立服务（HTTP调用），dashscope=云端API
     SM_RERANKER_ENDPOINT: Optional[str] = None  # 本地精排服务 HTTP 端点（如 http://reranker:8002），SM_RERANKER_TYPE="local" 时使用
-    SM_LLM_TYPE: Literal["local", "dashscope", "openai"] = "local"
+    SM_DASHSCOPE_RERANK_MODEL: str = "qwen3-rerank"                              # DashScope 精排模型名
+    SM_RERANKER_FAIL_MAX: int = 3                                                # 精排失败阈值（熔断）
+    SM_RERANKER_COOLDOWN_SECS: int = 120                                         # 精排熔断冷却时间（秒）
+    SM_RERANKER_FALLBACK_TO_DASHSCOPE: bool = True                               # 本地 reranker 失败时是否兜底到 DashScope
+    SM_ASK_TIMEOUT_SECS: int = 120                                               # 问答全链路超时（秒），<=0 表示不限制
+    # Ask SSE 回放（run_id + seq）配置
+    SM_ASK_REPLAY_REDIS_ENABLED: bool = True                                      # 是否启用 Redis 持久化回放
+    SM_ASK_REPLAY_TTL_SECS: int = 600                                             # 回放缓存保留时长（秒）
+    SM_ASK_REPLAY_MAX_RUNS: int = 256                                             # 内存最多保留 run 数
+    SM_ASK_REPLAY_MAX_EVENTS_PER_RUN: int = 4096                                  # 单 run 事件上限
+    SM_ASK_REPLAY_REDIS_SCAN_LIMIT: int = 3000                                    # Admin 统计扫描上限
+    SM_LLM_TYPE: Literal["local", "dashscope", "openai"] = "openai"
 
     # RAG 策略与特性开关（T2.2）
     SM_RETRIEVAL_STRATEGY: Literal["multi_stage"] = "multi_stage"  # 检索策略
@@ -86,11 +117,20 @@ class Settings(BaseSettings):
     SM_STREAMING_ENABLED: bool = True                                            # SSE 流式开关
     SM_DEFAULT_LANGUAGE: Literal["zh", "en"] = "zh"                           # 默认语言
     SM_AUTO_TRANSLATE_TO_EN: bool = True                                          # 中文查询是否自动翻译为英文以提升检索命中
+    SM_FAST_MODE_AUTO_TRANSLATE: bool = False                                    # 快速模式是否启用自动翻译
+    SM_FAST_MODE_MQ_NUM: int = 1                                                  # 快速模式 Multi-Query 数
+    SM_FAST_MODE_HYDE_ENABLED: bool = False                                       # 快速模式是否启用 HyDE
+    SM_FAST_MODE_RERANK_ENABLED: bool = False                                     # 快速模式是否启用精排
+    SM_FAST_MODE_MAX_VARIANTS: int = 1                                            # 快速模式最多保留多少 query 变体
+    SM_FAST_MODE_RECALL_SOURCES: str = "bm25,vector"                            # 快速模式参与召回的通道
+    SM_FAST_MODE_RECALL_MULTIPLIER: int = 1                                       # 快速模式候选放大倍数
+    SM_FAST_MODE_CHANNEL_TOPK: int = 12                                           # 快速模式每路召回上限
+    SM_INDEX_EXISTS_CACHE_TTL: int = 60                                           # 索引存在性缓存（秒）
     SM_DEFAULT_RAG_PROVIDER: str = "multi_stage"                                  # 默认 RAG Provider
     SM_RAG_PROVIDER_ALLOWLIST: str = "multi_stage,graph,multimodal_graph"         # 可用 Provider 列表
 
     # Knowledge Graph 设置
-    SM_GRAPH_ENABLED: bool = False
+    SM_GRAPH_ENABLED: bool = True
     SM_GRAPH_ENABLE_LLM: bool = True
     SM_GRAPH_MAX_CHUNKS_PER_DOC: int = 40
     SM_GRAPH_MIN_CHARS: int = 200
@@ -104,6 +144,7 @@ class Settings(BaseSettings):
     SM_GRAPH_CHUNK_BOOST_WEIGHT: float = 0.35
     SM_GRAPH_QUERY_EXPANSION_ENABLED: bool = True
     SM_GRAPH_QUERY_MAX_VARIANTS: int = 6
+    SM_GRAPH_ENTITY_VARIANT_FALLBACK: bool = True
 
     # Multimodal boost (only effective for multimodal providers)
     SM_MULTIMODAL_TABLE_BOOST: float = 0.25
@@ -122,6 +163,7 @@ class Settings(BaseSettings):
     SM_HYDE_MAX_TOKENS: int = 256                                                # HyDE 生成内容长度上限
     SM_HYDE_TEMPERATURE: float = 0.2                                             # HyDE 采样温度
     SM_HYDE_WORD_LIMIT: int = 90                                                 # HyDE 最多输出多少词
+    SM_HYDE_FALLBACK_ENABLED: bool = True                                        # HyDE 失败时是否启用模板兜底
     # SM_RECALL_SOURCES: str = "bm25,vector,colbert" # 参与召回的通道集合 临时关闭 colbert
     SM_RECALL_SOURCES: str = "bm25,vector"                                      # 参与召回的通道集合（临时关闭 colbert）
     SM_BM25_FIELDS: str = "text^1.0,title^4.0,abstract^2.5,keywords^3.0,figure_caption^2.0"
@@ -188,21 +230,32 @@ class Settings(BaseSettings):
     SM_RAG_TOPK_MAX: int = 8                                           # RAG 最多 chunk 数
     SM_RAG_TOPK: int = 6                                               # 默认 chunk 数
     SM_RETRIEVE_PAGE_SIZE: int = 5
-    SM_MAX_TOKENS: int = 4096  # LLM 生成的最大 token 数，支持长回答
+    # Embedding 配置（远程 embedding 可无缝切换）
+    SM_EMBEDDING_MODEL: str = "text-embedding-v3"
+    SM_EMBEDDING_DIMENSIONS: int = 1024
+    SM_EMBEDDING_ENCODING_FORMAT: str = "float"
+    SM_EMBEDDING_MAX_BATCH_SIZE: int = 10
+    SM_MAX_TOKENS: int = 3072  # LLM 生成上限（平衡长回答质量与延迟/成本）
     SM_TEMPERATURE: float = 0.3
     
     # 公式块上下文扩展（检索时自动附带前后文本块）
     SM_EQUATION_CONTEXT_EXPANSION: bool = True  # 是否启用公式块上下文扩展
     SM_EQUATION_EXPANSION_PREV: int = 1         # 向前扩展的块数
     SM_EQUATION_EXPANSION_NEXT: int = 1         # 向后扩展的块数
+    SM_EQUATION_STANDALONE: bool = True         # 公式是否独立成块（用于检索/上下文扩展）
     # history context controls
     SM_HISTORY_MAX_TURNS: int = 8  # 兼容旧逻辑（优先使用 token 预算）
-    SM_HISTORY_MAX_TOKENS: int = 100000  # 历史对话最大 token 数，支持长对话
-    SM_HISTORY_HEADROOM: int = 30000  # 预留给检索上下文/系统提示/答案空间（约 120k 字符）
+    SM_HISTORY_MAX_TOKENS: int = 24000  # 历史对话预算（避免超大上下文导致高延迟）
+    SM_HISTORY_HEADROOM: int = 12000  # 预留检索上下文/系统提示/答案空间
     HISTORY_RECENT_TURNS: int = 4
     ENABLE_ROLLING_SUMMARY: bool = True
-    SM_CONTEXT_PACK_MAX_TOKENS: int = 2048  # 内部上下文包最大 token 数
+    SM_CONTEXT_PACK_MAX_TOKENS: int = 4096  # 内部上下文包最大 token 数
     SM_CONTEXT_PACK_MAX_CHARS: int = 6000  # 内部上下文包最大字符数
+    # DeepResearch result context injection policy (result-only, no process trace)
+    SM_DEEP_RESEARCH_CONTEXT_ENABLED: bool = True
+    SM_DEEP_RESEARCH_CONTEXT_MAX_RUNS: int = 2
+    SM_DEEP_RESEARCH_CONTEXT_MAX_CHARS: int = 1200
+    SM_DEEP_RESEARCH_CONTEXT_TIMEOUT_SECS: int = 4
 
     # 短期记忆（STM）配置
     SM_STM_SCAN_MESSAGES: int = 40
@@ -218,6 +271,8 @@ class Settings(BaseSettings):
     SM_LTM_SCORE_DECAY_LAMBDA: float = 0.01
     SM_LTM_SEMANTIC_WEIGHT: float = 0.75
     SM_LTM_TIME_WEIGHT: float = 0.25
+    SM_STM_EMBED_MISSING_ON_READ: bool = False                                   # STM 读取时是否为历史消息补 embedding（默认关闭，避免同步阻塞）
+    SM_LTM_EMBED_MISSING_ON_READ: bool = False                                   # LTM 读取时是否为记忆补 embedding（默认关闭，避免同步阻塞）
 
     # 记忆引导检索增强
     SM_MEMORY_DOC_BOOST: float = 0.3

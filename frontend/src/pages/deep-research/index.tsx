@@ -831,7 +831,7 @@ export default function DeepResearchPage() {
 
   useRequest(
     async () => {
-      const { data } = await api.session.list({}, { errorToast: false })
+      const { data } = await api.session.list({ surface: 'deep_chat' }, { errorToast: false })
       return data?.sessions ?? []
     },
     {

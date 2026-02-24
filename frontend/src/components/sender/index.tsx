@@ -1,8 +1,24 @@
-import { CloseOutlined, FileOutlined, SendOutlined, StopOutlined } from '@ant-design/icons'
-import { Button, Input, Select, Space, Switch, Tooltip } from 'antd'
+import {
+  ArrowUpOutlined,
+  BarChartOutlined,
+  CloseOutlined,
+  DatabaseOutlined,
+  ExperimentOutlined,
+  FileOutlined,
+  PictureOutlined,
+} from '@ant-design/icons'
+import { Button, Input, Select, Space, Tooltip } from 'antd'
 import type { TextAreaRef } from 'antd/es/input/TextArea'
 import classNames from 'classnames'
-import { PropsWithChildren, useEffect, useRef, useState } from 'react'
+import {
+  ChangeEvent,
+  ClipboardEvent,
+  PropsWithChildren,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from 'react'
 import './index.scss'
 import Recorder from './recorder'
 import Uploader from './uploader'
@@ -15,18 +31,15 @@ export default function ComSender(
     onAbort?: () => void
     onContract?: () => void
     sessionId?: string
-    enableSessionKnowledgeBase?: boolean
     knowledgeControl?: {
-      usingSession: boolean
       usingUser: boolean
       selectValue?: number
       options: { value: number; label: string; disabled?: boolean }[]
       showSelect: boolean
-      loadingSession?: boolean
+      selectWidth?: string | number
       loadingUser?: boolean
       disableUserToggle?: boolean
       disableSelect?: boolean
-      onToggleSession: (checked: boolean) => void
       onToggleUser: (checked: boolean) => void
       onSelectUserKb: (value: number) => void
     }
@@ -34,17 +47,39 @@ export default function ComSender(
       value: 'fast' | 'deep'
       loading?: boolean
       disabled?: boolean
+      width?: string | number
       onChange: (value: 'fast' | 'deep') => void
     }
     researchModeControl?: {
-      value: 'chat' | 'deep'
+      enabled: boolean
       disabled?: boolean
-      onChange: (value: 'chat' | 'deep') => void
+      onToggle: (enabled: boolean) => void
+      preset?: 'quick' | 'medium' | 'deep'
+      presetDisabled?: boolean
+      presetWidth?: string | number
+      onPresetChange?: (value: 'quick' | 'medium' | 'deep') => void
+    }
+    modelControl?: {
+      value: string
+      options: { value: string; label: string; disabled?: boolean }[]
+      loading?: boolean
+      disabled?: boolean
+      width?: string | number
+      onChange: (value: string) => void
+    }
+    systemStatusControl?: {
+      title?: string
+      onClick: () => void
+      disabled?: boolean
     }
     onAttachmentsChange?: (files: API.ChatAttachment[]) => void
     pendingAttachments?: API.ChatAttachment[]
     onRemovePendingAttachment?: (id: number) => void
     onFileSelected?: (file: File) => void
+    imageAttachments?: API.ChatImageAttachment[]
+    onImageFilesSelected?: (files: File[]) => void | Promise<void>
+    onRemoveImageAttachment?: (id: string) => void
+    disableImageUpload?: boolean
     value?: string
     onValueChange?: (value: string) => void
     focusKey?: number
@@ -57,14 +92,19 @@ export default function ComSender(
     onContract,
     loading,
     sessionId,
-    enableSessionKnowledgeBase = true,
     knowledgeControl,
     ragModeControl,
     researchModeControl,
+    modelControl,
+    systemStatusControl,
     onAttachmentsChange,
     pendingAttachments = [],
     onRemovePendingAttachment,
     onFileSelected,
+    imageAttachments = [],
+    onImageFilesSelected,
+    onRemoveImageAttachment,
+    disableImageUpload,
     value: controlledValue,
     onValueChange,
     focusKey,
@@ -72,8 +112,13 @@ export default function ComSender(
   } = props
   const [innerValue, setInnerValue] = useState('')
   const textareaRef = useRef<TextAreaRef>(null)
+  const imageInputRef = useRef<HTMLInputElement>(null)
   const isControlled = typeof controlledValue === 'string'
   const value = isControlled ? controlledValue! : innerValue
+  // 保留向后兼容的 props，避免升级期间调用方报错
+  void onContract
+  void onAttachmentsChange
+  void sessionId
 
   useEffect(() => {
     if (typeof focusKey === 'number' && textareaRef.current) {
@@ -86,12 +131,40 @@ export default function ComSender(
     if (!isControlled) setInnerValue(next)
   }
 
-  async function send() {
+  const send = useCallback(async () => {
     if (loading) return
-    if (!value) return
+    if (!value?.trim() && imageAttachments.length === 0) return
     await onSend?.(value)
     updateValue('')
-  }
+  }, [imageAttachments.length, loading, onSend, value])
+
+  const handleInputPaste = useCallback(
+    async (event: ClipboardEvent<HTMLTextAreaElement>) => {
+      if (!onImageFilesSelected) return
+      const items = Array.from(event.clipboardData?.items || [])
+      const imageFiles: File[] = []
+      for (const item of items) {
+        if (item.type.startsWith('image/')) {
+          const file = item.getAsFile()
+          if (file) imageFiles.push(file)
+        }
+      }
+      if (!imageFiles.length) return
+      event.preventDefault()
+      await onImageFilesSelected(imageFiles)
+    },
+    [onImageFilesSelected],
+  )
+
+  const handleImageInputChange = useCallback(
+    async (event: ChangeEvent<HTMLInputElement>) => {
+      const files = Array.from(event.target.files || [])
+      event.target.value = ''
+      if (!files.length || !onImageFilesSelected) return
+      await onImageFilesSelected(files)
+    },
+    [onImageFilesSelected],
+  )
 
   function handleSendClick() {
     if (loading && onAbort) {
@@ -121,10 +194,32 @@ export default function ComSender(
           ))}
         </div>
       )}
+      {imageAttachments.length > 0 && (
+        <div className="com-sender__image-attachments">
+          {imageAttachments.map((item) => (
+            <span key={item.id} className="com-sender__image-chip">
+              <img
+                src={item.dataUrl}
+                alt={item.name}
+                className="com-sender__image-chip-thumb"
+              />
+              <button
+                type="button"
+                className="com-sender__image-chip-remove"
+                onClick={() => onRemoveImageAttachment?.(item.id)}
+                title="移除图片"
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
       <Input.TextArea
         ref={textareaRef}
         value={value}
         onChange={(e) => updateValue(e.target.value)}
+        onPaste={handleInputPaste}
         placeholder="输入你的问题…"
         autoSize={{ minRows: 2 }}
         autoFocus
@@ -132,106 +227,174 @@ export default function ComSender(
 
       <div className="com-sender__actions">
         <Space className="com-sender__actions-left" size={12}>
-          <Recorder
-            onMessage={(text) => {
-              updateValue(text)
-            }}
-          />
-          {knowledgeControl ? (
+          {modelControl ? (
+            <Tooltip title="模型切换">
+              <Select
+                size="small"
+                className="com-sender__model-select"
+                value={modelControl.value}
+                options={modelControl.options}
+                loading={modelControl.loading}
+                disabled={modelControl.disabled}
+                style={modelControl.width ? { width: modelControl.width } : undefined}
+                onChange={(value) => modelControl.onChange(String(value))}
+                optionFilterProp="label"
+                popupMatchSelectWidth={false}
+                showSearch
+              />
+            </Tooltip>
+          ) : null}
+        </Space>
+
+        <Space className="com-sender__actions-right" size={4}>
+          {researchModeControl ? (
             <>
-              <Space size={6} align="center">
-                <Switch
-                  size="small"
-                  checked={knowledgeControl.usingSession}
-                  loading={knowledgeControl.loadingSession}
-                  onChange={knowledgeControl.onToggleSession}
-                />
-                <Tooltip title="仅使用本次对话上传的临时资料进行检索">
-                  <span className="com-sender__kb-label">临时知识库</span>
-                </Tooltip>
-              </Space>
-              <Space size={6} align="center">
-                <Switch
-                  size="small"
-                  checked={knowledgeControl.usingUser}
-                  loading={knowledgeControl.loadingUser}
-                  disabled={knowledgeControl.disableUserToggle}
-                  onChange={knowledgeControl.onToggleUser}
-                />
-                <Tooltip title="启用后会同时检索所选知识库中的文档">
-                  <span className="com-sender__kb-label">关联知识库</span>
-                </Tooltip>
-                {knowledgeControl.showSelect ? (
+              {researchModeControl.enabled && researchModeControl.onPresetChange ? (
+                <Tooltip title="深度研究档位">
                   <Select
                     size="small"
-                    className="com-sender__kb-select"
-                    value={knowledgeControl.selectValue}
-                    options={knowledgeControl.options}
-                    placeholder="选择知识库"
-                    disabled={knowledgeControl.disableSelect}
-                    onChange={(value) =>
-                      knowledgeControl.onSelectUserKb(Number(value))
+                    className="com-sender__research-preset-select"
+                    value={researchModeControl.preset || 'medium'}
+                    disabled={researchModeControl.presetDisabled}
+                    style={
+                      researchModeControl.presetWidth
+                        ? { width: researchModeControl.presetWidth }
+                        : undefined
                     }
-                    showSearch
-                    optionFilterProp="label"
+                    options={[
+                      { label: '快速', value: 'quick' },
+                      { label: '标准', value: 'medium' },
+                      { label: '深度', value: 'deep' },
+                    ]}
+                    onChange={(value) =>
+                      researchModeControl.onPresetChange?.(
+                        value as 'quick' | 'medium' | 'deep',
+                      )
+                    }
+                    popupMatchSelectWidth={false}
                   />
-                ) : null}
-              </Space>
+                </Tooltip>
+              ) : null}
+              <Tooltip
+                title={researchModeControl.enabled ? '关闭深度研究工具' : '开启深度研究工具'}
+              >
+                <Button
+                  type="text"
+                  className={classNames('com-sender__toolbar-icon-btn', {
+                    'com-sender__toolbar-icon-btn--active': researchModeControl.enabled,
+                  })}
+                  icon={<ExperimentOutlined />}
+                  disabled={researchModeControl.disabled}
+                  onClick={() =>
+                    researchModeControl.onToggle(!researchModeControl.enabled)
+                  }
+                />
+              </Tooltip>
             </>
           ) : null}
+          {knowledgeControl ? (
+            <Tooltip title={knowledgeControl.usingUser ? '关闭 RAG 检索' : '开启 RAG 检索'}>
+              <Button
+                type="text"
+                className={classNames('com-sender__toolbar-icon-btn', {
+                  'com-sender__toolbar-icon-btn--active': knowledgeControl.usingUser,
+                })}
+                icon={<DatabaseOutlined />}
+                loading={knowledgeControl.loadingUser}
+                disabled={knowledgeControl.disableUserToggle}
+                onClick={() => knowledgeControl.onToggleUser(!knowledgeControl.usingUser)}
+              />
+            </Tooltip>
+          ) : null}
           {ragModeControl ? (
-            <Space size={6} align="center">
-              <Tooltip title="快速模式更省时，深度模式启用图谱与多模态增强">
-                <span className="com-sender__kb-label">检索模式</span>
-              </Tooltip>
+            <Tooltip title="RAG 检索模式">
               <Select
                 size="small"
                 className="com-sender__rag-select"
                 value={ragModeControl.value}
                 disabled={ragModeControl.disabled}
                 loading={ragModeControl.loading}
+                style={ragModeControl.width ? { width: ragModeControl.width } : undefined}
                 options={[
                   { label: '快速', value: 'fast' },
                   { label: '深度', value: 'deep' },
                 ]}
                 onChange={(value) => ragModeControl.onChange(value as 'fast' | 'deep')}
+                popupMatchSelectWidth={false}
               />
-            </Space>
+            </Tooltip>
           ) : null}
-          {researchModeControl ? (
-            <Space size={6} align="center">
-              <Tooltip title="深度研究会执行规划、检索与报告生成">
-                <span className="com-sender__kb-label">研究模式</span>
-              </Tooltip>
+          {knowledgeControl?.showSelect ? (
+            <Tooltip title="选择知识库">
               <Select
                 size="small"
-                className="com-sender__research-select"
-                value={researchModeControl.value}
-                disabled={researchModeControl.disabled}
-                options={[
-                  { label: '对话', value: 'chat' },
-                  { label: '深度研究', value: 'deep' },
-                ]}
-                onChange={(value) =>
-                  researchModeControl.onChange(value as 'chat' | 'deep')
+                className="com-sender__kb-select com-sender__kb-select--inline"
+                value={knowledgeControl.selectValue}
+                options={knowledgeControl.options}
+                placeholder="知识库"
+                disabled={knowledgeControl.disableSelect}
+                style={
+                  knowledgeControl.selectWidth
+                    ? { width: knowledgeControl.selectWidth }
+                    : undefined
                 }
+                onChange={(value) =>
+                  knowledgeControl.onSelectUserKb(Number(value))
+                }
+                popupMatchSelectWidth={false}
+                showSearch
+                optionFilterProp="label"
               />
-            </Space>
+            </Tooltip>
           ) : null}
-        </Space>
-
-        <Space className="com-sender__actions-right" size={12}>
-          {sessionId ? (
+          <Button
+            className="com-sender__action--document"
+            type="default"
+            shape="circle"
+            icon={<PictureOutlined />}
+            onClick={() => imageInputRef.current?.click()}
+            disabled={disableImageUpload}
+            title="添加图片"
+          />
+          <input
+            ref={imageInputRef}
+            type="file"
+            accept="image/*"
+            multiple
+            style={{ display: 'none' }}
+            onChange={handleImageInputChange}
+          />
+          {onFileSelected ? (
             <Uploader onFileSelected={(file) => onFileSelected?.(file)} />
           ) : null}
+          {systemStatusControl ? (
+            <Tooltip title={systemStatusControl.title || '系统状态'}>
+              <Button
+                type="text"
+                className="com-sender__toolbar-icon-btn"
+                icon={<BarChartOutlined />}
+                onClick={systemStatusControl.onClick}
+                disabled={systemStatusControl.disabled}
+              />
+            </Tooltip>
+          ) : null}
+          <Tooltip title="语音输入">
+            <Recorder
+              buttonClassName="com-sender__action--voice"
+              activeButtonClassName="com-sender__action--voice--recording"
+              onMessage={(text) => {
+                updateValue(text)
+              }}
+            />
+          </Tooltip>
           <Button
             className="com-sender__action--send"
             type="primary"
             shape="circle"
             onClick={handleSendClick}
-            disabled={!loading && !value?.trim()}
+            disabled={!loading && !value?.trim() && imageAttachments.length === 0}
           >
-            {loading ? <StopOutlined /> : <SendOutlined />}
+            {loading ? <span className="com-sender__send-stop-icon" /> : <ArrowUpOutlined />}
           </Button>
         </Space>
       </div>

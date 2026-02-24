@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import asdict
 from typing import Any, List, Optional
 
@@ -123,8 +122,11 @@ class RetrievalPreviewService:
         rerank_enabled = False
         rerank_candidates_preview = []
         rerank_scores_list: list[float] = []
+        fast_mode = self._is_fast_mode(provider_name)
+        allow_fast_rerank = bool(getattr(settings, "SM_FAST_MODE_RERANK_ENABLED", False))
+        enable_rerank = (not fast_mode) or allow_fast_rerank
         try:
-            reranker = get_reranker()
+            reranker = get_reranker() if enable_rerank else None
             if reranker and chunks:
                 rerank_candidates = chunks
                 chunk_models = [
@@ -141,7 +143,7 @@ class RetrievalPreviewService:
                     payload.query[:60],
                     len(chunk_models),
                 )
-                reranked_models = asyncio.run(reranker.rerank(payload.query, chunk_models))
+                reranked_models = reranker.rerank_sync(payload.query, chunk_models)
                 chunk_map = {item.get("chunk_id"): item for item in chunks}
                 ordered = [chunk_map.get(model.chunk_id) for model in reranked_models if model.chunk_id in chunk_map]
                 remaining = [
@@ -172,9 +174,10 @@ class RetrievalPreviewService:
                 )
             else:
                 logger.info(
-                    "[RETRIEVAL_PREVIEW_RERANK_SKIP] reranker=%s chunks=%s",
+                    "[RETRIEVAL_PREVIEW_RERANK_SKIP] reranker=%s chunks=%s enable_rerank=%s",
                     reranker is not None,
                     len(chunks) if chunks else 0,
+                    enable_rerank,
                 )
         except Exception as rerank_exc:
             logger.warning(
@@ -234,6 +237,11 @@ class RetrievalPreviewService:
             prompt_total_chars=prompt_total_chars,
             prompt_context_chars=context_chars,
         )
+
+    @staticmethod
+    def _is_fast_mode(provider: Optional[str]) -> bool:
+        provider_norm = (provider or "").strip().lower()
+        return provider_norm not in {"graph", "multimodal_graph"}
 
     def _resolve_session_index(self, *, session_id: str) -> str:
         session_service = SessionService(self.db)

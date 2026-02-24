@@ -13,6 +13,7 @@ from elasticsearch import NotFoundError
 
 from core.config import settings
 from service.core.rag.retrieval.vector_store import ESVectoreStore, RetrieveQuery, RetrievedChunk
+from service.core.rag.nlp.model import generate_embedding
 from service.core.rag.llm.client import LLMClient
 
 
@@ -26,7 +27,7 @@ class RAGService:
     """Retrieval-only RAG engine for chunk search."""
     def __init__(self) -> None:
         self.store = ESVectoreStore(default_index=settings.ES_DEFAULT_INDEX)
-        self.llm = LLMClient()
+        self.llm_aux = LLMClient(task="aux")
         self.logger = logging.getLogger("rag.service")
         self._last_retrieval_debug: Dict[str, Any] | None = None
         self._last_variant_meta: Dict[str, Any] | None = None
@@ -93,7 +94,19 @@ class RAGService:
         provider: Optional[str] = None,
         extra_variants: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
-        # 统一使用多阶段检索流程
+        query_policy = self._resolve_query_policy(provider)
+        if query_policy.get("mode") == "fast":
+            return self._retrieve_fast_path(
+                query=query,
+                kb_id=kb_id,
+                top_k=top_k,
+                focus_doc_ids=focus_doc_ids,
+                boost_doc_ids=boost_doc_ids,
+                session_index=session_index or index_override,
+                index_mode=index_mode,
+                provider=provider,
+                extra_variants=extra_variants,
+            )
         return self._retrieve_multi_stage(
             query=query,
             kb_id=kb_id,
@@ -106,6 +119,307 @@ class RAGService:
             provider=provider,
             extra_variants=extra_variants,
         )
+
+    def _retrieve_fast_path(
+        self,
+        *,
+        query: str,
+        kb_id: int,
+        top_k: int,
+        focus_doc_ids: Optional[List[int]],
+        boost_doc_ids: Optional[List[int]],
+        session_index: Optional[str],
+        index_mode: str,
+        provider: Optional[str],
+        extra_variants: Optional[List[Dict[str, Any]]],
+    ) -> List[Dict[str, Any]]:
+        query_policy = self._resolve_query_policy(provider)
+        variants = self._generate_query_variants(
+            query,
+            extra_variants=extra_variants,
+            enable_translation=query_policy["enable_translation"],
+            mq_num_override=query_policy["mq_num"],
+            enable_hyde=query_policy["enable_hyde"],
+            mode=query_policy["mode"],
+        )
+        if not variants:
+            self._last_retrieval_debug = {
+                "strategy": "fast_path",
+                "execution_chain": "fast",
+                "variants": [],
+                "final_chunks": [],
+            }
+            return []
+
+        variant_cap = max(int(getattr(settings, "SM_FAST_MODE_MAX_VARIANTS", 1) or 1), 1)
+        natural_variants = [item for item in variants if not bool(item.get("synthetic"))]
+        synthetic_variants = [item for item in variants if bool(item.get("synthetic"))]
+        selected_variants = (natural_variants + synthetic_variants)[:variant_cap]
+        if self._last_variant_meta is not None:
+            self._last_variant_meta["variant_cap"] = variant_cap
+            self._last_variant_meta["selected_variants"] = len(selected_variants)
+
+        fast_channels_raw = (
+            getattr(settings, "SM_FAST_MODE_RECALL_SOURCES", None)
+            or getattr(settings, "SM_RECALL_SOURCES", "bm25,vector")
+            or "bm25,vector"
+        )
+        fast_channels = [seg.strip() for seg in str(fast_channels_raw).split(",") if seg.strip()]
+        if not fast_channels:
+            fast_channels = ["bm25"]
+        vector_enabled = "vector" in {channel.lower() for channel in fast_channels}
+
+        variant_embeddings: Dict[str, List[float]] = {}
+        if vector_enabled:
+            try:
+                texts = [item["text"] for item in selected_variants]
+                vecs = generate_embedding(texts)
+                if isinstance(vecs, list):
+                    for idx, vec in enumerate(vecs):
+                        if isinstance(vec, list) and vec:
+                            variant_embeddings[texts[idx]] = vec
+                if self._last_variant_meta is not None:
+                    self._last_variant_meta["embedding_batch"] = len(variant_embeddings)
+            except Exception as exc:
+                try:
+                    self.logger.debug("RAG.retrieve[fast] batch embedding failed: %s", exc)
+                except Exception:
+                    pass
+
+        mode_alias = {
+            "session": "session_only",
+            "session_only": "session_only",
+            "session-only": "session_only",
+            "global": "global_only",
+            "global_only": "global_only",
+            "global-only": "global_only",
+            "both": "hybrid",
+            "hybrid": "hybrid",
+        }
+        normalized_mode = mode_alias.get((index_mode or "auto").strip().lower(), "auto")
+        default_index_name = self.store.default_index or settings.ES_DEFAULT_INDEX
+
+        session_index_exists: Optional[bool] = None
+        if session_index and normalized_mode in {"auto", "session_only", "hybrid"}:
+            session_index_exists = self.store.index_exists(session_index)
+            if not session_index_exists:
+                session_index = None
+
+        index_plan: List[Dict[str, Optional[str]]] = []
+        if normalized_mode == "session_only":
+            if session_index:
+                index_plan.append({"label": "session", "index": session_index, "fallback": None})
+        elif normalized_mode == "global_only":
+            index_plan.append({"label": "global", "index": None, "fallback": None})
+        elif normalized_mode == "hybrid":
+            if session_index:
+                index_plan.append({"label": "session", "index": session_index, "fallback": None})
+            index_plan.append({"label": "global", "index": None, "fallback": None})
+        else:
+            if session_index:
+                index_plan.append({"label": "session", "index": session_index, "fallback": default_index_name})
+            else:
+                index_plan.append({"label": "global", "index": None, "fallback": None})
+        if not index_plan:
+            index_plan.append({"label": "global", "index": None, "fallback": None})
+
+        candidate_multiplier = max(int(getattr(settings, "SM_FAST_MODE_RECALL_MULTIPLIER", 1) or 1), 1)
+        channel_topk_cap = max(
+            int(getattr(settings, "SM_FAST_MODE_CHANNEL_TOPK", max(top_k, 8)) or max(top_k, 8)),
+            top_k,
+        )
+        sample_limit = max(int(getattr(settings, "SM_DEBUG_PATH_SAMPLE_LIMIT", 5) or 5), 1)
+
+        path_hits: Dict[str, List[RetrievedChunk]] = {}
+        flat_hits: List[RetrievedChunk] = []
+        total_candidates = 0
+        index_stats: Dict[str, int] = defaultdict(int)
+        indices_used: set[str] = set()
+
+        for plan in index_plan:
+            plan_label = plan.get("label", "global") or "global"
+            plan_index = plan.get("index")
+            fallback_index = plan.get("fallback")
+            for variant in selected_variants:
+                rq = RetrieveQuery(
+                    text=variant["text"],
+                    kb_id=kb_id,
+                    top_k=top_k,
+                    focus_doc_ids=focus_doc_ids,
+                    index_override=plan_index,
+                    use_vector=True,
+                    channels=fast_channels,
+                    query_tag=variant["tag"],
+                    synthetic=bool(variant.get("synthetic")),
+                    embedding_override=variant_embeddings.get(variant["text"]),
+                    boost_doc_ids=boost_doc_ids,
+                    fallback_index=fallback_index,
+                    channel_topk_cap=channel_topk_cap,
+                )
+                try:
+                    hits = self.store.search_multi_path(
+                        query=rq,
+                        channels=fast_channels,
+                        candidate_multiplier=candidate_multiplier,
+                    )
+                except NotFoundError:
+                    continue
+                total_candidates += len(hits)
+                index_stats[plan_label] += len(hits)
+                for hit in hits:
+                    hit.metadata.setdefault("index_label", plan_label)
+                    idx_name = hit.metadata.get("index_name")
+                    if idx_name:
+                        indices_used.add(str(idx_name))
+                    path_id = f"{plan_label}:{variant['tag']}::{hit.source}"
+                    path_hits.setdefault(path_id, []).append(hit)
+                flat_hits.extend(hits)
+
+        if not flat_hits:
+            meta = dict(self._last_variant_meta or {})
+            meta["channels"] = fast_channels
+            if session_index_exists is not None:
+                meta["session_index_exists"] = session_index_exists
+            self._last_retrieval_debug = {
+                "strategy": "fast_path",
+                "execution_chain": "fast",
+                "variants": selected_variants,
+                "path_stats": {},
+                "path_samples": [],
+                "rrf_candidates": [],
+                "rrf_candidates_count": 0,
+                "mmr_chunks": [],
+                "mmr_output_count": 0,
+                "context_chunks": [],
+                "final_chunks": [],
+                "top_k": top_k,
+                "rerank_top_k": top_k,
+                "index_mode": normalized_mode,
+                "index_plan": index_plan,
+                "indices_used": sorted(indices_used),
+                "index_stats": dict(index_stats),
+                "memory": {"boost_doc_ids": boost_doc_ids or [], "top_doc_id": None, "top_hit": False},
+                "graph_boosted_count": 0,
+                "graph_boosted_preview": [],
+                "multimodal_boosted_count": 0,
+                "multimodal_boosted_preview": [],
+                "query_meta": meta,
+            }
+            return []
+
+        best_hits: Dict[str, RetrievedChunk] = {}
+        for hit in flat_hits:
+            key = str(hit.chunk_id or "")
+            if not key:
+                continue
+            prev = best_hits.get(key)
+            if prev is None or float(hit.score or 0.0) > float(prev.score or 0.0):
+                best_hits[key] = hit
+        ordered_hits = sorted(
+            best_hits.values(),
+            key=lambda item: float(item.score or 0.0),
+            reverse=True,
+        )
+
+        fast_rerank_enabled = bool(getattr(settings, "SM_FAST_MODE_RERANK_ENABLED", False))
+        rerank_top_k = (
+            max(top_k, int(getattr(settings, "SM_L2_RERANK_TOPK", 20) or 20))
+            if fast_rerank_enabled
+            else top_k
+        )
+        selected_hits = ordered_hits[:rerank_top_k]
+        final_payloads: List[Dict[str, Any]] = []
+        for hit in selected_hits:
+            metadata = hit.metadata if isinstance(hit.metadata, dict) else {}
+            hit.metadata = metadata
+            score = float(hit.score or 0.0)
+            metadata["fused_score"] = score
+            metadata["retrieval_score"] = score
+            metadata["retrieval_source"] = metadata.get("retrieval_source") or hit.source
+            metadata["fast_mode"] = True
+            final_payloads.append(self._chunk_to_payload(chunk=hit, score=score))
+
+        path_samples: List[Dict[str, Any]] = []
+        for path_id, hits in path_hits.items():
+            prefix, source = path_id.split("::", 1) if "::" in path_id else (path_id, "")
+            if ":" in prefix:
+                label, query_tag = prefix.split(":", 1)
+            else:
+                label, query_tag = prefix, "original"
+            path_samples.append(
+                {
+                    "path_id": path_id,
+                    "label": label,
+                    "query_tag": query_tag,
+                    "source": source or None,
+                    "hit_count": len(hits),
+                    "hits": [self._serialize_chunk_preview(hit) for hit in hits[:sample_limit]],
+                }
+            )
+
+        final_preview = [self._serialize_payload_preview(payload) for payload in final_payloads]
+        top_doc_id = None
+        if final_payloads:
+            md0 = final_payloads[0].get("metadata") or {}
+            top_doc_id = md0.get("document_id")
+        memory_debug = {
+            "boost_doc_ids": boost_doc_ids or [],
+            "top_doc_id": top_doc_id,
+            "top_hit": bool(
+                top_doc_id is not None and boost_doc_ids and str(top_doc_id) in {str(doc) for doc in boost_doc_ids}
+            ),
+        }
+        preview = [
+            {
+                "chunk_id": item["chunk_id"],
+                "score": round(float(item["score"]), 4),
+                "source": item["metadata"].get("retrieval_source"),
+            }
+            for item in final_payloads[: min(10, len(final_payloads))]
+        ]
+        meta = dict(self._last_variant_meta or {})
+        meta["channels"] = fast_channels
+        meta["candidate_multiplier"] = candidate_multiplier
+        meta["channel_topk_cap"] = channel_topk_cap
+        meta["total_candidates"] = total_candidates
+        if session_index_exists is not None:
+            meta["session_index_exists"] = session_index_exists
+
+        self._last_retrieval_debug = {
+            "strategy": "fast_path",
+            "execution_chain": "fast",
+            "variants": selected_variants,
+            "path_stats": {pth: len(hits) for pth, hits in path_hits.items()},
+            "path_samples": path_samples,
+            "rrf_candidates": preview,
+            "rrf_details": [self._serialize_chunk_preview(hit) for hit in ordered_hits[:sample_limit]],
+            "rrf_candidates_count": len(ordered_hits),
+            "mmr_chunks": [],
+            "mmr_output_count": len(selected_hits),
+            "context_chunks": [],
+            "final_chunks": final_preview,
+            "top_k": top_k,
+            "rerank_top_k": rerank_top_k,
+            "index_mode": normalized_mode,
+            "index_plan": index_plan,
+            "indices_used": sorted(indices_used),
+            "index_stats": dict(index_stats),
+            "memory": memory_debug,
+            "graph_boosted_count": 0,
+            "graph_boosted_preview": [],
+            "multimodal_boosted_count": 0,
+            "multimodal_boosted_preview": [],
+            "query_meta": meta,
+        }
+        try:
+            self.logger.info(
+                f"RAG.retrieve[fast_path] kb={kb_id} variants={len(selected_variants)} "
+                f"channels={fast_channels} candidates={len(ordered_hits)} final={len(final_payloads)} "
+                f"index_mode={normalized_mode} hyde_fallback={meta.get('hyde_fallback_used')}"
+            )
+        except Exception:
+            pass
+        return final_payloads
 
     def _retrieve_multi_stage(
         self,
@@ -121,13 +435,40 @@ class RAGService:
         provider: Optional[str],
         extra_variants: Optional[List[Dict[str, Any]]],
     ) -> List[Dict[str, Any]]:
-        variants = self._generate_query_variants(query, extra_variants=extra_variants)
+        query_policy = self._resolve_query_policy(provider)
+        variants = self._generate_query_variants(
+            query,
+            extra_variants=extra_variants,
+            enable_translation=query_policy["enable_translation"],
+            mq_num_override=query_policy["mq_num"],
+            enable_hyde=query_policy["enable_hyde"],
+            mode=query_policy["mode"],
+        )
         if not variants:
             try:
                 self.logger.warning("RAG.retrieve[multi_stage] no query variants generated")
             except Exception:
                 pass
             return []
+
+        variant_embeddings: Dict[str, List[float]] = {}
+        raw_channels = getattr(settings, "SM_RECALL_SOURCES", "bm25,vector") or "bm25,vector"
+        vector_enabled = "vector" in [c.strip() for c in raw_channels.split(",") if c.strip()]
+        if vector_enabled:
+            try:
+                texts = [item["text"] for item in variants]
+                vecs = generate_embedding(texts)
+                if isinstance(vecs, list):
+                    for idx, vec in enumerate(vecs):
+                        if isinstance(vec, list) and vec:
+                            variant_embeddings[texts[idx]] = vec
+                if self._last_variant_meta is not None:
+                    self._last_variant_meta["embedding_batch"] = len(variant_embeddings)
+            except Exception as exc:
+                try:
+                    self.logger.debug("RAG.retrieve[multi_stage] batch embedding failed: %s", exc)
+                except Exception:
+                    pass
 
         try:
             variant_snapshot = [(item["tag"], len(item["text"])) for item in variants]
@@ -151,6 +492,12 @@ class RAGService:
         }
         normalized_mode = mode_alias.get((index_mode or "auto").strip().lower(), "auto")
         default_index_name = self.store.default_index or settings.ES_DEFAULT_INDEX
+
+        session_index_exists: Optional[bool] = None
+        if session_index and normalized_mode in {"auto", "session_only", "hybrid"}:
+            session_index_exists = self.store.index_exists(session_index)
+            if not session_index_exists:
+                session_index = None
 
         index_plan: List[Dict[str, Optional[str]]] = []
         if normalized_mode == "session_only":
@@ -194,6 +541,7 @@ class RAGService:
                     channels=channels,
                     query_tag=variant["tag"],
                     synthetic=variant["synthetic"],
+                    embedding_override=variant_embeddings.get(variant["text"]),
                     boost_doc_ids=boost_doc_ids,
                     fallback_index=fallback_index,
                 )
@@ -378,15 +726,10 @@ class RAGService:
 
         try:
             self.logger.info(
-                "RAG.retrieve[multi_stage] kb=%s variants=%s paths=%s candidates=%s rrf=%s mmr=%s final=%s index_mode=%s",
-                kb_id,
-                len(variants),
-                len(path_hits),
-                total_candidates,
-                len(ordered_chunks),
-                len(mmr_selected),
-                len(final_payloads),
-                normalized_mode,
+                f"RAG.retrieve[multi_stage] kb={kb_id} variants={len(variants)} paths={len(path_hits)} "
+                f"candidates={total_candidates} rrf={len(ordered_chunks)} mmr={len(mmr_selected)} "
+                f"final={len(final_payloads)} index_mode={normalized_mode} "
+                f"hyde_fallback={(self._last_variant_meta or {}).get('hyde_fallback_used')}"
             )
         except Exception:
             pass
@@ -409,9 +752,12 @@ class RAGService:
                 }
                 for item in final_payloads[: min(10, len(final_payloads))]
             ]
-            meta = self._last_variant_meta or {}
+            meta = dict(self._last_variant_meta or {})
+            if session_index_exists is not None:
+                meta["session_index_exists"] = session_index_exists
             self._last_retrieval_debug = {
-                "strategy": "multi_stage",
+                "strategy": "deep_multi_stage",
+                "execution_chain": "deep",
                 "variants": variants,
                 "path_stats": {pth: len(hits) for pth, hits in path_hits.items()},
                 "rrf_candidates": preview,
@@ -441,11 +787,32 @@ class RAGService:
         return final_payloads
 
     # --- query generation helpers -------------------------------------------------
+    def _resolve_query_policy(self, provider: Optional[str]) -> Dict[str, Any]:
+        provider_norm = (provider or "").strip().lower()
+        is_deep = provider_norm in {"graph", "multimodal_graph"}
+        if is_deep:
+            return {
+                "mode": "deep",
+                "enable_translation": bool(getattr(settings, "SM_AUTO_TRANSLATE_TO_EN", True)),
+                "mq_num": int(getattr(settings, "SM_MULTI_QUERY_NUM", 1) or 1),
+                "enable_hyde": bool(getattr(settings, "SM_HYDE_ENABLED", True)),
+            }
+        return {
+            "mode": "fast",
+            "enable_translation": bool(getattr(settings, "SM_FAST_MODE_AUTO_TRANSLATE", False)),
+            "mq_num": int(getattr(settings, "SM_FAST_MODE_MQ_NUM", 1) or 1),
+            "enable_hyde": bool(getattr(settings, "SM_FAST_MODE_HYDE_ENABLED", False)),
+        }
+
     def _generate_query_variants(
         self,
         query: str,
         *,
         extra_variants: Optional[List[Dict[str, Any]]] = None,
+        enable_translation: Optional[bool] = None,
+        mq_num_override: Optional[int] = None,
+        enable_hyde: Optional[bool] = None,
+        mode: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         original_query = (query or "").strip()
         if not original_query:
@@ -455,7 +822,12 @@ class RAGService:
         effective_query = original_query
         translation_used = False
 
-        if contains_cjk and getattr(settings, "SM_AUTO_TRANSLATE_TO_EN", True):
+        allow_translate = (
+            enable_translation
+            if enable_translation is not None
+            else getattr(settings, "SM_AUTO_TRANSLATE_TO_EN", True)
+        )
+        if contains_cjk and allow_translate:
             translated = self._translate_to_english(original_query)
             cleaned = self._clean_query_text(translated)
             if cleaned and cleaned != original_query:
@@ -476,8 +848,12 @@ class RAGService:
             {"text": effective_query, "tag": "original", "synthetic": False, "language": target_language},
         ]
 
-        mq_num = max(int(getattr(settings, "SM_MULTI_QUERY_NUM", 1) or 1), 1)
-        mq_cap = max(int(getattr(settings, "SM_MULTI_QUERY_MAX", mq_num) or mq_num), mq_num)
+        mq_num = int(mq_num_override) if mq_num_override is not None else int(getattr(settings, "SM_MULTI_QUERY_NUM", 1) or 1)
+        mq_num = max(mq_num, 1)
+        if mq_num_override is not None:
+            mq_cap = max(mq_num, 1)
+        else:
+            mq_cap = max(int(getattr(settings, "SM_MULTI_QUERY_MAX", mq_num) or mq_num), mq_num)
         mq_num = min(mq_num, mq_cap)
         if mq_num > 1:
             rewrites = self._rewrite_queries(effective_query, mq_num - 1)
@@ -491,13 +867,31 @@ class RAGService:
                     }
                 )
 
-        if getattr(settings, "SM_HYDE_ENABLED", True):
+        allow_hyde = (
+            enable_hyde
+            if enable_hyde is not None
+            else getattr(settings, "SM_HYDE_ENABLED", True)
+        )
+        hyde_key_terms = self._extract_keywords(effective_query, limit=5)
+        hyde_word_limit = max(int(getattr(settings, "SM_HYDE_WORD_LIMIT", 90) or 90), 40)
+        hyde_generated = False
+        hyde_fallback_used = False
+        if allow_hyde:
             hyde_text = self._generate_hyde_document(
                 effective_query,
                 language=target_language,
             )
+            if not hyde_text and bool(getattr(settings, "SM_HYDE_FALLBACK_ENABLED", True)):
+                hyde_text = self._build_hyde_fallback(
+                    query=effective_query,
+                    language=target_language,
+                    key_terms=hyde_key_terms,
+                    word_limit=hyde_word_limit,
+                )
+                hyde_fallback_used = bool(hyde_text)
             if hyde_text:
                 variants.append({"text": hyde_text, "tag": "hyde", "synthetic": True, "language": target_language})
+                hyde_generated = True
 
         extra_payloads: List[Dict[str, Any]] = []
         for item in extra_variants or []:
@@ -533,8 +927,22 @@ class RAGService:
             "effective_query": effective_query,
             "translation_used": translation_used,
             "target_language": target_language,
+            "mode": mode,
+            "mq_num": mq_num,
+            "hyde_enabled": bool(allow_hyde),
+            "hyde_generated": hyde_generated,
+            "hyde_fallback_used": hyde_fallback_used,
+            "translation_enabled": bool(allow_translate),
             "extra_variants": len(extra_payloads),
         }
+        try:
+            self.logger.info(
+                f"RAG.query_variants mode={mode or 'unknown'} translation_used={translation_used} "
+                f"mq_num={mq_num} hyde_enabled={bool(allow_hyde)} hyde_generated={hyde_generated} "
+                f"hyde_fallback={hyde_fallback_used} total={len(dedup)}"
+            )
+        except Exception:
+            pass
         return dedup
 
     def _rewrite_queries(self, query: str, extra: int) -> List[str]:
@@ -566,7 +974,7 @@ class RAGService:
         ]
         json_payload: Optional[str]
         try:
-            json_payload = self.llm.generate(prompts, temperature=0.1, max_tokens=256, stream=False)
+            json_payload = self.llm_aux.generate(prompts, temperature=0.1, max_tokens=256, stream=False)
         except Exception:
             json_payload = None
 
@@ -617,13 +1025,17 @@ class RAGService:
             {"role": "user", "content": user_prompt},
         ]
         try:
-            hyde = self.llm.generate(
+            hyde = self.llm_aux.generate(
                 prompts,
                 temperature=float(getattr(settings, "SM_HYDE_TEMPERATURE", 0.2) or 0.2),
                 max_tokens=int(getattr(settings, "SM_HYDE_MAX_TOKENS", 256) or 256),
                 stream=False,
             )
-        except Exception:
+        except Exception as exc:
+            try:
+                self.logger.warning(f"RAG.hyde_generate_failed query='{query[:120]}' err={exc}")
+            except Exception:
+                pass
             hyde = None
         hyde = self._sanitize_hyde_text(hyde or "", word_limit=word_limit)
         if not hyde:
@@ -631,6 +1043,41 @@ class RAGService:
         if not self._validate_hyde_text(hyde, key_terms):
             return None
         return hyde
+
+    def _build_hyde_fallback(
+        self,
+        *,
+        query: str,
+        language: Optional[str],
+        key_terms: List[str],
+        word_limit: int,
+    ) -> str | None:
+        terms = [term for term in (key_terms or []) if term][:4]
+        if (language or "").lower() == "zh":
+            if terms:
+                draft = (
+                    f"该研究围绕“{query}”展开，核心技术涉及 {', '.join(terms)} 等模块。"
+                    "方法通常结合建模、优化与推理流程，并在真实约束下改进稳定性和效率。"
+                    "该方向关注复杂场景下的性能、泛化与可部署性。"
+                )
+            else:
+                draft = (
+                    f"该研究围绕“{query}”展开，提出可落地的技术框架与关键模块。"
+                    "方法强调在复杂约束条件下提升鲁棒性、效率与准确性。"
+                    "该方向关注真实场景中的性能优化与工程可用性。"
+                )
+        else:
+            preserved = ", ".join(terms) if terms else query
+            draft = (
+                f"This study investigates {query}. "
+                f"It proposes a practical framework combining {preserved} with robust optimization and inference steps. "
+                "The approach targets performance, generalization, and deployment constraints in realistic settings."
+            )
+        sanitized = self._sanitize_hyde_text(draft, word_limit=word_limit)
+        if not sanitized:
+            return None
+        # Fallback 文本不强制关键字全命中，避免全部被拒绝。
+        return sanitized
 
     def _build_rewrite_focuses(self, query: str, extra: int) -> List[Dict[str, str]]:
         templates = [
@@ -737,7 +1184,7 @@ class RAGService:
             {"role": "user", "content": text},
         ]
         try:
-            translated = self.llm.generate(
+            translated = self.llm_aux.generate(
                 prompts,
                 temperature=0.0,
                 max_tokens=256,

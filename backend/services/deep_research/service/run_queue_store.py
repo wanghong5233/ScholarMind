@@ -713,7 +713,7 @@ class RedisRunQueueStore:
 def create_queue_store(base_dir: Path) -> SqliteRunQueueStore | RedisRunQueueStore:
     """Create a queue store based on configuration."""
 
-    backend = (settings.QUEUE_BACKEND or "sqlite").strip().lower()
+    backend = str(settings.QUEUE_BACKEND or "").strip().lower()
     if backend == "redis":
         return RedisRunQueueStore(
             host=settings.REDIS_HOST,
@@ -722,7 +722,11 @@ def create_queue_store(base_dir: Path) -> SqliteRunQueueStore | RedisRunQueueSto
             password=settings.REDIS_PASSWORD,
             prefix=settings.REDIS_QUEUE_PREFIX,
         )
-    return SqliteRunQueueStore(base_dir)
+    if backend == "sqlite":
+        return SqliteRunQueueStore(base_dir)
+    raise RuntimeError(
+        f"Unsupported QUEUE_BACKEND='{settings.QUEUE_BACKEND}'. Expected 'sqlite' or 'redis'."
+    )
 
 
 def _parse_iso(value: Optional[str]) -> Optional[datetime]:

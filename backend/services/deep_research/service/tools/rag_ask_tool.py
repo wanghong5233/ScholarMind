@@ -40,15 +40,18 @@ class RagAskTool(BaseTool):
         )
         self._rag_client = rag_client
         self._citation_manager = citation_manager
-        api_key, base_url, model_name = resolve_llm_config()
-        self._llm_client = llm_client or LLMClient(
-            api_key=api_key,
-            base_url=base_url,
-            model_name=model_name,
-            temperature=0.2,
-            max_tokens=512,
-            timeout=settings.REQUEST_TIMEOUT,
-        )
+        if llm_client is not None:
+            self._llm_client = llm_client
+        else:
+            api_key, base_url, model_name = resolve_llm_config()
+            self._llm_client = LLMClient(
+                api_key=api_key,
+                base_url=base_url,
+                model_name=model_name,
+                temperature=0.2,
+                max_tokens=512,
+                timeout=settings.REQUEST_TIMEOUT,
+            )
 
     async def execute(self, context: ToolContext, parameters: Dict[str, Any]) -> ToolResult:
         """Execute the RAG ask call."""
@@ -137,7 +140,7 @@ class RagAskTool(BaseTool):
 
     async def _generate_summary(self, question: str, chunks: List[Dict[str, Any]]) -> str:
         if not self._llm_client.is_configured():
-            return self._fallback_summary(question, chunks)
+            raise RuntimeError("RAG summary LLM is not configured.")
         evidence = self._format_evidence(chunks, limit=8)
         prompt = (
             "You are a research assistant. Answer the question using ONLY the evidence below. "
@@ -148,7 +151,9 @@ class RagAskTool(BaseTool):
             "Answer in 1-3 concise paragraphs."
         )
         output = await self._llm_client.generate(prompt)
-        return output or self._fallback_summary(question, chunks)
+        if not output or not output.strip():
+            raise RuntimeError("RAG summary LLM returned empty output.")
+        return output
 
     @staticmethod
     def _format_evidence(chunks: List[Dict[str, Any]], limit: int) -> str:
@@ -162,13 +167,3 @@ class RagAskTool(BaseTool):
             lines.append(f"{header}\n{content[:500]}")
         return "\n\n".join(lines) if lines else "(no evidence)"
 
-    @staticmethod
-    def _fallback_summary(question: str, chunks: List[Dict[str, Any]]) -> str:
-        if not chunks:
-            return "No evidence available to answer the question."
-        top = chunks[0]
-        content = top.get("content") or top.get("text") or ""
-        snippet = content[:400].strip()
-        if snippet:
-            return f"{snippet}\n\n(Note: Generated without LLM due to missing API key.)"
-        return "No evidence available to answer the question."

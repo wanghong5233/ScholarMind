@@ -3,9 +3,17 @@ from llama_index.core.data_structs import Node
 from llama_index.core.schema import NodeWithScore
 from llama_index.postprocessor.dashscope_rerank import DashScopeRerank
 import numpy as np
-from typing import List
+import logging
+import threading
+from typing import List, Optional
 
 from core.config import settings
+
+logger = logging.getLogger("rag.embedding")
+_LOCAL_EMBEDDER_MODEL = None
+_LOCAL_EMBEDDER_LOCK = threading.Lock()
+_LOCAL_EMBEDDER_DISABLED_REASON: Optional[str] = None
+_LOCAL_EMBEDDER_FALLBACK_WARNED = False
 
 
 def get_chat_completion_block(session_id, question, references):
@@ -35,31 +43,83 @@ def rerank_similarity(query, texts):
     return np.array(scores), None
 
 
-def generate_embedding(
-    text: str | List[str],
-    api_key: str | None = None,
-    base_url: str | None = None,
-    model_name: str = "text-embedding-v3",
-    dimensions: int = 1024,
-    encoding_format: str = "float",
-    max_batch_size: int = 10,
-):
-    api_key = api_key or settings.DASHSCOPE_API_KEY
-    base_url = base_url or settings.DASHSCOPE_BASE_URL
+def _get_local_embedder():
+    global _LOCAL_EMBEDDER_MODEL, _LOCAL_EMBEDDER_DISABLED_REASON
+    if _LOCAL_EMBEDDER_DISABLED_REASON:
+        raise RuntimeError(_LOCAL_EMBEDDER_DISABLED_REASON)
+    if _LOCAL_EMBEDDER_MODEL is None:
+        with _LOCAL_EMBEDDER_LOCK:
+            if _LOCAL_EMBEDDER_MODEL is None:
+                from sentence_transformers import SentenceTransformer
+                try:
+                    _LOCAL_EMBEDDER_MODEL = SentenceTransformer(
+                        settings.LOCAL_EMBEDDER_PATH,
+                        trust_remote_code=True,
+                        device=settings.SM_LOCAL_EMBEDDER_DEVICE,
+                    )
+                    try:
+                        logger.info(
+                            "Local embedder loaded: %s (%s)",
+                            settings.LOCAL_EMBEDDER_PATH,
+                            settings.SM_LOCAL_EMBEDDER_DEVICE,
+                        )
+                    except Exception:
+                        pass
+                except Exception as exc:
+                    _LOCAL_EMBEDDER_DISABLED_REASON = f"Local embedder unavailable: {exc}"
+                    raise
+    return _LOCAL_EMBEDDER_MODEL
 
+
+def _generate_local_embedding(text: str | List[str], max_batch_size: int) -> Optional[List[float] | List[List[float]]]:
+    model = _get_local_embedder()
+    if isinstance(text, str):
+        vec = model.encode(text, normalize_embeddings=True)
+        return vec.tolist()
+    if isinstance(text, list):
+        vecs = model.encode(text, normalize_embeddings=True, batch_size=max_batch_size)
+        return [vec.tolist() for vec in vecs]
+    return None
+
+
+def _generate_remote_embedding(
+    text: str | List[str],
+    *,
+    api_key: Optional[str],
+    base_url: Optional[str],
+    model_name: str,
+    dimensions: int,
+    encoding_format: str,
+    max_batch_size: int,
+) -> Optional[List[float] | List[List[float]]]:
     client = OpenAI(api_key=api_key, base_url=base_url)
 
-    if isinstance(text, str):
+    def _request_one(input_data):
         try:
             completion = client.embeddings.create(
                 model=model_name,
-                input=text,
+                input=input_data,
                 dimensions=dimensions,
                 encoding_format=encoding_format,
             )
+            return completion
+        except Exception:
+            # 某些模型/网关不支持 dimensions 或 encoding_format，降级重试一次。
+            completion = client.embeddings.create(
+                model=model_name,
+                input=input_data,
+            )
+            return completion
+
+    if isinstance(text, str):
+        try:
+            completion = _request_one(text)
             return completion.data[0].embedding
         except Exception as e:
-            print(f"OpenAI API 请求失败: {e}")
+            try:
+                logger.warning("Remote embedding request failed: %s", e)
+            except Exception:
+                pass
             return None
 
     if isinstance(text, list):
@@ -67,18 +127,57 @@ def generate_embedding(
         for i in range(0, len(text), max_batch_size):
             batch = text[i : i + max_batch_size]
             try:
-                completion = client.embeddings.create(
-                    model=model_name,
-                    input=batch,
-                    dimensions=dimensions,
-                    encoding_format=encoding_format,
-                )
+                completion = _request_one(batch)
                 batch_embeddings = [item.embedding for item in completion.data]
                 all_embeddings.extend(batch_embeddings)
             except Exception as e:
-                print(f"OpenAI API 批量请求失败 (batch {i//max_batch_size + 1}): {e}")
+                try:
+                    logger.warning("Remote embedding batch failed (batch %s): %s", i // max_batch_size + 1, e)
+                except Exception:
+                    pass
                 all_embeddings.extend([None] * len(batch))
         return all_embeddings
+    return None
+
+
+def generate_embedding(
+    text: str | List[str],
+    api_key: str | None = None,
+    base_url: str | None = None,
+    model_name: str | None = None,
+    dimensions: int | None = None,
+    encoding_format: str | None = None,
+    max_batch_size: int | None = None,
+):
+    global _LOCAL_EMBEDDER_FALLBACK_WARNED
+    model_name = model_name or str(getattr(settings, "SM_EMBEDDING_MODEL", "text-embedding-v3") or "text-embedding-v3")
+    dimensions = int(dimensions if dimensions is not None else int(getattr(settings, "SM_EMBEDDING_DIMENSIONS", 1024) or 1024))
+    encoding_format = encoding_format or str(getattr(settings, "SM_EMBEDDING_ENCODING_FORMAT", "float") or "float")
+    max_batch_size = int(max_batch_size if max_batch_size is not None else int(getattr(settings, "SM_EMBEDDING_MAX_BATCH_SIZE", 10) or 10))
+    if getattr(settings, "SM_EMBEDDER_TYPE", "dashscope") == "local":
+        try:
+            return _generate_local_embedding(text, max_batch_size)
+        except Exception as e:
+            try:
+                if not _LOCAL_EMBEDDER_FALLBACK_WARNED:
+                    logger.warning("Local embedder failed, fallback to remote: %s", e)
+                    _LOCAL_EMBEDDER_FALLBACK_WARNED = True
+                else:
+                    logger.debug("Local embedder unavailable, fallback to remote: %s", e)
+            except Exception:
+                pass
+
+    api_key = api_key or settings.DASHSCOPE_API_KEY
+    base_url = base_url or settings.DASHSCOPE_BASE_URL
+    return _generate_remote_embedding(
+        text,
+        api_key=api_key,
+        base_url=base_url,
+        model_name=model_name,
+        dimensions=dimensions,
+        encoding_format=encoding_format,
+        max_batch_size=max_batch_size,
+    )
 
 
 if __name__ == "__main__":

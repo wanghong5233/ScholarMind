@@ -108,7 +108,11 @@ class ManagerAgent:
         block.followups_generated = True
         depth = min(block.depth + 1, self._max_depth)
         created: List[TopicBlock] = []
+        skipped_user_clarifications = False
         for question in questions[: self._max_followups]:
+            if self._looks_like_user_clarification(question):
+                skipped_user_clarifications = True
+                continue
             title = self._question_to_title(question, language)
             if self._is_duplicate(title, question):
                 continue
@@ -121,6 +125,22 @@ class ManagerAgent:
             )
             created.append(child)
             self._register_seen(child)
+        if not created and skipped_user_clarifications:
+            # Decision LLM can emit user-facing clarifications; convert these into
+            # autonomous follow-up tasks so queue expansion remains evidence-driven.
+            fallback_plans = self._build_followups(block, summary="", language=language)
+            for followup in fallback_plans[: self._max_followups]:
+                if self._is_duplicate(followup.title, followup.question):
+                    continue
+                child = self._queue.add_block(
+                    title=followup.title,
+                    question=followup.question,
+                    depth=depth,
+                    parent_id=block.block_id,
+                    max_iterations=block.max_iterations,
+                )
+                created.append(child)
+                self._register_seen(child)
         return created
 
     def _should_expand(self, summary: str) -> bool:
@@ -193,6 +213,36 @@ class ManagerAgent:
         if lang == "zh":
             return title.replace("？", "").replace("?", "")[:48]
         return title.rstrip("?")[:60]
+
+    @staticmethod
+    def _looks_like_user_clarification(question: str) -> bool:
+        """Detect follow-up prompts that ask users for preferences/details."""
+
+        normalized = " ".join(str(question or "").strip().lower().split())
+        if not normalized:
+            return True
+        zh_markers = (
+            "你希望",
+            "你更想",
+            "你更倾向",
+            "请提供",
+            "请给出",
+            "你能否",
+            "是否需要",
+            "请在",
+        )
+        en_markers = (
+            "can you provide",
+            "could you provide",
+            "would you like",
+            "do you prefer",
+            "what is your preference",
+            "please provide",
+            "please share",
+        )
+        if any(marker in normalized for marker in zh_markers):
+            return True
+        return any(marker in normalized for marker in en_markers)
 
 
 class AsyncManagerAgentWrapper:

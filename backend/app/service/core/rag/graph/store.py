@@ -65,7 +65,7 @@ class KnowledgeGraphStore:
                 chunk_id=chunk_id,
                 score=float(ent.get("score") or 0.0) if ent.get("score") is not None else None,
                 evidence_text=evidence_text,
-                metadata=metadata or {},
+                metadata_=metadata or {},
             )
             self.db.add(evidence)
 
@@ -87,7 +87,7 @@ class KnowledgeGraphStore:
                 chunk_id=chunk_id,
                 score=float(rel.get("score") or 0.0) if rel.get("score") is not None else None,
                 evidence_text=evidence_text,
-                metadata=metadata or {},
+                metadata_=metadata or {},
             )
             self.db.add(evidence)
 

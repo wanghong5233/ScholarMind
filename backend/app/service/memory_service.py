@@ -282,6 +282,8 @@ class LongTermMemoryService:
     def _ensure_memory_embedding(self, memory: Memory) -> Optional[List[float]]:
         if memory.embedding is not None:
             return list(memory.embedding)
+        if not bool(getattr(settings, "SM_LTM_EMBED_MISSING_ON_READ", False)):
+            return None
         if not memory.content:
             return None
         embedding = self._compute_embedding(memory.content)

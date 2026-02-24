@@ -31,7 +31,7 @@ services: # 定义一系列的服务（容器）
       - D:/Anaconda/envs/llm-dev/nltk_data:/usr/local/nltk_data # 挂载本地NLTK数据目录到容器中
       - ./storage_root:/app/service/core/storage
       - models_data:/models  # 共享模型目录（与reranker服务共享）
-    command: ["uvicorn", "app_main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"] # 容器启动时执行的命令，并开启热重载
+    command: ["uvicorn", "app_main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--timeout-graceful-shutdown", "5"] # 容器启动时执行的命令，并开启热重载
     restart: unless-stopped # 定义容器的重启策略，除非手动停止，否则容器会自动重启
     depends_on: # 定义服务间的依赖关系，确保依赖的服务先启动
       - scholarmind_db # 依赖PostgreSQL数据库服务
@@ -202,9 +202,10 @@ services: # 定义一系列的服务（容器）
     volumes:
       - latex_workspaces:/app/workspaces  # 工作区文件存储
       - ./services/doc_studio:/app  # 代码热更新（开发环境）
-    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8003", "--reload"]  # 开启热重载
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8003", "--reload", "--timeout-graceful-shutdown", "5"]  # 开启热重载
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8003/health || exit 1"]
+      # 使用 python 标准库做健康检查，避免依赖 curl 是否存在
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:8003/health', timeout=5).read()"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -234,9 +235,10 @@ services: # 定义一系列的服务（容器）
     volumes:
       - deep_research_data:/app/data/deep_research
       - ./services/deep_research:/app  # 代码热更新（开发环境）
-    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8004", "--reload"]
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8004", "--reload", "--timeout-graceful-shutdown", "5"]
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8004/health || exit 1"]
+      # 使用 python 标准库做健康检查，避免依赖 curl 是否存在
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:8004/health', timeout=5).read()"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -270,16 +272,22 @@ services: # 定义一系列的服务（容器）
 
 volumes: # 定义全局的数据卷
   sm_esdata01: # Elasticsearch数据卷
+    name: backend_sm_esdata01
     driver: local # 使用本地驱动
   pg_data: # PostgreSQL数据卷
+    name: backend_pg_data
     driver: local # 使用本地驱动
   redis_data: # Redis数据卷
+    name: backend_redis_data
     driver: local # 使用本地驱动
   models_data: # 模型数据卷（共享给API和reranker服务）
+    name: backend_models_data
     driver: local # 使用本地驱动
   latex_workspaces: # LaTeX 工作区数据卷
+    name: backend_latex_workspaces
     driver: local # 使用本地驱动
   deep_research_data: # DeepResearch 数据卷
+    name: backend_deep_research_data
     driver: local
 
 networks: # 定义全局的网络

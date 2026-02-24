@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 
 import pytest
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient
 
 from core.config import settings
 from main import app
@@ -13,6 +13,7 @@ from router import research_rt
 from service.pipeline import ResearchPipeline
 from service.run_manager import RunManager
 from service.state_store import StateStore
+from tests.httpx_compat import create_asgi_transport
 
 
 async def _wait_until(predicate, timeout: float = 1.0) -> None:
@@ -54,7 +55,7 @@ async def _build_client(tmp_path, monkeypatch, run_blocker: asyncio.Event) -> tu
     monkeypatch.setattr(research_rt, "run_manager", manager)
     monkeypatch.setattr(ResearchPipeline, "run", fake_run)
 
-    transport = ASGITransport(app=app, lifespan="on")
+    transport = create_asgi_transport(app=app)
     client = AsyncClient(transport=transport, base_url="http://test")
     return client, manager
 

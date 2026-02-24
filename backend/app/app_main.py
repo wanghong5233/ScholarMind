@@ -13,12 +13,14 @@ from router import config_rt
 from router import debug_rt
 from router import internal_rt
 from router import gateway_rt
+from router import admin_rt
 # from router import document_upload_rt
 import os
 import time
 import uuid
 from utils.get_logger import log, request_id_var
 from exceptions.base import APIException
+from service.core.system.runtime_metrics import runtime_metrics
 
 # 从配置获取 root_path
 root_path = settings.__dict__.get("ROOT_PATH", "")
@@ -44,9 +46,11 @@ async def dispatch(request: Request, call_next):
     log.info(f"Request started: {request.method} {request.url.path}")
     
     start_time = time.time()
+    status_code = 500
     
     try:
         response = await call_next(request)
+        status_code = response.status_code
         # 在响应头中添加 request_id，方便前端调试
         response.headers["X-Request-ID"] = request_id
     except Exception as e:
@@ -55,7 +59,11 @@ async def dispatch(request: Request, call_next):
         raise e
     finally:
         process_time = (time.time() - start_time) * 1000
-        log.info(f"Request finished in {process_time:.2f}ms. Status code: {response.status_code if 'response' in locals() else 'N/A'}")
+        runtime_metrics.record_request(status_code=status_code, latency_ms=process_time)
+        log.info(
+            f"Request finished in {process_time:.2f}ms. "
+            f"Status code: {response.status_code if 'response' in locals() else status_code}"
+        )
 
     return response
 
@@ -119,7 +127,10 @@ app.include_router(document_rt.router, prefix="/api/knowledgebases/{kb_id}/docum
 app.include_router(job_rt.router, prefix="/api/jobs", tags=["Jobs"])
 app.include_router(session_rt.router, prefix="/api/sessions", tags=["Sessions"])
 app.include_router(config_rt.router, prefix="/api/config", tags=["Config"])
-app.include_router(debug_rt.router, prefix="/api/debug", tags=["Debug"])
+app.include_router(admin_rt.router, prefix="/api", tags=["Admin"])
+app.include_router(debug_rt.router, prefix="/api/admin/debug", tags=["Admin Debug"])
+if settings.ENABLE_DEBUG_ROUTES:
+    app.include_router(debug_rt.router, prefix="/api/debug", tags=["Debug"])
 app.include_router(internal_rt.router, prefix="/api", tags=["Internal Services"])
 app.include_router(gateway_rt.router, prefix="/api", tags=["Gateway"])
 

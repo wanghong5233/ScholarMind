@@ -3,19 +3,16 @@ import { useNavigate, useParams } from 'react-router-dom'
 import {
   Alert,
   Button,
+  Dropdown,
   Empty,
   Form,
+  Image,
   Input,
-  InputNumber,
   Layout,
-  List,
   message,
   Modal,
   Popconfirm,
-  Progress,
-  Segmented,
   Select,
-  Switch,
   Space,
   Spin,
   Tabs,
@@ -27,11 +24,10 @@ import {
 } from 'antd'
 import {
   FolderOpenOutlined,
+  CopyOutlined,
   FileTextOutlined,
   ReloadOutlined,
-  SaveOutlined,
   PlayCircleOutlined,
-  SendOutlined,
   PlusOutlined,
   UploadOutlined,
   DeleteOutlined,
@@ -40,24 +36,32 @@ import {
   DownloadOutlined,
   SyncOutlined,
   EyeOutlined,
-  CheckOutlined,
-  CloseOutlined,
   EditOutlined,
-  PushpinOutlined,
-  PushpinFilled,
+  GlobalOutlined,
+  ArrowUpOutlined,
+  DatabaseOutlined,
   LikeOutlined,
+  PictureOutlined,
   DislikeOutlined,
   HistoryOutlined,
   BarChartOutlined,
+  EllipsisOutlined,
+  CloseOutlined,
+  MenuOutlined,
+  MessageOutlined,
+  MenuFoldOutlined,
+  RollbackOutlined,
+  SearchOutlined,
+  ShareAltOutlined,
+  CheckOutlined,
 } from '@ant-design/icons'
+import type { MenuProps } from 'antd'
 import type { DataNode } from 'antd/es/tree'
 import { useSnapshot } from 'valtio'
-import Editor, { DiffEditor } from '@monaco-editor/react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-import remarkMath from 'remark-math'
-import rehypeKatex from 'rehype-katex'
-import rehypeRaw from 'rehype-raw'
+import Editor from '@monaco-editor/react'
+import { AgentDiffReview, type AgentDiffReviewRef } from './AgentDiffReview'
+import { ChatMarkdown } from '@/components/markdown/ChatMarkdown'
+import Recorder from '@/components/sender/recorder'
 import type React from 'react'
 import type { TextAreaRef } from 'antd/es/input/TextArea'
 import {
@@ -65,7 +69,7 @@ import {
   createFileOrDirectory,
   createWorkspace,
   deleteFile,
-  bindWorkspaceSession,
+  renameFileOrDirectory,
   getAgentAsyncEventsUrl,
   fetchCompileStatus,
   fetchFileContent,
@@ -75,6 +79,11 @@ import {
   fetchMetricsSummary,
   fetchLlmHealth,
   fetchOperationSnapshotFile,
+  fetchAgentRunStatus,
+  cancelAgentRun,
+  respondAgentRunInteraction,
+  rewindConversation,
+  restoreCheckpoint,
   runAgentTask,
   runAgentTaskAsync,
   sendAgentFeedback,
@@ -85,10 +94,19 @@ import {
   downloadPdf,
   downloadFile,
   listAgentKnowledgeBases,
+  bindWorkspaceSession,
+  listWorkspaceMessages,
+  getWorkspaceMessagesDebug,
 } from '@/api/docStudio'
-import { listMessages as listSessionMessages } from '@/api/session'
-import { docStudioActions, docStudioState } from '@/store/docStudio'
-import type { DocStudioChatMessage } from '@/store/docStudio'
+import {
+  create as createSession,
+  list as listSessions,
+  listMessages as listSessionMessages,
+  rename as renameSession,
+  remove as removeSession,
+} from '@/api/session'
+import { NOTEBOOK_LOCKED_PATHS, NOTEBOOK_WORKSPACE_ID } from '@/utils/notebook'
+import { docStudioActions, docStudioState, type DocStudioChatMessage } from '@/store/docStudio'
 import './index.scss'
 
 const { Sider, Content, Header } = Layout
@@ -108,13 +126,34 @@ const findFirstFile = (nodes: DocStudioAPI.FileNode[]): string | undefined => {
 }
 
 const getErrorMessage = (error: any) => {
-  if (!error) return '请求失败'
+  if (!error) return '未知错误'
   return (
     error?.response?.data?.detail ||
     error?.response?.data?.message ||
     error?.message ||
     '请求失败'
   )
+}
+
+const isCanceledRequestError = (error: any) => {
+  if (!error) return false
+  const code = typeof error?.code === 'string' ? error.code.toUpperCase() : ''
+  const name = typeof error?.name === 'string' ? error.name : ''
+  const messageText = typeof error?.message === 'string' ? error.message.toLowerCase() : ''
+  return (
+    code === 'ERR_CANCELED' ||
+    name === 'CanceledError' ||
+    name === 'AbortError' ||
+    messageText === 'canceled' ||
+    messageText === 'cancelled' ||
+    messageText.includes('取消重复请求')
+  )
+}
+
+const showRequestError = (error: any, prefix = '') => {
+  if (isCanceledRequestError(error)) return
+  const detail = getErrorMessage(error)
+  message.error(prefix ? `${prefix}${detail}` : detail)
 }
 
 const parseRetrievalContent = (value?: string) => {
@@ -125,21 +164,6 @@ const parseRetrievalContent = (value?: string) => {
     console.error('Failed to parse retrieval_content:', error)
     return undefined
   }
-}
-
-const intentTagMap: Record<
-  string,
-  {
-    label: string
-    color: string
-  }
-> = {
-  qa: { label: '问答', color: 'default' },
-  suggest: { label: '建议', color: 'orange' },
-  edit: { label: '编辑', color: 'blue' },
-  citation: { label: '引用', color: 'purple' },
-  custom: { label: '自定�?, color: 'geekblue' },
-  file_op: { label: '文件操作', color: 'default' },
 }
 
 const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -167,15 +191,15 @@ const copyTextToClipboard = async (text: string) => {
   }
 }
 
-const downloadJson = (filename: string, payload: unknown) => {
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json;charset=utf-8' })
+const downloadTextAsFile = (text: string, fileName = 'output.txt') => {
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' })
   const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = filename
-  document.body.appendChild(link)
-  link.click()
-  link.remove()
+  const a = document.createElement('a')
+  a.href = url
+  a.download = fileName
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
   URL.revokeObjectURL(url)
 }
 
@@ -189,6 +213,21 @@ const resolveEditorLanguage = (filePath?: string) => {
 
 const generateId = () =>
   window.crypto?.randomUUID?.() ?? `sel-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
+
+const readFileAsDataUrl = (file: File): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => {
+      const result = reader.result
+      if (typeof result === 'string') {
+        resolve(result)
+      } else {
+        reject(new Error('无法读取图片内容'))
+      }
+    }
+    reader.onerror = () => reject(new Error('读取图片失败'))
+    reader.readAsDataURL(file)
+  })
 
 const collectAllFilePaths = (nodes: DocStudioAPI.FileNode[]): string[] => {
   const result: string[] = []
@@ -206,6 +245,77 @@ const collectAllFilePaths = (nodes: DocStudioAPI.FileNode[]): string[] => {
   return result
 }
 
+const LIVE_TOOL_LABELS: Record<string, string> = {
+  analyze_context_tool: '上下文分析',
+  analyze_document_tool: '文档分析',
+  semantic_code_search_tool: '语义检索',
+  search_codebase_tool: '代码检索',
+  read_file_range_tool: '按行读取',
+  list_workspace_tree_tool: '浏览目录',
+  create_directory_tool: '创建目录',
+  create_file_tool: '创建文件',
+  rename_move_path_tool: '重命名/移动',
+  delete_path_tool: '删除路径',
+  search_papers_tool: '论文检索',
+  batch_search_papers_tool: '批量论文检索',
+  insert_citation_tool: '插入引用',
+  rewrite_selection_tool: '改写选区',
+  rewrite_line_range_tool: '按行改写',
+  update_bibliography_tool: '更新参考文献',
+  insert_text_tool: '插入文本',
+  compile_latex_tool: '编译 LaTeX',
+  check_citation_consistency_tool: '检查引用一致性',
+  check_bibliography_tool: '检查参考文献',
+  web_search_tool: '网络搜索',
+  reply_to_user_tool: '生成最终回复',
+  answer_without_edit_tool: '直接回答',
+}
+
+const formatLiveToolName = (toolName?: string) => {
+  const normalized = String(toolName || '').trim()
+  if (!normalized) return ''
+  if (LIVE_TOOL_LABELS[normalized]) return LIVE_TOOL_LABELS[normalized]
+  return normalized.replace(/_tool$/, '').replace(/_/g, ' ')
+}
+
+const truncateLiveText = (value?: string, maxLength = 88) => {
+  const text = String(value || '').trim()
+  if (!text) return ''
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text
+}
+
+const normalizeLiveDeltaText = (value?: string) =>
+  String(value || '')
+    .replace(/\u0000/g, '')
+    .replace(/\u200b/g, '')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+
+const chunkTextByLength = (value: string, chunkSize: number) => {
+  const text = String(value || '')
+  const size = Math.max(24, Number(chunkSize) || 64)
+  const chunks: string[] = []
+  for (let i = 0; i < text.length; i += size) {
+    chunks.push(text.slice(i, i + size))
+  }
+  return chunks
+}
+
+const buildLivePreviewLines = (value?: string, maxLines = 6, chunkSize = 64) => {
+  const normalized = normalizeLiveDeltaText(value)
+  if (!normalized) return []
+  const rawLines = normalized.split('\n').map((line) => line.replace(/\t/g, '  ').trimEnd())
+  let lines = rawLines.filter((line) => line.trim().length > 0)
+  if (lines.length === 0) {
+    const compact = normalized.replace(/\s+/g, ' ').trim()
+    if (!compact) return []
+    lines = chunkTextByLength(compact, chunkSize)
+  } else if (lines.length === 1 && lines[0].length > chunkSize * 2) {
+    lines = chunkTextByLength(lines[0], chunkSize)
+  }
+  return lines.slice(-Math.max(1, maxLines))
+}
+
 type SelectionFragment = {
   id: string
   start: number
@@ -215,126 +325,538 @@ type SelectionFragment = {
   placeholder: string
 }
 
-type PromptIntent = 'edit' | 'suggest' | 'qa' | 'citation' | 'custom'
-
-type PromptLlmOptions = {
-  llm_provider?: 'auto' | 'dashscope' | 'openai'
-  llm_model?: string
-  llm_temperature?: number
-  llm_max_tokens?: number
-}
-
-type PromptPreset = {
-  id?: string
-  label: string
-  description?: string
-  prompt: string | ((hasSelection: boolean) => string)
-  intent: PromptIntent
-  isCustom?: boolean
-  llm_options?: PromptLlmOptions
-  pinned?: boolean
-}
-
-type CustomPromptPreset = {
+type FileMentionFragment = {
   id: string
-  label: string
-  description?: string
-  prompt: string
-  intent: PromptIntent
-  llm_options?: PromptLlmOptions
-  pinned?: boolean
+  filePath: string
+  placeholder: string
+  strategy?: string
+  totalChars?: number
+  totalLines?: number
+  fileHash?: string
+  fileSize?: number
 }
 
-const CUSTOM_PROMPT_STORAGE_KEY = 'doc_studio_prompt_presets'
+const SELECTION_PLACEHOLDER_REGEX = /@selection\d+/g
+const FILE_PLACEHOLDER_REGEX = /@file\d+/g
+const COMPOSER_PLACEHOLDER_REGEX = /@(selection|file)\d+/g
+const containsSelectionPlaceholder = (value: string) =>
+  new RegExp(SELECTION_PLACEHOLDER_REGEX.source).test(String(value || ''))
+const containsFilePlaceholder = (value: string) =>
+  new RegExp(FILE_PLACEHOLDER_REGEX.source).test(String(value || ''))
 
-const quickPromptPresets: PromptPreset[] = [
-  // 写作类（最常用 - 会直接修改文件）
-  {
-    label: '生成正文',
-    description: '根据用户输入的大致内容，生成专业详尽的论文正�?,
-    prompt: (hasSelection: boolean) =>
-      hasSelection
-        ? '请基于我选中的内容或提供的要点，生成专业、详尽的学术论文正文。要求：1) 保持严谨的学术写作风格；2) 逻辑结构清晰，层次分明；3) 使用准确的学术术语和表达�?) 内容详实，论证充分；5) 与文档整体风格保持一致。请在当前光标位置插入生成的正文内容�?
-        : '请根据我提供的内容要点，生成专业、详尽的学术论文正文。要求：1) 保持严谨的学术写作风格；2) 逻辑结构清晰，层次分明；3) 使用准确的学术术语和表达�?) 内容详实，论证充分；5) 与文档整体风格保持一致。请在当前光标位置插入生成的正文内容�?,
-    intent: 'edit',
-  },
-  {
-    label: '智能续写',
-    description: '根据已有内容或选中片段继续写作，保持学术风格一�?,
-    prompt: (hasSelection: boolean) => 
-      hasSelection 
-        ? '请基于【片�?】的内容，继续撰写后续段落。要求：1) 保持严谨的学术写作风格和术语使用的一致性；2) 确保逻辑连贯，与前文自然衔接�?) 遵循学术论文的写作规范；4) 内容充实，论证有力。请直接在当前光标位置续写�?
-        : '请根据当前光标位置的前后文内容，继续撰写后续段落。要求：1) 保持严谨的学术写作风格和术语使用的一致性；2) 确保逻辑连贯，与已有内容自然衔接�?) 遵循学术论文的写作规范；4) 内容充实，论证有力。请直接在当前光标位置续写�?,
-    intent: 'edit',
-  },
-  // 编辑类（会直接修改文件）
-  {
-    label: '优化摘要',
-    description: '直接优化摘要，提升学术性与逻辑�?,
-    prompt: (hasSelection: boolean) =>
-      hasSelection
-        ? '请优化【片�?】中的摘要内容。要求：1) 提升逻辑结构的严谨性和条理性；2) 确保符合学术写作规范（如 IEEE/ACM 等标准）�?) 保持原意和核心观点不变；4) 使用更精准的学术表达�?) 确保摘要能够准确概括全文要点。请直接替换选中内容�?
-        : '请优化当前摘要部分。要求：1) 提升逻辑结构的严谨性和条理性；2) 确保符合学术写作规范（如 IEEE/ACM 等标准）�?) 保持原意和核心观点不变；4) 使用更精准的学术表达�?) 确保摘要能够准确概括全文要点�?,
-    intent: 'edit',
-  },
-  {
-    label: '润色段落',
-    description: '直接润色选中段落，改善语言表达',
-    prompt: (hasSelection: boolean) =>
-      hasSelection
-        ? '请对【片�?】进行学术润色。要求：1) 改善语法准确性和句式多样性；2) 优化专业术语的使用和表达�?) 增强段落内部的逻辑衔接�?) 保持原意和学术风格不变；5) 提升整体表达的流畅性和专业性。请直接替换选中内容�?
-        : '请对当前段落进行学术润色。要求：1) 改善语法准确性和句式多样性；2) 优化专业术语的使用和表达�?) 增强段落内部的逻辑衔接�?) 保持原意和学术风格不变；5) 提升整体表达的流畅性和专业性�?,
-    intent: 'edit',
-  },
-  // 建议类（只给建议，不修改文件�?
-  {
-    label: '检查问�?,
-    description: '检查文本问题并给出建议（不修改文件�?,
-    prompt: (hasSelection: boolean) =>
-      hasSelection
-        ? '请对【片�?】进行全面的学术质量检查。重点关注：1) 逻辑严谨性（是否存在逻辑漏洞、论证不充分等问题）�?) 表达清晰度（是否存在歧义、表述不清等问题）；3) 学术规范性（是否符合 IEEE/ACM 等学术写作规范）�?) 术语准确性（专业术语使用是否准确、一致）。请详细列出发现的问题，并提供具体的改进建议。不要直接修改文本，仅提供分析和建议�?
-        : '请对当前内容进行全面的学术质量检查。重点关注：1) 逻辑严谨性（是否存在逻辑漏洞、论证不充分等问题）�?) 表达清晰度（是否存在歧义、表述不清等问题）；3) 学术规范性（是否符合 IEEE/ACM 等学术写作规范）�?) 术语准确性（专业术语使用是否准确、一致）。请详细列出发现的问题，并提供具体的改进建议。不要直接修改文本，仅提供分析和建议�?,
-    intent: 'suggest',
-  },
-  {
-    label: '优化建议',
-    description: '给出优化建议（不修改文件�?,
-    prompt: (hasSelection: boolean) =>
-      hasSelection
-        ? '请从多个维度分析【片�?】，提供专业的优化建议。评估维度包括：1) 学术性（理论深度、创新性、学术价值）�?) 逻辑性（论证链条、结构合理性、因果关系）�?) 表达清晰度（可读性、术语使用、句式结构）�?) 规范性（格式、引用、图表说明等）。请针对每个维度提供具体的优化方向和示例。不要直接修改文本，仅提供分析和建议�?
-        : '请从多个维度分析当前内容，提供专业的优化建议。评估维度包括：1) 学术性（理论深度、创新性、学术价值）�?) 逻辑性（论证链条、结构合理性、因果关系）�?) 表达清晰度（可读性、术语使用、句式结构）�?) 规范性（格式、引用、图表说明等）。请针对每个维度提供具体的优化方向和示例。不要直接修改文本，仅提供分析和建议�?,
-    intent: 'suggest',
-  },
-  // 问答类（纯知识问答）
-  {
-    label: '方法调研',
-    description: '调研某个方法或技术的研究现状',
-    prompt: () => '请帮我深入调研以下方法或技术的研究现状。要求：1) 梳理该方法的理论基础和发展历程；2) 总结相关领域的主要研究成果和代表性文献；3) 分析最新研究进展和技术趋势；4) 指出当前存在的挑战和未来研究方向。请提供结构化的调研报告�?,
-    intent: 'qa',
-  },
-  {
-    label: '背景问答',
-    description: '解释术语或概�?,
-    prompt: () => '请详细解释以下术语或概念。要求：1) 提供准确的定义和核心特征�?) 说明其在相关研究领域中的重要性；3) 阐述其理论基础或技术原理；4) 如适用，提供相关的应用场景或实例。请使用严谨的学术语言进行解释�?,
-    intent: 'qa',
-  },
-  // 引用类（处理参考文献）
-  {
-    label: '添加引用',
-    description: '在选中位置添加引用',
-    prompt: (hasSelection: boolean) =>
-      hasSelection
-        ? '请在【片�?】的适当位置添加相关的学术引用。要求：1) 引用应与选中内容的主题高度相关；2) 优先选择高质量、权威性的文献�?) 确保引用格式符合文档使用的学术规范（�?IEEE/ACM 等）�?) 在参考文献列表中自动添加相应的条目；5) 保持引用风格的统一性。请直接修改文本，添加引用标记�?
-        : '请在当前光标位置添加相关的学术引用。要求：1) 引用应与上下文内容主题高度相关；2) 优先选择高质量、权威性的文献�?) 确保引用格式符合文档使用的学术规范（�?IEEE/ACM 等）�?) 在参考文献列表中自动添加相应的条目；5) 保持引用风格的统一性�?,
-    intent: 'citation',
-  },
-  {
-    label: '检查引�?,
-    description: '检查引用格式和完整�?,
-    prompt: () => '请全面检查整个文档中的引用情况。检查内容包括：1) 引用格式是否符合学术规范（IEEE/ACM/APA 等）�?) 是否存在未定义的引用（undefined citations）；3) 参考文献列表是否完整，是否包含所有被引用的文献；4) 引用风格是否统一�?) 是否存在引用错误或遗漏。请详细列出发现的问题并提供修复建议�?,
-    intent: 'citation',
-  },
+const normalizeSelectionPlaceholder = (value: unknown, fallbackIndex: number) => {
+  const raw = String(value || '').trim()
+  if (/^@selection\d+$/i.test(raw)) return raw
+  return `@selection${fallbackIndex + 1}`
+}
+
+const normalizeSelectionFragments = (input: unknown): SelectionFragment[] => {
+  const rawList = Array.isArray(input)
+    ? input
+    : input && typeof input === 'object'
+      ? [input]
+      : []
+  return rawList
+    .map((rawItem, idx) => {
+      if (!rawItem || typeof rawItem !== 'object') return null
+      const item = rawItem as Record<string, any>
+      const text = String(item.text || '').trim()
+      if (!text) return null
+      const startRaw = Number(item.start)
+      const endRaw = Number(item.end)
+      const start = Number.isFinite(startRaw) ? Math.max(0, Math.floor(startRaw)) : 0
+      const end = Number.isFinite(endRaw) ? Math.max(start, Math.floor(endRaw)) : Math.max(start, text.length)
+      const placeholder = normalizeSelectionPlaceholder(item.placeholder, idx)
+      const filePathRaw = item.filePath ?? item.file_path
+      const filePath = typeof filePathRaw === 'string' && filePathRaw.trim() ? filePathRaw.trim() : undefined
+      const idRaw = typeof item.id === 'string' ? item.id.trim() : ''
+      const id = idRaw || `${placeholder}-${start}-${end}-${idx}`
+      return {
+        id,
+        start,
+        end,
+        text,
+        filePath,
+        placeholder,
+      } as SelectionFragment
+    })
+    .filter((item): item is SelectionFragment => Boolean(item))
+}
+
+const normalizeFileMentionPlaceholder = (value: unknown, fallbackIndex: number) => {
+  const raw = String(value || '').trim()
+  if (/^@file\d+$/i.test(raw)) return raw
+  return `@file${fallbackIndex + 1}`
+}
+
+const normalizeFileMentionFragments = (input: unknown): FileMentionFragment[] => {
+  const rawList = Array.isArray(input)
+    ? input
+    : input && typeof input === 'object'
+      ? [input]
+      : []
+  return rawList
+    .map((rawItem, idx) => {
+      if (!rawItem || typeof rawItem !== 'object') return null
+      const item = rawItem as Record<string, any>
+      const filePathRaw = item.filePath ?? item.file_path ?? item.path
+      const filePath = typeof filePathRaw === 'string' ? filePathRaw.trim() : ''
+      if (!filePath) return null
+      const placeholder = normalizeFileMentionPlaceholder(item.placeholder, idx)
+      const idRaw = typeof item.id === 'string' ? item.id.trim() : ''
+      const strategyRaw = typeof item.strategy === 'string' ? item.strategy.trim() : ''
+      const totalCharsRaw = Number(item.totalChars ?? item.total_chars)
+      const totalLinesRaw = Number(item.totalLines ?? item.total_lines)
+      const fileHashRaw = String(item.fileHash ?? item.file_hash ?? item.hash ?? '').trim().toLowerCase()
+      const fileSizeRaw = Number(item.fileSize ?? item.file_size ?? item.size)
+      return {
+        id: idRaw || `${placeholder}-${filePath}-${idx}`,
+        filePath,
+        placeholder,
+        strategy: strategyRaw || undefined,
+        totalChars:
+          Number.isFinite(totalCharsRaw) && totalCharsRaw > 0 ? Math.floor(totalCharsRaw) : undefined,
+        totalLines:
+          Number.isFinite(totalLinesRaw) && totalLinesRaw > 0 ? Math.floor(totalLinesRaw) : undefined,
+        fileHash: /^[0-9a-f]{64}$/.test(fileHashRaw) ? fileHashRaw : undefined,
+        fileSize: Number.isFinite(fileSizeRaw) && fileSizeRaw > 0 ? Math.floor(fileSizeRaw) : undefined,
+      } as FileMentionFragment
+    })
+    .filter((item): item is FileMentionFragment => Boolean(item))
+}
+
+const extractTrailingFileMentionQuery = (value: string) => {
+  const text = String(value || '')
+  const match = /(?:^|\s)@([^\s@]*)$/.exec(text)
+  if (!match) return null
+  const full = match[0] || ''
+  const atOffsetInFull = full.lastIndexOf('@')
+  if (atOffsetInFull < 0) return null
+  const atStart = match.index + atOffsetInFull
+  const query = String(match[1] || '')
+  return {
+    atStart,
+    end: text.length,
+    query,
+  }
+}
+
+const getFileExtension = (filePath?: string) => {
+  const normalized = String(filePath || '').trim().toLowerCase()
+  if (!normalized) return ''
+  const index = normalized.lastIndexOf('.')
+  if (index < 0 || index === normalized.length - 1) return ''
+  return normalized.slice(index)
+}
+
+const buildMarkdownCompileResult = (
+  filePath: string,
+  content: string,
+): DocStudioAPI.CompileResult => {
+  const text = String(content || '')
+  const errors: string[] = []
+  const warnings: string[] = []
+
+  const fencedCodeCount = (text.match(/^\s*```/gm) || []).length
+  if (fencedCodeCount % 2 !== 0) {
+    errors.push('检测到未闭合的 Markdown 代码块围栏（```）。')
+  }
+
+  const hasTitle = /^\s*#\s+\S+/m.test(text)
+  if (!hasTitle && text.trim().length > 0) {
+    warnings.push('文档缺少一级标题（# 标题），建议补充。')
+  }
+
+  const veryLongLines = text
+    .split('\n')
+    .map((line, idx) => ({ lineNo: idx + 1, len: line.length }))
+    .filter((item) => item.len > 240)
+    .slice(0, 5)
+  if (veryLongLines.length > 0) {
+    warnings.push(
+      `存在较长行（>240 字符），示例行号：${veryLongLines.map((item) => item.lineNo).join(', ')}`,
+    )
+  }
+
+  const success = errors.length === 0
+  const warningText = warnings.length ? `\nWarnings:\n- ${warnings.join('\n- ')}` : ''
+  const errorText = errors.length ? `\nErrors:\n- ${errors.join('\n- ')}` : ''
+  const log = [
+    `File: ${filePath}`,
+    `Chars: ${text.length}`,
+    `Lines: ${text.split('\n').length}`,
+    `Fenced code blocks: ${Math.floor(fencedCodeCount / 2)}`,
+    warningText,
+    errorText,
+  ]
+    .filter(Boolean)
+    .join('\n')
+
+  return {
+    success,
+    summary: success ? `Markdown 检查通过：${filePath}` : `Markdown 检查失败：${filePath}`,
+    data: {
+      compiled: success,
+      compile_format: 'markdown',
+      target_path: filePath,
+      preview_source: text,
+      errors,
+      warnings,
+      logs: [
+        {
+          command: 'markdown_syntax_check',
+          returncode: success ? 0 : 1,
+          log,
+        },
+      ],
+    },
+    error: success ? undefined : errors[0] || 'Markdown 检查失败',
+  }
+}
+
+type MentionTagClickTarget = {
+  type: 'selection' | 'file'
+  placeholder: string
+  filePath?: string
+  start?: number
+  end?: number
+}
+
+const renderPromptWithMentionTags = (
+  content: string,
+  selectionFragments: SelectionFragment[],
+  fileMentions: FileMentionFragment[],
+  onMentionClick?: (target: MentionTagClickTarget) => void,
+): React.ReactNode => {
+  const text = String(content || '')
+  if (!text) return text
+  const hasPlaceholder = new RegExp(COMPOSER_PLACEHOLDER_REGEX.source).test(text)
+  if (!hasPlaceholder) return text
+
+  const regex = new RegExp(COMPOSER_PLACEHOLDER_REGEX.source, 'g')
+  const selectionMap = new Map(selectionFragments.map((item) => [item.placeholder, item]))
+  const fileMentionMap = new Map(fileMentions.map((item) => [item.placeholder, item]))
+  const nodes: React.ReactNode[] = []
+  let lastIndex = 0
+  let match: RegExpExecArray | null
+  while ((match = regex.exec(text)) !== null) {
+    const placeholder = match[0]
+    const index = match.index
+    if (index > lastIndex) {
+      nodes.push(text.slice(lastIndex, index))
+    }
+    const isFileMention = placeholder.startsWith('@file')
+    const mentionTarget: MentionTagClickTarget = isFileMention
+      ? {
+          type: 'file',
+          placeholder,
+          filePath: fileMentionMap.get(placeholder)?.filePath,
+        }
+      : {
+          type: 'selection',
+          placeholder,
+          filePath: selectionMap.get(placeholder)?.filePath,
+          start: selectionMap.get(placeholder)?.start,
+          end: selectionMap.get(placeholder)?.end,
+        }
+    const clickable = Boolean(onMentionClick && mentionTarget.filePath)
+    const titleParts = [placeholder]
+    if (isFileMention) {
+      const mention = fileMentionMap.get(placeholder)
+      if (mention?.filePath) titleParts.push(mention.filePath)
+      if (mention?.strategy) titleParts.push(mention.strategy)
+      if (mention?.totalLines) titleParts.push(`${mention.totalLines} 行`)
+    } else {
+      const fragment = selectionMap.get(placeholder)
+      if (fragment?.filePath) titleParts.push(fragment.filePath)
+      if (fragment?.text) titleParts.push(`${fragment.text.length} 字符`)
+    }
+    nodes.push(
+      <span
+        key={`${placeholder}-${index}`}
+        className={
+          `${isFileMention
+            ? 'doc-studio__chat-inline-selection doc-studio__chat-inline-selection--file'
+            : 'doc-studio__chat-inline-selection'}${clickable ? ' doc-studio__chat-inline-selection--clickable' : ''}`
+        }
+        title={titleParts.join(' · ')}
+        role={clickable ? 'button' : undefined}
+        tabIndex={clickable ? 0 : undefined}
+        onClick={
+          clickable
+            ? (event) => {
+                event.preventDefault()
+                event.stopPropagation()
+                onMentionClick?.(mentionTarget)
+              }
+            : undefined
+        }
+        onKeyDown={
+          clickable
+            ? (event) => {
+                if (event.key === 'Enter' || event.key === ' ') {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  onMentionClick?.(mentionTarget)
+                }
+              }
+            : undefined
+        }
+      >
+        <FileTextOutlined />
+        <span>{placeholder}</span>
+      </span>,
+    )
+    lastIndex = index + placeholder.length
+  }
+  if (lastIndex < text.length) {
+    nodes.push(text.slice(lastIndex))
+  }
+  return nodes
+}
+
+type InteractionMode = 'ask' | 'agent'
+
+type ChatImageAttachment = {
+  id: string
+  name: string
+  mimeType: string
+  size: number
+  dataUrl: string
+}
+
+type ReEditDraft = {
+  messageId: string
+  msgIndex: number
+  prompt: string
+  runId: string
+  beforeMessageId: string
+  images: ChatImageAttachment[]
+  selections: SelectionFragment[]
+  fileMentions: FileMentionFragment[]
+}
+
+type PendingSendDraft = {
+  userMessageId: string
+  traceId: string
+  prompt: string
+  images: ChatImageAttachment[]
+  selections: SelectionFragment[]
+  fileMentions: FileMentionFragment[]
+  committed: boolean
+  commitReason?: 'delta' | 'tool'
+}
+
+type ContextMenuTargetType = 'workspace' | 'directory' | 'file'
+
+type ContextMenuAction = {
+  key: string
+  label: string
+  icon: React.ReactNode
+  disabled?: boolean
+  danger?: boolean
+  separated?: boolean
+  onClick: () => void
+}
+
+type CompileLogGroup = {
+  command: string
+  returncode: number
+  log: string
+  count: number
+  firstIndex: number
+}
+
+type LiveTimelineLevel = 'info' | 'warning' | 'error'
+
+type LiveTimelineEntry = {
+  id: string
+  sequence: number
+  eventType: string
+  text: string
+  level: LiveTimelineLevel
+  timestamp: number
+}
+
+const MAX_CHAT_IMAGE_COUNT = 4
+const MAX_CHAT_IMAGE_FILE_SIZE = 6 * 1024 * 1024 // 6MB
+const MAX_SELECTION_COUNT = 8
+const MAX_SELECTION_TEXT_CHARS = 2000
+const MAX_SELECTION_TOTAL_CHARS = 8000
+const MAX_FILE_MENTION_COUNT = 8
+const MAX_FILE_MENTION_CANDIDATES = 8
+
+const DASHSCOPE_TEXT_MODEL_OPTIONS = [
+  { label: 'qwen-plus', value: 'qwen-plus' },
+  { label: 'qwen3-max', value: 'qwen3-max' },
+  { label: 'qwen-max', value: 'qwen-max' },
+  { label: 'qwen-turbo', value: 'qwen-turbo' },
+] as const
+
+const DASHSCOPE_VISION_MODEL_OPTIONS = [
+  { label: 'qwen-vl-max', value: 'qwen-vl-max' },
+  { label: 'qwen-vl-plus', value: 'qwen-vl-plus' },
+] as const
+
+const DASHSCOPE_MODEL_OPTIONS = [
+  ...DASHSCOPE_TEXT_MODEL_OPTIONS,
+  ...DASHSCOPE_VISION_MODEL_OPTIONS,
+] as const
+
+const OPENAI_MODEL_OPTIONS = [
+  { label: 'gpt-5.2', value: 'gpt-5.2' },
+  { label: 'gpt-5', value: 'gpt-5' },
+  { label: 'gpt-5-mini', value: 'gpt-5-mini' },
+  { label: 'gpt-4.1', value: 'gpt-4.1' },
+  { label: 'gpt-4o', value: 'gpt-4o' },
+] as const
+
+type LlmProviderValue = 'dashscope' | 'openai'
+type LlmModelValue = string
+type LlmModelOption = {
+  label: string
+  value: string
+  provider: LlmProviderValue
+  isVision: boolean
+}
+
+const DEFAULT_DASHSCOPE_MODEL = 'qwen3-max'
+const DEFAULT_DASHSCOPE_VISION_MODEL = 'qwen-vl-max'
+const DEFAULT_OPENAI_MODEL = 'gpt-5.2'
+const DEFAULT_OPENAI_VISION_MODEL = 'gpt-4o'
+const DOC_STUDIO_LAST_USED_USER_KB_ID_STORAGE_KEY = 'doc_studio_last_user_kb_id'
+const DASHSCOPE_VISION_MODEL_SET = new Set<string>(
+  DASHSCOPE_VISION_MODEL_OPTIONS.map((item) => item.value),
+)
+const OPENAI_VISION_MODEL_SET = new Set<string>(['gpt-4o'])
+const LLM_MODEL_OPTIONS: LlmModelOption[] = [
+  ...DASHSCOPE_MODEL_OPTIONS.map((item) => ({
+    label: `通义 · ${item.label}`,
+    value: item.value,
+    provider: 'dashscope' as const,
+    isVision: DASHSCOPE_VISION_MODEL_SET.has(item.value),
+  })),
+  ...OPENAI_MODEL_OPTIONS.map((item) => ({
+    label: `OpenAI · ${item.label}`,
+    value: item.value,
+    provider: 'openai' as const,
+    isVision: OPENAI_VISION_MODEL_SET.has(item.value),
+  })),
 ]
+const LLM_MODEL_SET = new Set<string>(LLM_MODEL_OPTIONS.map((item) => item.value))
+const LLM_MODEL_OPTION_MAP = new Map<string, LlmModelOption>(
+  LLM_MODEL_OPTIONS.map((item) => [item.value, item]),
+)
+const MIN_LEFT_SIDER_WIDTH = 200
+const MAX_LEFT_SIDER_WIDTH = 600
+const MIN_RIGHT_SIDER_WIDTH = 260
+const MAX_RIGHT_SIDER_WIDTH = 800
+const MIN_CENTER_WIDTH = 420
+
+const normalizeLlmProvider = (value: unknown): LlmProviderValue => {
+  const normalized = String(value || '').trim().toLowerCase()
+  return normalized === 'openai' ? 'openai' : 'dashscope'
+}
+
+const resolveProviderByModel = (value: unknown): LlmProviderValue => {
+  if (typeof value === 'string') {
+    return LLM_MODEL_OPTION_MAP.get(value)?.provider || 'dashscope'
+  }
+  return 'dashscope'
+}
+
+const defaultModelByProvider = (provider: LlmProviderValue): LlmModelValue =>
+  provider === 'openai' ? DEFAULT_OPENAI_MODEL : DEFAULT_DASHSCOPE_MODEL
+
+const defaultVisionModelByProvider = (provider: LlmProviderValue): LlmModelValue =>
+  provider === 'openai' ? DEFAULT_OPENAI_VISION_MODEL : DEFAULT_DASHSCOPE_VISION_MODEL
+
+const normalizeLlmModel = (value: unknown, providerHint?: unknown): LlmModelValue => {
+  if (typeof value === 'string' && LLM_MODEL_SET.has(value)) {
+    return value
+  }
+  return defaultModelByProvider(normalizeLlmProvider(providerHint))
+}
+
+const isVisionModel = (value: string) => Boolean(LLM_MODEL_OPTION_MAP.get(value)?.isVision)
+
+const resolveModelLabel = (value: string) => LLM_MODEL_OPTION_MAP.get(value)?.label || value
+
+const estimateLabelUnits = (text: string) =>
+  Array.from(text).reduce((sum, ch) => sum + (/[\u4e00-\u9fff]/.test(ch) ? 1.85 : 1), 0)
+
+const calcCompactSelectWidth = (label: string, minPx: number, maxPx: number) => {
+  const width = Math.round(38 + estimateLabelUnits(label) * 8.6)
+  return `${Math.max(minPx, Math.min(maxPx, width))}px`
+}
+
+const readLastUsedKnowledgeBaseId = () => {
+  if (typeof window === 'undefined') return null
+  const raw = localStorage.getItem(DOC_STUDIO_LAST_USED_USER_KB_ID_STORAGE_KEY)
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed) || parsed <= 0) return null
+  return Math.floor(parsed)
+}
+
+const persistLastUsedKnowledgeBaseId = (kbId: number) => {
+  if (typeof window === 'undefined') return
+  const numeric = Number(kbId)
+  if (!Number.isFinite(numeric) || numeric <= 0) return
+  localStorage.setItem(
+    DOC_STUDIO_LAST_USED_USER_KB_ID_STORAGE_KEY,
+    String(Math.floor(numeric)),
+  )
+}
+
+const resolvePreferredKnowledgeBaseId = (
+  available: Array<{ id: number }>,
+  candidates: Array<number | null | undefined> = [],
+) => {
+  if (!available.length) return null
+  const preferred = [...candidates, readLastUsedKnowledgeBaseId()]
+  for (const candidate of preferred) {
+    const numeric = Number(candidate)
+    if (!Number.isFinite(numeric) || numeric <= 0) continue
+    const matched = available.find((item) => item.id === numeric)
+    if (matched) return matched.id
+  }
+  return available[0].id
+}
+
+const normalizeCount = (value: unknown) => {
+  const numeric = Number(value)
+  if (!Number.isFinite(numeric)) return 0
+  return Math.max(0, Math.round(numeric))
+}
+
+const normalizeWorkspacePath = (value: string) =>
+  value.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')
+
+const splitWorkspacePath = (path: string) => {
+  const normalized = normalizeWorkspacePath(path)
+  const segments = normalized.split('/').filter(Boolean)
+  const name = segments[segments.length - 1] || ''
+  const parentPath = segments.slice(0, -1).join('/')
+  return { normalized, name, parentPath }
+}
+
+const remapPathWithPrefix = (
+  inputPath: string,
+  sourcePath: string,
+  targetPath: string,
+  sourceType: 'file' | 'directory',
+) => {
+  if (!inputPath) return inputPath
+  if (sourceType === 'file') {
+    return inputPath === sourcePath ? targetPath : inputPath
+  }
+  if (inputPath === sourcePath) return targetPath
+  const sourcePrefix = `${sourcePath}/`
+  if (inputPath.startsWith(sourcePrefix)) {
+    return `${targetPath}/${inputPath.slice(sourcePrefix.length)}`
+  }
+  return inputPath
+}
 
 type ReadonlyFileNode = Readonly<
   Omit<DocStudioAPI.FileNode, 'children'>
@@ -350,14 +872,15 @@ const cloneFileNodes = (
     children: node.children ? cloneFileNodes(node.children) : undefined,
   }))
 
-const buildTreeData = (nodes: ReadonlyArray<any>): DataNode[] =>
+const buildTreeData = (
+  nodes: ReadonlyArray<ReadonlyFileNode>,
+  renderTitle: (node: ReadonlyFileNode) => React.ReactNode,
+): DataNode[] =>
   nodes.map((node) => ({
     key: node.path,
-    title: node.name,
-    icon:
-      node.type === 'directory' ? <FolderOpenOutlined /> : <FileTextOutlined />,
+    title: renderTitle(node),
     isLeaf: node.type === 'file',
-    children: node.children ? buildTreeData(node.children) : undefined,
+    children: node.children ? buildTreeData(node.children, renderTitle) : undefined,
   }))
 
 const LatexEditorPage = () => {
@@ -366,10 +889,14 @@ const LatexEditorPage = () => {
   const snap = useSnapshot(docStudioState)
   const [prompt, setPrompt] = useState('')
   const [chatLoading, setChatLoading] = useState(false)
-  const [asyncMode, setAsyncMode] = useState(true)
-  const [asyncRunId, setAsyncRunId] = useState<string | null>(null)
-  const [asyncRunStatus, setAsyncRunStatus] = useState<'idle' | 'running' | 'succeeded' | 'failed'>('idle')
+  const [reEditDraft, setReEditDraft] = useState<ReEditDraft | null>(null)
+  const [reEditSubmitting, setReEditSubmitting] = useState(false)
+  const asyncMode = true
   const [selections, setSelections] = useState<SelectionFragment[]>([])
+  const [fileMentions, setFileMentions] = useState<FileMentionFragment[]>([])
+  const [fileMentionQuery, setFileMentionQuery] = useState('')
+  const [fileMentionRange, setFileMentionRange] = useState<{ start: number; end: number } | null>(null)
+  const [fileMentionActiveIndex, setFileMentionActiveIndex] = useState(0)
   const [workspaceModalOpen, setWorkspaceModalOpen] = useState(false)
   const [newWorkspaceName, setNewWorkspaceName] = useState('')
   const [newWorkspaceType, setNewWorkspaceType] = useState<'latex' | 'markdown'>('latex')
@@ -379,56 +906,69 @@ const LatexEditorPage = () => {
   const [fileModalPath, setFileModalPath] = useState('')
   const [fileModalContent, setFileModalContent] = useState('')
   const [fileSubmitting, setFileSubmitting] = useState(false)
+  const [renameModalOpen, setRenameModalOpen] = useState(false)
+  const [renameSubmitting, setRenameSubmitting] = useState(false)
+  const [renameSourcePath, setRenameSourcePath] = useState('')
+  const [renameSourceType, setRenameSourceType] = useState<'file' | 'directory'>('file')
+  const [renameNameInput, setRenameNameInput] = useState('')
   const [uploading, setUploading] = useState(false)
-  const [rightTab, setRightTab] = useState<'chat' | 'history' | 'compile'>('chat')
-  const [lastPromptLog, setLastPromptLog] = useState<{
-    original: string
-    final: string
-    selectionsCount: number
-    timestamp: string
-  } | null>(null)
-  const [showPromptLog, setShowPromptLog] = useState(false)
-  const [customPromptPresets, setCustomPromptPresets] = useState<CustomPromptPreset[]>([])
-  const [presetModalOpen, setPresetModalOpen] = useState(false)
-  const [presetEditingId, setPresetEditingId] = useState<string | null>(null)
-  const [presetName, setPresetName] = useState('')
-  const [presetIntent, setPresetIntent] = useState<PromptIntent>('edit')
-  const [presetPrompt, setPresetPrompt] = useState('')
-  const [presetBindModel, setPresetBindModel] = useState(false)
-  const [presetFilter, setPresetFilter] = useState<'all' | PromptIntent>('all')
-  const [presetSearch, setPresetSearch] = useState('')
-  const [webSearchEnabled, setWebSearchEnabled] = useState(false)
-  const [webSearchSaving, setWebSearchSaving] = useState(false)
-  const [sessionBindValue, setSessionBindValue] = useState('')
-  const [sessionBindLoading, setSessionBindLoading] = useState(false)
-  const [llmProvider, setLlmProvider] = useState<'auto' | 'dashscope' | 'openai'>('auto')
-  const [llmModel, setLlmModel] = useState('')
-  const [llmTemperature, setLlmTemperature] = useState<number | null>(null)
-  const [llmMaxTokens, setLlmMaxTokens] = useState<number | null>(null)
+  const [chatImageAttachments, setChatImageAttachments] = useState<ChatImageAttachment[]>([])
+  const [chatImageProcessing, setChatImageProcessing] = useState(false)
+  const [historyDropdownOpen, setHistoryDropdownOpen] = useState(false)
+  const [historySearchKeyword, setHistorySearchKeyword] = useState('')
+  const [, setSessionTitleVersion] = useState(0)
+  const [rightTab, setRightTab] = useState<'chat' | 'history' | 'compile'>(() => {
+    if (typeof window === 'undefined') return 'chat'
+    const saved = localStorage.getItem('doc_studio_right_tab')
+    return (saved === 'chat' || saved === 'history' || saved === 'compile') ? saved : 'chat'
+  })
+  const [rightPanelClosed, setRightPanelClosed] = useState(() => {
+    if (typeof window === 'undefined') return false
+    return localStorage.getItem('doc_studio_right_panel_closed') === 'true'
+  })
+  const [leftPanelClosed, setLeftPanelClosed] = useState(() => {
+    if (typeof window === 'undefined') return false
+    return localStorage.getItem('doc_studio_left_panel_closed') === 'true'
+  })
+  const [llmModel, setLlmModel] = useState<LlmModelValue>(DEFAULT_OPENAI_MODEL)
+  const [interactionMode, setInteractionMode] = useState<InteractionMode>('agent')
+  const [ragEnabled, setRagEnabled] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return true
+    return localStorage.getItem('doc_studio_rag_enabled') !== 'false'
+  })
   const [llmOptionsReady, setLlmOptionsReady] = useState(false)
-  const [promptPresetsReady, setPromptPresetsReady] = useState(false)
-  const [workspaceFlagsReady, setWorkspaceFlagsReady] = useState(false)
+  const [debugModalOpen, setDebugModalOpen] = useState(false)
+  const [debugData, setDebugData] = useState<{
+    items: { message_id: string; content_length: number; newline_count: number; double_newline_count: number; triple_plus_newline_count: number; raw_repr_sample: string; raw_with_markers: string }[]
+    error?: string
+  } | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
-  const presetFileInputRef = useRef<HTMLInputElement | null>(null)
+  const chatImageInputRef = useRef<HTMLInputElement | null>(null)
   const editorRef = useRef<any>(null)
   const asyncStreamRef = useRef<EventSource | null>(null)
   const chatMessagesEndRef = useRef<HTMLDivElement | null>(null)
+  const chatMessagesContainerRef = useRef<HTMLDivElement | null>(null)
+  const chatInputContainerRef = useRef<HTMLDivElement | null>(null)
+  const reEditContainerRef = useRef<HTMLDivElement | null>(null)
+  const sessionTitlesRef = useRef<Record<string, string>>({})
+  const autoTitledSessionRef = useRef<Record<string, true>>({})
+  const [chatToolbarCompact, setChatToolbarCompact] = useState(false)
   const lastAutoScrollMessageIdRef = useRef<string | null>(null)
   const promptInputRef = useRef<TextAreaRef | null>(null)
+  const promptWrapperRef = useRef<HTMLDivElement | null>(null)
   const llmOptionsAppliedRef = useRef<string>('')
-  const promptPresetsAppliedRef = useRef<string>('')
-  const workspaceFlagsAppliedRef = useRef<string>('')
+  const saveInFlightRef = useRef(false)
   
-  // Diff 预览相关状�?
+  // Diff 审阅相关状态
+  const [agentDiffReviewOpen, setAgentDiffReviewOpen] = useState(false)
   const [diffModalOpen, setDiffModalOpen] = useState(false)
   const [allFileDiffs, setAllFileDiffs] = useState<DocStudioAPI.FileDiff[]>([])
   const [currentDiffIndex, setCurrentDiffIndex] = useState(0)
-  const [acceptedDiffs, setAcceptedDiffs] = useState<Set<number>>(new Set())
   const [lastOperationId, setLastOperationId] = useState<string | null>(null)
   const [diffOperationId, setDiffOperationId] = useState<string | null>(null)
+  const [diffModalContext, setDiffModalContext] = useState<'agent' | 'timeline'>('agent')
   const [undoingLastApply, setUndoingLastApply] = useState(false)
   const [diffReverting, setDiffReverting] = useState(false)
-  const [operationHistoryOpen, setOperationHistoryOpen] = useState(false)
   const [operationHistoryLoading, setOperationHistoryLoading] = useState(false)
   const [operationHistory, setOperationHistory] = useState<DocStudioAPI.OperationSummary[]>([])
   const [revertingOperationId, setRevertingOperationId] = useState<string | null>(null)
@@ -436,14 +976,35 @@ const LatexEditorPage = () => {
   const [llmHealth, setLlmHealth] = useState<DocStudioAPI.LlmHealthSummary | null>(null)
   const [metricsSummary, setMetricsSummary] = useState<DocStudioAPI.MetricsSummary | null>(null)
   const [systemStatusOpen, setSystemStatusOpen] = useState(false)
-  const [diffContentLoading, setDiffContentLoading] = useState(false)
   const [resolvedOriginal, setResolvedOriginal] = useState('')
   const [resolvedModified, setResolvedModified] = useState('')
   const [lineChanges, setLineChanges] = useState<any[]>([])
-  const [acceptedLineChanges, setAcceptedLineChanges] = useState<Set<number>>(new Set())
+  const [currentHunkIndex, setCurrentHunkIndex] = useState(0)
+  const [liveAgentStatus, setLiveAgentStatus] = useState('')
+  const [liveAgentTimeline, setLiveAgentTimeline] = useState<LiveTimelineEntry[]>([])
+  const [liveAgentPreviewText, setLiveAgentPreviewText] = useState('')
+  const [liveDeltaCharCount, setLiveDeltaCharCount] = useState(0)
+  const [liveAgentElapsedSec, setLiveAgentElapsedSec] = useState(0)
   const diffEditorRef = useRef<any>(null)
+  const diffHunkDecorationsRef = useRef<string[]>([])
+  const agentDiffReviewRef = useRef<AgentDiffReviewRef | null>(null)
+  const diffEditorListenerRef = useRef<Array<{ dispose: () => void }>>([])
+  const asyncRunResolvedRef = useRef(false)
+  const liveDeltaStartedRef = useRef(false)
+  const activeRunIdRef = useRef<string | null>(null)
+  const pendingSendRef = useRef<PendingSendDraft | null>(null)
+  const stopRequestedRef = useRef(false)
+  const skipNextComposerClearRef = useRef(false)
+  const seenLiveEventIdsRef = useRef<Set<string>>(new Set())
+  const handledInteractionIdsRef = useRef<Set<string>>(new Set())
+  const lastLiveEventSequenceRef = useRef(-1)
+  const liveOutputRef = useRef<HTMLDivElement | null>(null)
+  const livePreviewLines = useMemo(
+    () => buildLivePreviewLines(liveAgentPreviewText, 4, 64),
+    [liveAgentPreviewText],
+  )
   
-  // 可调整宽度的状态（使用 localStorage 持久化）
+  // 侧边栏宽度持久化到 localStorage
   const [leftSiderWidth, setLeftSiderWidth] = useState(() => {
     const saved = localStorage.getItem('latex_editor_left_sider_width')
     return saved ? parseInt(saved, 10) : 260
@@ -453,7 +1014,6 @@ const LatexEditorPage = () => {
     return saved ? parseInt(saved, 10) : 360
   })
   
-  // 拖拽状�?
   const [isDraggingLeft, setIsDraggingLeft] = useState(false)
   const [isDraggingRight, setIsDraggingRight] = useState(false)
   
@@ -471,17 +1031,10 @@ const LatexEditorPage = () => {
     if (!raw) return
     try {
       const parsed = JSON.parse(raw)
-      if (parsed?.llm_provider) {
-        setLlmProvider(parsed.llm_provider)
-      }
-      if (parsed?.llm_model) {
-        setLlmModel(parsed.llm_model)
-      }
-      if (typeof parsed?.llm_temperature === 'number') {
-        setLlmTemperature(parsed.llm_temperature)
-      }
-      if (typeof parsed?.llm_max_tokens === 'number') {
-        setLlmMaxTokens(parsed.llm_max_tokens)
+      setLlmModel(normalizeLlmModel(parsed?.llm_model, parsed?.llm_provider))
+      const parsedMode = parsed?.interaction_mode
+      if (parsedMode === 'ask' || parsedMode === 'agent') {
+        setInteractionMode(parsedMode)
       }
     } catch (error) {
       console.warn('Failed to load Doc Studio LLM options', error)
@@ -490,218 +1043,57 @@ const LatexEditorPage = () => {
 
   useEffect(() => {
     if (typeof window === 'undefined') return
+    const provider = resolveProviderByModel(llmModel)
     const payload = {
-      llm_provider: llmProvider,
+      llm_provider: provider,
       llm_model: llmModel,
-      llm_temperature: llmTemperature,
-      llm_max_tokens: llmMaxTokens,
+      interaction_mode: interactionMode,
     }
     localStorage.setItem('doc_studio_llm_options', JSON.stringify(payload))
-  }, [llmProvider, llmModel, llmTemperature, llmMaxTokens])
-
-  const persistCustomPromptPresets = useCallback((items: CustomPromptPreset[]) => {
-    setCustomPromptPresets(items)
-    if (typeof window !== 'undefined') {
-      localStorage.setItem(CUSTOM_PROMPT_STORAGE_KEY, JSON.stringify(items))
-    }
-  }, [])
-
-  const applyPromptPresetsFromConfig = useCallback((config?: Record<string, any>) => {
-    if (!config) return
-    const raw = Array.isArray(config.prompt_presets) ? config.prompt_presets : []
-    if (!raw.length) return
-    const allowedIntents: PromptIntent[] = ['edit', 'suggest', 'qa', 'citation', 'custom']
-    const sanitized: CustomPromptPreset[] = raw
-      .filter((item: any) => item && typeof item.label === 'string' && typeof item.prompt === 'string')
-      .map((item: any) => ({
-        id: item.id || generateId(),
-        label: item.label,
-        description: item.description || '自定义模�?,
-        prompt: item.prompt,
-        intent: allowedIntents.includes(item.intent) ? item.intent : 'custom',
-        llm_options: item.llm_options,
-        pinned: Boolean(item.pinned),
-      }))
-    if (!sanitized.length) return
-    promptPresetsAppliedRef.current = JSON.stringify(sanitized)
-    setCustomPromptPresets(sanitized)
-  }, [])
-
-  useEffect(() => {
-    if (typeof window === 'undefined') return
-    const raw = localStorage.getItem(CUSTOM_PROMPT_STORAGE_KEY)
-    if (!raw) return
-    try {
-      const parsed = JSON.parse(raw)
-      if (!Array.isArray(parsed)) return
-      const sanitized: CustomPromptPreset[] = parsed
-        .filter((item) => item && typeof item.label === 'string' && typeof item.prompt === 'string')
-        .map((item) => ({
-          id: item.id || generateId(),
-          label: item.label,
-          description: item.description || '自定义模�?,
-          prompt: item.prompt,
-          intent: item.intent || 'custom',
-          llm_options: item.llm_options,
-          pinned: Boolean(item.pinned),
-        }))
-      setCustomPromptPresets(sanitized)
-    } catch (error) {
-      console.warn('Failed to load custom prompt presets', error)
-    }
-  }, [])
+  }, [interactionMode, llmModel])
 
   const llmOptions = useMemo(() => {
-    const options: Record<string, any> = {}
-    if (llmProvider !== 'auto') {
-      options.llm_provider = llmProvider
+    const provider = resolveProviderByModel(llmModel)
+    return {
+      llm_provider: provider,
+      llm_model: llmModel,
+      interaction_mode: interactionMode,
     }
-    if (llmModel.trim()) {
-      options.llm_model = llmModel.trim()
-    }
-    if (typeof llmTemperature === 'number') {
-      options.llm_temperature = llmTemperature
-    }
-    if (typeof llmMaxTokens === 'number') {
-      options.llm_max_tokens = llmMaxTokens
-    }
-    return options
-  }, [llmProvider, llmModel, llmTemperature, llmMaxTokens])
+  }, [interactionMode, llmModel])
 
   const llmOptionsConfig = useMemo(() => {
-    const options: Record<string, any> = {
-      llm_provider: llmProvider,
-    }
-    if (llmModel.trim()) {
-      options.llm_model = llmModel.trim()
-    }
-    if (typeof llmTemperature === 'number') {
-      options.llm_temperature = llmTemperature
-    }
-    if (typeof llmMaxTokens === 'number') {
-      options.llm_max_tokens = llmMaxTokens
-    }
-    return options
-  }, [llmProvider, llmModel, llmTemperature, llmMaxTokens])
-
-  const promptPresetsConfig = useMemo(() => {
-    return customPromptPresets.map((preset) => ({
-      id: preset.id,
-      label: preset.label,
-      description: preset.description,
-      prompt: preset.prompt,
-      intent: preset.intent,
-      llm_options: preset.llm_options,
-      pinned: preset.pinned,
-    }))
-  }, [customPromptPresets])
-
-  const workspaceFlagsConfig = useMemo(() => {
+    const provider = resolveProviderByModel(llmModel)
     return {
-      enable_web_search: webSearchEnabled,
+      llm_provider: provider,
+      llm_model: llmModel,
+      interaction_mode: interactionMode,
     }
-  }, [webSearchEnabled])
-
-  const promptPresets = useMemo<PromptPreset[]>(() => {
-    const custom = customPromptPresets.map((preset) => ({
-      ...preset,
-      isCustom: true,
-    }))
-    return [...custom, ...quickPromptPresets]
-  }, [customPromptPresets])
-
-  const orderedPromptPresets = useMemo(() => {
-    return [...promptPresets].sort((a, b) => {
-      const pinScore = Number(Boolean(b.pinned)) - Number(Boolean(a.pinned))
-      if (pinScore !== 0) return pinScore
-      const customScore = Number(Boolean(b.isCustom)) - Number(Boolean(a.isCustom))
-      if (customScore !== 0) return customScore
-      return a.label.localeCompare(b.label, 'zh-CN')
-    })
-  }, [promptPresets])
-
-  const visiblePromptPresets = useMemo(() => {
-    let filtered = orderedPromptPresets
-    if (presetFilter === 'custom') {
-      filtered = filtered.filter((preset) => preset.isCustom)
-    } else if (presetFilter !== 'all') {
-      filtered = filtered.filter((preset) => preset.intent === presetFilter)
-    }
-    const keyword = presetSearch.trim().toLowerCase()
-    if (!keyword) return filtered
-    return filtered.filter((preset) => {
-      const promptText = typeof preset.prompt === 'string' ? preset.prompt : ''
-      const haystack = `${preset.label} ${preset.description || ''} ${promptText}`.toLowerCase()
-      return haystack.includes(keyword)
-    })
-  }, [orderedPromptPresets, presetFilter, presetSearch])
-
-  const groupedPromptPresets = useMemo(() => {
-    const groups: Record<PromptIntent, PromptPreset[]> = {
-      edit: [],
-      suggest: [],
-      qa: [],
-      citation: [],
-      custom: [],
-    }
-    for (const preset of visiblePromptPresets) {
-      groups[preset.intent]?.push(preset)
-    }
-    const order: PromptIntent[] = ['edit', 'suggest', 'qa', 'citation', 'custom']
-    return order
-      .map((intent) => ({ intent, items: groups[intent] }))
-      .filter((group) => group.items.length > 0)
-  }, [visiblePromptPresets])
+  }, [interactionMode, llmModel])
 
   const applyLlmOptionsFromConfig = useCallback(
     (config?: Record<string, any>) => {
       if (!config) return
       const raw =
         config.llm_options && typeof config.llm_options === 'object' ? config.llm_options : config
-      const hasAny =
-        raw.llm_provider ||
-        raw.llm_model ||
-        typeof raw.llm_temperature === 'number' ||
-        typeof raw.llm_max_tokens === 'number'
+      const hasAny = raw.llm_provider || raw.llm_model || raw.interaction_mode
       if (!hasAny) return
 
-      const nextProvider =
-        raw.llm_provider === 'dashscope' || raw.llm_provider === 'openai' || raw.llm_provider === 'auto'
-          ? raw.llm_provider
-          : llmProvider
-      const nextModel = typeof raw.llm_model === 'string' ? raw.llm_model : llmModel
-      const nextTemperature =
-        typeof raw.llm_temperature === 'number' ? raw.llm_temperature : llmTemperature
-      const nextMaxTokens =
-        typeof raw.llm_max_tokens === 'number' ? raw.llm_max_tokens : llmMaxTokens
+      const nextProvider = normalizeLlmProvider(raw.llm_provider)
+      const nextModel = normalizeLlmModel(raw.llm_model ?? llmModel, nextProvider)
+      const nextInteractionMode: InteractionMode =
+        raw.interaction_mode === 'ask' ? 'ask' : 'agent'
 
       const normalized = {
-        llm_provider: nextProvider,
+        llm_provider: resolveProviderByModel(nextModel),
         llm_model: nextModel,
-        llm_temperature: nextTemperature,
-        llm_max_tokens: nextMaxTokens,
+        interaction_mode: nextInteractionMode,
       }
       llmOptionsAppliedRef.current = JSON.stringify(normalized)
-      setLlmProvider(nextProvider)
-      setLlmModel(nextModel || '')
-      setLlmTemperature(typeof nextTemperature === 'number' ? nextTemperature : null)
-      setLlmMaxTokens(typeof nextMaxTokens === 'number' ? nextMaxTokens : null)
+      setLlmModel(nextModel)
+      setInteractionMode(nextInteractionMode)
     },
-    [llmProvider, llmModel, llmTemperature, llmMaxTokens],
+    [llmModel],
   )
-
-  const applyWorkspaceFlagsFromConfig = useCallback((config?: Record<string, any>) => {
-    if (!config) return
-    const enableWebSearch =
-      typeof config.enable_web_search === 'boolean' ? config.enable_web_search : false
-    const sessionId = typeof config.session_id === 'string' ? config.session_id : ''
-    const normalized = {
-      enable_web_search: enableWebSearch,
-    }
-    workspaceFlagsAppliedRef.current = JSON.stringify(normalized)
-    setWebSearchEnabled(enableWebSearch)
-    setSessionBindValue(sessionId)
-  }, [])
 
   useEffect(() => {
     setLlmOptionsReady(false)
@@ -709,14 +1101,13 @@ const LatexEditorPage = () => {
   }, [snap.workspaceId])
 
   useEffect(() => {
-    setPromptPresetsReady(false)
-    promptPresetsAppliedRef.current = ''
+    setOperationHistory([])
   }, [snap.workspaceId])
 
   useEffect(() => {
-    setWorkspaceFlagsReady(false)
-    workspaceFlagsAppliedRef.current = ''
-  }, [snap.workspaceId])
+    if (typeof window === 'undefined') return
+    localStorage.setItem('doc_studio_rag_enabled', ragEnabled ? 'true' : 'false')
+  }, [ragEnabled])
 
   useEffect(() => {
     if (!snap.workspaceId || !llmOptionsReady) return
@@ -726,61 +1117,44 @@ const LatexEditorPage = () => {
     updateWorkspace({
       workspaceId: snap.workspaceId,
       config: { llm_options: llmOptionsConfig },
+    }, {
+      // 模型/模式切换属于轻量偏好同步，不应触发全局 loading 闪烁
+      loading: false,
+      errorToast: false,
     }).catch((error) => {
       console.warn('Failed to persist LLM options', error)
     })
   }, [llmOptionsConfig, llmOptionsReady, snap.workspaceId])
-
-  useEffect(() => {
-    if (!snap.workspaceId || !promptPresetsReady) return
-    const serialized = JSON.stringify(promptPresetsConfig)
-    if (serialized === promptPresetsAppliedRef.current) return
-    promptPresetsAppliedRef.current = serialized
-    updateWorkspace({
-      workspaceId: snap.workspaceId,
-      config: { prompt_presets: promptPresetsConfig },
-    }).catch((error) => {
-      console.warn('Failed to persist prompt presets', error)
-    })
-  }, [promptPresetsConfig, promptPresetsReady, snap.workspaceId])
-
-  useEffect(() => {
-    if (!snap.workspaceId || !workspaceFlagsReady) return
-    const serialized = JSON.stringify(workspaceFlagsConfig)
-    if (serialized === workspaceFlagsAppliedRef.current) return
-    workspaceFlagsAppliedRef.current = serialized
-    setWebSearchSaving(true)
-    updateWorkspace({
-      workspaceId: snap.workspaceId,
-      config: workspaceFlagsConfig,
-    })
-      .catch((error) => {
-        console.warn('Failed to persist workspace flags', error)
-      })
-      .finally(() => {
-        setWebSearchSaving(false)
-      })
-  }, [workspaceFlagsConfig, workspaceFlagsReady, snap.workspaceId])
   const preferredFileFromUrl = useMemo(() => {
     if (typeof window === 'undefined') return ''
     const raw = new URLSearchParams(window.location.search).get('file')
     return raw ? raw.trim() : ''
   }, [])
+  const autoCompileFromUrl = useMemo(() => {
+    if (typeof window === 'undefined') return false
+    const raw = new URLSearchParams(window.location.search).get('auto_compile')
+    if (!raw) return false
+    const normalized = raw.trim().toLowerCase()
+    return normalized === '1' || normalized === 'true' || normalized === 'yes'
+  }, [])
+  const autoCompileHandledRef = useRef(false)
   const [knowledgeBases, setKnowledgeBases] = useState<DocStudioAPI.KnowledgeBaseSummary[]>([])
   const [knowledgeLoading, setKnowledgeLoading] = useState(false)
-  // 默认不使用任何知识库，由用户手动选择
+  // ??????????????????
   const [selectedKnowledgeBaseId, setSelectedKnowledgeBaseId] = useState<number | null>(null)
-  const [diffViewMode, setDiffViewMode] = useState<'split' | 'inline'>('split')
+  const selectedKnowledgeBaseIdRef = useRef<number | null>(null)
   const [feedbackSubmitting, setFeedbackSubmitting] = useState<Record<string, boolean>>({})
   
-  // 右键菜单状�?
+  // ???????
   const [contextMenuVisible, setContextMenuVisible] = useState(false)
   const [contextMenuPosition, setContextMenuPosition] = useState({ x: 0, y: 0 })
   const [contextMenuPath, setContextMenuPath] = useState<string>('')
-  const [contextMenuType, setContextMenuType] = useState<'file' | 'directory'>('file')
+  const [contextMenuType, setContextMenuType] = useState<ContextMenuTargetType>('file')
   
-  // Tree 展开状态（默认展开所有目录）
+  // Tree ??????????????
   const [expandedKeys, setExpandedKeys] = useState<React.Key[]>([])
+  const [treeFocusPath, setTreeFocusPath] = useState('')
+  const [hoveredTreePath, setHoveredTreePath] = useState('')
 
   const workspaceOptions = useMemo(
     () =>
@@ -790,11 +1164,14 @@ const LatexEditorPage = () => {
       })),
     [snap.workspaces],
   )
-
-  const treeData = useMemo(
-    () => buildTreeData(cloneFileNodes(snap.fileTree)),
-    [snap.fileTree],
-  )
+  const activeWorkspaceName = useMemo(() => {
+    const activeWorkspace = snap.workspaces.find((item) => item.workspaceId === snap.workspaceId)
+    const workspaceName = activeWorkspace?.name?.trim()
+    if (workspaceName) return workspaceName
+    if (snap.workspaceId?.trim()) return snap.workspaceId.trim()
+    return 'workspace'
+  }, [snap.workspaceId, snap.workspaces])
+  const explorerTitle = useMemo(() => activeWorkspaceName.toLocaleUpperCase(), [activeWorkspaceName])
 
   const isLatexWorkspace = useMemo(() => {
     const config = snap.workspaceConfig || {}
@@ -806,30 +1183,130 @@ const LatexEditorPage = () => {
     if (snap.activeFilePath?.toLowerCase().endsWith('.tex')) return true
     return false
   }, [snap.activeFilePath, snap.workspaceConfig])
-  
-  // 自动展开所有目�?
+
+  const activeFileExtension = useMemo(
+    () => getFileExtension(snap.activeFilePath),
+    [snap.activeFilePath],
+  )
+  const isMarkdownActiveFile = activeFileExtension === '.md' || activeFileExtension === '.markdown'
+  const isPlaintextActiveFile = activeFileExtension === '.txt'
+  const supportsCompilePanel = isLatexWorkspace || isMarkdownActiveFile
+  const compileActionTitle = useMemo(() => {
+    if (isPlaintextActiveFile) return 'TXT 文件无需编译'
+    if (isMarkdownActiveFile) return '检查 Markdown'
+    return '编译'
+  }, [isMarkdownActiveFile, isPlaintextActiveFile])
+
+  const isNotebookWorkspace = useMemo(() => {
+    const workspaceType = String(
+      snap.workspaceConfig?.workspace_type || snap.workspaceConfig?.workspaceType || '',
+    )
+      .trim()
+      .toLowerCase()
+    return snap.workspaceId === NOTEBOOK_WORKSPACE_ID || workspaceType === 'notebook'
+  }, [snap.workspaceConfig, snap.workspaceId])
+
+  const notebookLockedPaths = useMemo(() => {
+    if (!isNotebookWorkspace) return [] as string[]
+
+    const configLocked =
+      snap.workspaceConfig?.notebook_locked_paths || snap.workspaceConfig?.notebookLockedPaths
+    const configAutoDir = String(
+      snap.workspaceConfig?.notebook_auto_dir || snap.workspaceConfig?.notebookAutoDir || '',
+    )
+      .trim()
+      .toLowerCase()
+
+    const candidates = [
+      ...(Array.isArray(configLocked) ? configLocked : []),
+      ...NOTEBOOK_LOCKED_PATHS,
+      configAutoDir,
+    ]
+    const deduped: string[] = []
+    candidates.forEach((item) => {
+      const normalized = normalizeWorkspacePath(String(item || '').toLowerCase())
+      if (normalized && !deduped.includes(normalized)) {
+        deduped.push(normalized)
+      }
+    })
+    return deduped
+  }, [isNotebookWorkspace, snap.workspaceConfig])
+
+  const isNotebookSystemPath = useCallback(
+    (rawPath: string, options?: { protectParents?: boolean }) => {
+      if (!isNotebookWorkspace) return false
+      const normalizedPath = normalizeWorkspacePath(String(rawPath || '').toLowerCase())
+      if (!normalizedPath) return false
+      return notebookLockedPaths.some((lockedPath) => {
+        if (
+          normalizedPath === lockedPath ||
+          normalizedPath.startsWith(`${lockedPath}/`)
+        ) {
+          return true
+        }
+        if (options?.protectParents) {
+          return lockedPath.startsWith(`${normalizedPath}/`)
+        }
+        return false
+      })
+    },
+    [isNotebookWorkspace, notebookLockedPaths],
+  )
+
+  const clearAutoCompileFlagFromUrl = useCallback(() => {
+    if (typeof window === 'undefined') return
+    const url = new URL(window.location.href)
+    if (!url.searchParams.has('auto_compile')) return
+    url.searchParams.delete('auto_compile')
+    const nextSearch = url.searchParams.toString()
+    const nextUrl = `${url.pathname}${nextSearch ? `?${nextSearch}` : ''}${url.hash}`
+    window.history.replaceState({}, '', nextUrl)
+  }, [])
+
+  const expandedWorkspaceInitRef = useRef('')
+
+  // 仅在工作区首次加载文件树时默认展开目录；后续刷新保留用户的展开/收起状态。
   useEffect(() => {
-    const collectDirectoryKeys = (nodes: any[]): string[] => {
+    const collectDirectoryKeys = (nodes: ReadonlyArray<ReadonlyFileNode>): string[] => {
       const keys: string[] = []
       for (const node of nodes) {
         if (node.type === 'directory') {
           keys.push(node.path)
-          if (node.children) {
+          if (node.children?.length) {
             keys.push(...collectDirectoryKeys(node.children))
           }
         }
       }
       return keys
     }
-    
-    if (snap.fileTree && snap.fileTree.length > 0) {
-      const allDirKeys = collectDirectoryKeys(snap.fileTree as any)
-      setExpandedKeys(allDirKeys)
+
+    const workspaceKey = String(snap.workspaceId || '')
+    const allDirKeys = collectDirectoryKeys((snap.fileTree || []) as ReadonlyArray<ReadonlyFileNode>)
+
+    if (!allDirKeys.length) {
+      setExpandedKeys([])
+      if (!workspaceKey) {
+        expandedWorkspaceInitRef.current = ''
+      }
+      return
     }
-  }, [snap.fileTree])
+
+    const isFirstTreeLoadForWorkspace = expandedWorkspaceInitRef.current !== workspaceKey
+    setExpandedKeys((prev) => {
+      if (isFirstTreeLoadForWorkspace) {
+        return allDirKeys
+      }
+      const keySet = new Set(allDirKeys)
+      return prev.filter((key) => keySet.has(String(key)))
+    })
+
+    if (isFirstTreeLoadForWorkspace) {
+      expandedWorkspaceInitRef.current = workspaceKey
+    }
+  }, [snap.fileTree, snap.workspaceId])
   const knowledgeBaseOptions = useMemo(
     () =>
-      // 确保只显示非临时知识库（双重保险�?
+      // ??????????????????
       knowledgeBases
         .filter((item) => !item.is_ephemeral)
         .map((item) => ({
@@ -842,19 +1319,148 @@ const LatexEditorPage = () => {
     () => knowledgeBases.find((item) => item.id === selectedKnowledgeBaseId) || null,
     [knowledgeBases, selectedKnowledgeBaseId],
   )
-
-  const totalSelectionChars = useMemo(
-    () => selections.reduce((sum, item) => sum + item.text.length, 0),
-    [selections],
+  const modeSelectWidth = useMemo(
+    () => calcCompactSelectWidth(interactionMode === 'ask' ? 'Ask' : 'Agent', 58, 106),
+    [interactionMode],
   )
+  const modelSelectWidth = useMemo(() => {
+    const label = resolveModelLabel(llmModel)
+    return calcCompactSelectWidth(label, 108, 220)
+  }, [llmModel])
+  const ragSelectWidth = useMemo(() => {
+    const label = selectedKnowledgeBase?.name || '知识库'
+    return calcCompactSelectWidth(label, 66, 150)
+  }, [selectedKnowledgeBase?.name])
+  const headerTabItems = useMemo(
+    () =>
+      snap.openedFiles.map((path) => ({
+        key: path,
+        label: (
+          <span className="doc-studio__header-tab-label" title={path}>
+            {path.split('/').pop()}
+          </span>
+        ),
+      })),
+    [snap.openedFiles],
+  )
+  const compileLogGroups = useMemo<CompileLogGroup[]>(() => {
+    const logs = snap.compileResult?.data?.logs
+    if (!Array.isArray(logs) || !logs.length) return []
+    const grouped: Array<CompileLogGroup & { signature: string }> = []
+    logs.forEach((item, index) => {
+      const command = typeof item?.command === 'string' ? item.command : 'unknown'
+      const returncode = Number.isFinite(Number(item?.returncode)) ? Number(item.returncode) : -1
+      const rawLog = typeof item?.log === 'string' ? item.log : ''
+      const highlightedLines = rawLog
+        .split('\n')
+        .map((line: string) => line.trim())
+        .filter(
+          (line: string) =>
+            !!line &&
+            (line.startsWith('!')
+              || line.includes('Error')
+              || line.includes('Warning')
+              || line.includes('Missing character')),
+        )
+      const normalizedBody = highlightedLines.length > 0
+        ? highlightedLines.join('\n')
+        : rawLog.trim()
+      const signature = `${command}::${returncode}::${normalizedBody}`
+      const previous = grouped[grouped.length - 1]
+      if (previous && previous.signature === signature) {
+        previous.count += 1
+        return
+      }
+      grouped.push({
+        command,
+        returncode,
+        log: rawLog,
+        count: 1,
+        firstIndex: index,
+        signature,
+      })
+    })
+    return grouped.map(({ signature: _signature, ...rest }) => rest)
+  }, [snap.compileResult?.data?.logs])
+
+  const compileFormat = useMemo<'latex' | 'markdown' | 'unknown'>(() => {
+    const explicit = String(snap.compileResult?.data?.compile_format || '').toLowerCase()
+    if (explicit === 'latex') return 'latex'
+    if (explicit === 'markdown') return 'markdown'
+    if (snap.compileResult?.data?.pdf_path) return 'latex'
+    if (isMarkdownActiveFile) return 'markdown'
+    if (isLatexWorkspace) return 'latex'
+    return 'unknown'
+  }, [
+    isLatexWorkspace,
+    isMarkdownActiveFile,
+    snap.compileResult?.data?.compile_format,
+    snap.compileResult?.data?.pdf_path,
+  ])
+
+  const markdownCompilePreviewContent = useMemo(() => {
+    if (compileFormat !== 'markdown') return ''
+    const fromResult = snap.compileResult?.data?.preview_source
+    if (typeof fromResult === 'string' && fromResult.length > 0) return fromResult
+    const targetPath = String(snap.compileResult?.data?.target_path || '').trim()
+    if (targetPath && snap.files[targetPath]) {
+      return String(snap.files[targetPath]?.content || '')
+    }
+    const activePath = String(snap.activeFilePath || '').trim()
+    if (isMarkdownActiveFile && activePath) {
+      return String(snap.files[activePath]?.content || '')
+    }
+    return ''
+  }, [
+    compileFormat,
+    isMarkdownActiveFile,
+    snap.activeFilePath,
+    snap.compileResult?.data?.preview_source,
+    snap.compileResult?.data?.target_path,
+    snap.files,
+  ])
+
+  const workspaceFilePaths = useMemo(
+    () => collectAllFilePaths((snap.fileTree || []) as DocStudioAPI.FileNode[]),
+    [snap.fileTree],
+  )
+  const fileMentionCandidates = useMemo(() => {
+    if (!fileMentionRange) return []
+    const keyword = fileMentionQuery.trim().toLowerCase()
+    const scored = workspaceFilePaths
+      .map((path) => {
+        const normalizedPath = path.toLowerCase()
+        const basename = path.split('/').pop()?.toLowerCase() || normalizedPath
+        let score = 3
+        if (!keyword) {
+          score = 0
+        } else if (basename.startsWith(keyword)) {
+          score = 0
+        } else if (basename.includes(keyword)) {
+          score = 1
+        } else if (normalizedPath.includes(keyword)) {
+          score = 2
+        }
+        return { path, score }
+      })
+      .filter((item) => item.score < 3)
+      .sort((a, b) => {
+        if (a.score !== b.score) return a.score - b.score
+        return a.path.localeCompare(b.path)
+      })
+      .slice(0, MAX_FILE_MENTION_CANDIDATES)
+      .map((item) => item.path)
+    return scored
+  }, [fileMentionQuery, fileMentionRange, workspaceFilePaths])
+  const fileMentionDropdownOpen = Boolean(fileMentionRange && fileMentionCandidates.length > 0)
 
   const insertPlaceholderAtCursor = useCallback((placeholder: string) => {
-    // 统一行为：始终在末尾追加占位符，前面有内容时用空格分�?
+    // ????????????????????????????
     setPrompt((prev) => {
       if (!prev || prev.trim() === '') {
         return placeholder
       }
-      // 如果末尾已经有空格或换行，不再添�?
+      // ??????????????????
       if (prev.endsWith(' ') || prev.endsWith('\n')) {
         return `${prev}${placeholder}`
       }
@@ -863,10 +1469,10 @@ const LatexEditorPage = () => {
   }, [])
 
   const addSelectionSnippet = useCallback(() => {
-    // 直接从编辑器读取当前选择，避免状态延迟问�?
+    // ??????????????????????
     const editor = editorRef.current
     if (!editor) {
-      message.warning('编辑器未就绪')
+      message.warning('编辑器尚未就绪')
       return
     }
     
@@ -874,37 +1480,67 @@ const LatexEditorPage = () => {
     const targetRange = selectionRanges.find((range: any) => !range.isEmpty())
     
     if (!targetRange) {
-      message.warning('请先在编辑器中选中内容')
+      message.warning('请先在编辑器中选择文本')
       return
     }
     
     const model = editor.getModel()
     if (!model) {
-      message.warning('编辑器内容未加载')
+      message.warning('编辑器模型未就绪')
       return
     }
     
-    const text = model.getValueInRange(targetRange).trim()
-    if (!text) {
-      message.warning('选中内容为空')
+    const rawText = model.getValueInRange(targetRange).trim()
+    if (!rawText) {
+      message.warning('选区为空')
       return
     }
+    let text = rawText
+    if (rawText.length > MAX_SELECTION_TEXT_CHARS) {
+      text = rawText.slice(0, MAX_SELECTION_TEXT_CHARS)
+      message.info(`单段选区过长，已自动截断到 ${MAX_SELECTION_TEXT_CHARS} 字符`)
+    }
     
-    // 动态获取当前片段数�?
+    // ???????????
     setSelections((prev) => {
+      if (prev.length >= MAX_SELECTION_COUNT) {
+        message.warning(`最多可引用 ${MAX_SELECTION_COUNT} 段选区`)
+        return prev
+      }
+      const start = model.getOffsetAt(targetRange.getStartPosition())
+      const end = model.getOffsetAt(targetRange.getEndPosition())
+      const existed = prev.find(
+        (item) =>
+          item.filePath === snap.activeFilePath &&
+          item.start === start &&
+          item.end === end &&
+          item.text === text,
+      )
+      if (existed) {
+        insertPlaceholderAtCursor(existed.placeholder)
+        requestAnimationFrame(() => {
+          promptInputDivRef.current?.focus()
+        })
+        return prev
+      }
+      const currentTotalChars = prev.reduce((sum, item) => sum + item.text.length, 0)
+      if (currentTotalChars + text.length > MAX_SELECTION_TOTAL_CHARS) {
+        message.warning(`引用总长度不能超过 ${MAX_SELECTION_TOTAL_CHARS} 字符`)
+        return prev
+      }
+
       const placeholder = `@selection${prev.length + 1}`
       const snippet: SelectionFragment = {
         id: generateId(),
-        start: model.getOffsetAt(targetRange.getStartPosition()),
-        end: model.getOffsetAt(targetRange.getEndPosition()),
+        start,
+        end,
         text,
         filePath: snap.activeFilePath,
         placeholder,
       }
       insertPlaceholderAtCursor(placeholder)
-      message.success(`已添加片段：${placeholder}`)
       
-      // 添加片段后，聚焦到输入框（延迟确�?DOM 更新完成�?
+      // ??????????????????DOM ??????
       requestAnimationFrame(() => {
         promptInputDivRef.current?.focus()
       })
@@ -918,11 +1554,11 @@ const LatexEditorPage = () => {
       if (!selections.length) return
       const filtered = selections.filter((item) => item.placeholder !== placeholder)
       if (filtered.length === selections.length) return
-      let updatedPrompt = prompt.replace(new RegExp(escapeRegExp(placeholder), 'g'), '')
+      let updatedPrompt = prompt.replace(new RegExp(`${escapeRegExp(placeholder)}(?!\\d)`, 'g'), '')
       const normalized = filtered.map((item, idx) => {
         const newPlaceholder = `@selection${idx + 1}`
         if (item.placeholder !== newPlaceholder) {
-          const regex = new RegExp(escapeRegExp(item.placeholder), 'g')
+          const regex = new RegExp(`${escapeRegExp(item.placeholder)}(?!\\d)`, 'g')
           updatedPrompt = updatedPrompt.replace(regex, newPlaceholder)
         }
         return { ...item, placeholder: newPlaceholder }
@@ -933,11 +1569,87 @@ const LatexEditorPage = () => {
     [prompt, selections],
   )
 
-  // �?prompt 文本转换为带标签�?HTML（用�?contentEditable�?
+  const removeFileMention = useCallback(
+    (placeholder: string) => {
+      if (!fileMentions.length) return
+      const filtered = fileMentions.filter((item) => item.placeholder !== placeholder)
+      if (filtered.length === fileMentions.length) return
+      let updatedPrompt = prompt.replace(new RegExp(`${escapeRegExp(placeholder)}(?!\\d)`, 'g'), '')
+      const normalized = filtered.map((item, idx) => {
+        const newPlaceholder = `@file${idx + 1}`
+        if (item.placeholder !== newPlaceholder) {
+          const regex = new RegExp(`${escapeRegExp(item.placeholder)}(?!\\d)`, 'g')
+          updatedPrompt = updatedPrompt.replace(regex, newPlaceholder)
+        }
+        return { ...item, placeholder: newPlaceholder }
+      })
+      setFileMentions(normalized)
+      setPrompt(updatedPrompt)
+    },
+    [fileMentions, prompt],
+  )
+
+  const clearFileMentionSuggest = useCallback(() => {
+    setFileMentionQuery('')
+    setFileMentionRange(null)
+    setFileMentionActiveIndex(0)
+  }, [])
+
+  const addFileMentionFromCandidate = useCallback(
+    (filePath: string) => {
+      if (!filePath.trim()) return
+      const existing = fileMentions.find((item) => item.filePath === filePath)
+      let placeholder: string = existing?.placeholder || ''
+      if (!placeholder) {
+        if (fileMentions.length >= MAX_FILE_MENTION_COUNT) {
+          message.warning(`最多可引用 ${MAX_FILE_MENTION_COUNT} 个文件`)
+          return
+        }
+        placeholder = `@file${fileMentions.length + 1}`
+        setFileMentions((prev) => [
+          ...prev,
+          {
+            id: `file-mention-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+            filePath,
+            placeholder,
+          },
+        ])
+      }
+      if (fileMentionRange) {
+        setPrompt((prev) => {
+          const start = Math.max(0, Math.min(fileMentionRange.start, prev.length))
+          const end = Math.max(start, Math.min(fileMentionRange.end, prev.length))
+          return `${prev.slice(0, start)}${placeholder}${prev.slice(end)}`
+        })
+      } else {
+        insertPlaceholderAtCursor(placeholder)
+      }
+      clearFileMentionSuggest()
+      requestAnimationFrame(() => {
+        promptInputDivRef.current?.focus()
+      })
+    },
+    [clearFileMentionSuggest, fileMentionRange, fileMentions, insertPlaceholderAtCursor],
+  )
+
+  const removeComposerMentionToken = useCallback(
+    (placeholder: string) => {
+      if (placeholder.startsWith('@selection')) {
+        removeSelectionSnippet(placeholder)
+        return
+      }
+      if (placeholder.startsWith('@file')) {
+        removeFileMention(placeholder)
+      }
+    },
+    [removeFileMention, removeSelectionSnippet],
+  )
+
+  // ??prompt ??????????HTML????contentEditable??
   const promptInputDivRef = useRef<HTMLDivElement | null>(null)
   const lastPromptLengthRef = useRef(0)
   
-  // �?contentEditable div 中精确提取文本（避免 innerText 产生意外换行�?
+  // ??contentEditable div ?????????? innerText ????????
   const extractTextFromDiv = useCallback((el: HTMLElement): string => {
     let text = ''
     const extract = (node: ChildNode) => {
@@ -946,19 +1658,19 @@ const LatexEditorPage = () => {
       } else if (node.nodeType === Node.ELEMENT_NODE) {
         const element = node as HTMLElement
         if (element.classList.contains('doc-studio__prompt-tag')) {
-          // 占位符标签：读取�?data-placeholder
+          // ??????????data-placeholder
           text += element.getAttribute('data-placeholder') || ''
         } else if (element.tagName === 'BR') {
-          // 保留用户手动输入的换�?
+          // ????????????
           text += '\n'
         } else if (element.tagName === 'DIV') {
-          // div 通常表示新行
+          // div ??????
           if (text && !text.endsWith('\n')) {
             text += '\n'
           }
           element.childNodes.forEach(extract)
         } else {
-          // 其他元素递归处理
+          // ????????
           element.childNodes.forEach(extract)
         }
       }
@@ -966,28 +1678,72 @@ const LatexEditorPage = () => {
     el.childNodes.forEach(extract)
     return text
   }, [])
+
+  useEffect(() => {
+    const trailing = extractTrailingFileMentionQuery(prompt)
+    if (!trailing) {
+      setFileMentionQuery('')
+      setFileMentionRange(null)
+      setFileMentionActiveIndex(0)
+      return
+    }
+    const rawQuery = String(trailing.query || '')
+    if (/^(selection|file)\d+$/i.test(rawQuery)) {
+      setFileMentionQuery('')
+      setFileMentionRange(null)
+      setFileMentionActiveIndex(0)
+      return
+    }
+    setFileMentionQuery(rawQuery)
+    setFileMentionRange({ start: trailing.atStart, end: trailing.end })
+  }, [prompt])
+
+  useEffect(() => {
+    if (!fileMentionDropdownOpen) {
+      setFileMentionActiveIndex(0)
+      return
+    }
+    setFileMentionActiveIndex((prev) => Math.max(0, Math.min(prev, fileMentionCandidates.length - 1)))
+  }, [fileMentionCandidates.length, fileMentionDropdownOpen])
+
+  useEffect(() => {
+    if (!fileMentionDropdownOpen) return
+    const handleOutsidePointerDown = (event: MouseEvent | TouchEvent) => {
+      const target = event.target as Node | null
+      const wrapper = promptWrapperRef.current
+      if (!wrapper || !target) return
+      if (wrapper.contains(target)) return
+      clearFileMentionSuggest()
+    }
+    document.addEventListener('mousedown', handleOutsidePointerDown, true)
+    document.addEventListener('touchstart', handleOutsidePointerDown, true)
+    return () => {
+      document.removeEventListener('mousedown', handleOutsidePointerDown, true)
+      document.removeEventListener('touchstart', handleOutsidePointerDown, true)
+    }
+  }, [clearFileMentionSuggest, fileMentionDropdownOpen])
   
   useEffect(() => {
     const el = promptInputDivRef.current
     if (!el) return
     
-    // 只有当内容真正改变时才更新（避免光标跳动�?
+    // ??????????????????????
     const currentText = extractTextFromDiv(el)
     if (currentText === prompt) return
     
-    // 判断是否是追加操作（新内容比旧内容长�?
+    // ????????????????????
     const isAppending = prompt.length > lastPromptLengthRef.current
     lastPromptLengthRef.current = prompt.length
     
-    // 构建HTML
+    // ??HTML
     let text = prompt
     if (!text) {
       el.innerHTML = ''
       return
     }
     
-    // 构建 HTML：先找出所有占位符的位置，然后分段处理
-    const placeholderPattern = /@selection\d+/g
+    // ?? HTML???????????????????
+    const placeholderPattern = new RegExp(COMPOSER_PLACEHOLDER_REGEX.source, 'g')
     const placeholders: { match: string; index: number }[] = []
     let match: RegExpExecArray | null
     
@@ -995,12 +1751,12 @@ const LatexEditorPage = () => {
       placeholders.push({ match: match[0], index: match.index })
     }
     
-    // 分段构建 HTML
+    // ???? HTML
     let html = ''
     let lastIndex = 0
     
     placeholders.forEach(({ match, index }) => {
-      // 添加占位符前的普通文本（需要转义并处理换行�?
+      // ???????????????????????
       if (index > lastIndex) {
         const plainText = text.slice(lastIndex, index)
         const escapedText = plainText
@@ -1011,13 +1767,16 @@ const LatexEditorPage = () => {
         html += escapedText
       }
       
-      // 添加占位符标签（单行，无空格�?
-      html += `<span class="doc-studio__prompt-tag" contenteditable="false" data-placeholder="${match}"><span class="anticon anticon-file-text"><svg viewBox="64 64 896 896" focusable="false" width="10" height="10" fill="currentColor"><path d="M854.6 288.6L639.4 73.4c-6-6-14.1-9.4-22.6-9.4H192c-17.7 0-32 14.3-32 32v832c0 17.7 14.3 32 32 32h640c17.7 0 32-14.3 32-32V311.3c0-8.5-3.4-16.7-9.4-22.7zM790.2 326H602V137.8L790.2 326zm1.8 562H232V136h302v216a42 42 0 0042 42h216v494z"></path></svg></span><span>${match}</span><span class="anticon anticon-close prompt-tag-close" data-action="remove-${match}"><svg viewBox="64 64 896 896" focusable="false" width="9" height="9" fill="currentColor"><path d="M563.8 512l262.5-312.9c4.4-5.2.7-13.1-6.1-13.1h-79.8c-4.7 0-9.2 2.1-12.3 5.7L511.6 449.8 295.1 191.7c-3-3.6-7.5-5.7-12.3-5.7H203c-6.8 0-10.5 7.9-6.1 13.1L459.4 512 196.9 824.9A7.95 7.95 0 00203 838h79.8c4.7 0 9.2-2.1 12.3-5.7l216.5-258.1 216.5 258.1c3 3.6 7.5 5.7 12.3 5.7h79.8c6.8 0 10.5-7.9 6.1-13.1L563.8 512z"></path></svg></span></span>`
+      // ????????????????
+      const tagClass = match.startsWith('@file')
+        ? 'doc-studio__prompt-tag doc-studio__prompt-tag--file'
+        : 'doc-studio__prompt-tag'
+      html += `<span class="${tagClass}" contenteditable="false" data-placeholder="${match}"><span class="anticon anticon-file-text"><svg viewBox="64 64 896 896" focusable="false" width="10" height="10" fill="currentColor"><path d="M854.6 288.6L639.4 73.4c-6-6-14.1-9.4-22.6-9.4H192c-17.7 0-32 14.3-32 32v832c0 17.7 14.3 32 32 32h640c17.7 0 32-14.3 32-32V311.3c0-8.5-3.4-16.7-9.4-22.7zM790.2 326H602V137.8L790.2 326zm1.8 562H232V136h302v216a42 42 0 0042 42h216v494z"></path></svg></span><span>${match}</span><span class="anticon anticon-close prompt-tag-close" data-action="remove-${match}"><svg viewBox="64 64 896 896" focusable="false" width="9" height="9" fill="currentColor"><path d="M563.8 512l262.5-312.9c4.4-5.2.7-13.1-6.1-13.1h-79.8c-4.7 0-9.2 2.1-12.3 5.7L511.6 449.8 295.1 191.7c-3-3.6-7.5-5.7-12.3-5.7H203c-6.8 0-10.5 7.9-6.1 13.1L459.4 512 196.9 824.9A7.95 7.95 0 00203 838h79.8c4.7 0 9.2-2.1 12.3-5.7l216.5-258.1 216.5 258.1c3 3.6 7.5 5.7 12.3 5.7h79.8c6.8 0 10.5-7.9 6.1-13.1L563.8 512z"></path></svg></span></span>`
       
       lastIndex = index + match.length
     })
     
-    // 添加最后剩余的文本
+    // ?????????
     if (lastIndex < text.length) {
       const plainText = text.slice(lastIndex)
       const escapedText = plainText
@@ -1030,21 +1789,21 @@ const LatexEditorPage = () => {
     
     el.innerHTML = html
     
-    // 把光标放在末尾（对于追加操作，这是正确的行为�?
+    // ????????????????????????
     if (isAppending) {
       requestAnimationFrame(() => {
         try {
           const selection = window.getSelection()
           if (selection && el.childNodes.length > 0) {
             const range = document.createRange()
-            // 找到最后一个子节点
+            // ?????????
             const lastChild = el.childNodes[el.childNodes.length - 1]
             
             if (lastChild.nodeType === Node.TEXT_NODE) {
-              // 如果最后一个是文本节点，光标放在文本末�?
+              // ?????????????????????
               range.setStart(lastChild, (lastChild as Text).length)
             } else {
-              // 如果最后一个不是文本节点（比如是标签），光标放在它之后
+              // ???????????????????????????
               range.setStartAfter(lastChild)
             }
             
@@ -1053,26 +1812,16 @@ const LatexEditorPage = () => {
             selection.addRange(range)
           }
         } catch (e) {
-          // 忽略光标定位错误
+          // ????????
         }
       })
     }
-  }, [prompt, selections])
+  }, [fileMentions, prompt, selections])
 
   const currentFileBuffer = snap.activeFilePath
     ? snap.files[snap.activeFilePath]
     : undefined
 
-  const intentStatus = snap.agentStatus.intentType
-  const planStatus = snap.agentStatus.plan
-  const planTotalSteps = planStatus?.steps?.length ?? 0
-  const planCompletedSteps = planStatus
-    ? Math.min(planStatus.completed_steps ?? 0, planTotalSteps)
-    : 0
-  const planNextStep =
-    planStatus && planCompletedSteps < planTotalSteps ? planStatus.steps[planCompletedSteps] : null
-  const planPercent =
-    planTotalSteps > 0 ? Math.round((planCompletedSteps / planTotalSteps) * 100) : 0
   const agentWarnings = snap.agentStatus.warnings ?? []
 
   const llmMetricEntries = useMemo(() => {
@@ -1100,60 +1849,27 @@ const LatexEditorPage = () => {
     return { tokens, cost }
   }, [llmMetricEntries])
 
-  const formatStepTime = useCallback((ts?: number) => {
-    if (!ts) return ''
-    return new Date(ts * 1000).toLocaleTimeString()
-  }, [])
-
-  const historyItems = useMemo(() => {
-    const labelMap: Record<string, string> = {
-      thought: '思�?,
-      action: '执行',
-      result: '结果',
-      reflection: '反�?,
-      finish: '完成',
-    }
-    return snap.executionHistory.map((step, index) => {
-      const type = (step.type || '').toLowerCase()
-      let color = 'gray'
-      if (type === 'action') color = 'blue'
-      else if (type === 'result') color = step.result?.success === false ? 'red' : 'green'
-      else if (type === 'reflection') color = 'purple'
-      else if (type === 'finish') color = 'gray'
-      const label = labelMap[type] || step.type || `步骤 ${index + 1}`
-      const timestampLabel = formatStepTime(step.timestamp)
-      return {
-        color,
-        children: (
-          <div className="doc-studio__history-card">
-            <div className="doc-studio__history-head">
-              <Text strong>{`${index + 1}. ${label}`}</Text>
-              {step.tool && <Tag>{step.tool}</Tag>}
-              {timestampLabel && <Text type="secondary">{timestampLabel}</Text>}
-            </div>
-            <div className="doc-studio__history-content">{step.content}</div>
-            {step.result?.summary && (
-              <Text className="doc-studio__history-summary" type="secondary">
-                {step.result.summary}
-              </Text>
-            )}
-            {step.result?.error && (
-              <Alert
-                type="error"
-                showIcon
-                message="工具执行失败"
-                description={step.result.error}
-                style={{ marginTop: 8 }}
-              />
-            )}
-          </div>
-        ),
-      }
+  const activeFileTimeline = useMemo(() => {
+    if (!snap.activeFilePath) return []
+    const normalizedActivePath = normalizeWorkspacePath(snap.activeFilePath)
+    const list = operationHistory.filter((item) =>
+      Array.isArray(item.modified_files) &&
+      item.modified_files.some(
+        (filePath) => normalizeWorkspacePath(String(filePath || '')) === normalizedActivePath,
+      ),
+    )
+    return [...list].sort((a, b) => {
+      const left = Date.parse(a.timestamp || '')
+      const right = Date.parse(b.timestamp || '')
+      if (!Number.isNaN(left) && !Number.isNaN(right)) return right - left
+      if (!Number.isNaN(right)) return 1
+      if (!Number.isNaN(left)) return -1
+      return b.operation_id.localeCompare(a.operation_id)
     })
-  }, [snap.executionHistory, formatStepTime])
+  }, [operationHistory, snap.activeFilePath])
 
   const openFile = useCallback(
-    async (path: string, forceReload = false) => {
+    async (path: string, forceReload = false, silent = false) => {
       if (!docStudioState.workspaceId) return
       if (!forceReload) {
         const existing = docStudioState.files[path]
@@ -1163,43 +1879,152 @@ const LatexEditorPage = () => {
         }
       }
       docStudioActions.setActiveFile(path)
+      if (!silent) {
       docStudioActions.setFileLoading(path, true)
+      }
       try {
         const file = await fetchFileContent({
           workspaceId: docStudioState.workspaceId,
           path,
+        }, {
+          loading: false,
+          errorToast: false,
         })
         docStudioActions.setFileContent(path, file.content, file.encoding)
       } catch (error) {
-        message.error(getErrorMessage(error))
+        showRequestError(error)
       } finally {
         docStudioActions.setFileLoading(path, false)
       }
     },
-    [],
+    [showRequestError],
+  )
+
+  const revealEditorSelectionByOffset = useCallback((startOffset: number, endOffset: number) => {
+    const editor = editorRef.current
+    const model = editor?.getModel?.()
+    if (!editor || !model) return false
+    const totalLength = Number(model.getValueLength?.() ?? model.getValue?.().length ?? 0)
+    if (!Number.isFinite(totalLength) || totalLength < 0) return false
+    const safeStart = Math.max(0, Math.min(Math.floor(startOffset), totalLength))
+    const safeEnd = Math.max(safeStart, Math.min(Math.floor(endOffset), totalLength))
+    const startPos = model.getPositionAt(safeStart)
+    const endPos = model.getPositionAt(safeEnd)
+    if (!startPos || !endPos) return false
+    const monaco = typeof window !== 'undefined' ? (window as any).monaco : undefined
+    const range = monaco?.Range
+      ? new monaco.Range(
+          startPos.lineNumber,
+          startPos.column,
+          endPos.lineNumber,
+          endPos.column,
+        )
+      : {
+          startLineNumber: startPos.lineNumber,
+          startColumn: startPos.column,
+          endLineNumber: endPos.lineNumber,
+          endColumn: endPos.column,
+        }
+    editor.setSelection(range)
+    if (typeof editor.revealRangeInCenter === 'function') {
+      editor.revealRangeInCenter(range)
+    } else if (typeof editor.revealLineInCenter === 'function') {
+      editor.revealLineInCenter(startPos.lineNumber)
+    }
+    editor.focus()
+    return true
+  }, [])
+
+  const handleMentionTagClick = useCallback(
+    async (target: MentionTagClickTarget) => {
+      const filePath = String(target.filePath || '').trim()
+      if (!filePath) {
+        message.warning('引用缺少文件路径，无法跳转')
+        return
+      }
+      await openFile(filePath, false, true)
+      if (target.type !== 'selection') return
+      const start = Number(target.start)
+      const end = Number(target.end)
+      if (!Number.isFinite(start) || start < 0) {
+        message.warning('该选区缺少位置信息，已为你打开文件')
+        return
+      }
+      const selectionEnd = Number.isFinite(end) && end >= start ? end : start
+      let positioned = false
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        if (revealEditorSelectionByOffset(start, selectionEnd)) {
+          positioned = true
+          break
+        }
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((resolve) => window.setTimeout(resolve, 50))
+      }
+      if (!positioned) {
+        message.warning('已打开文件，但暂时无法定位到该选区')
+      }
+    },
+    [openFile, revealEditorSelectionByOffset],
   )
 
   const loadWorkspaceChatHistory = useCallback(
-    async (workspaceId: string, config: Record<string, any>) => {
-      const sessionId = config?.session_id ?? config?.sessionId
+    async (_workspaceId: string, config: Record<string, any>, sessionIdOverride?: string | null) => {
+      const sessionId = sessionIdOverride ?? config?.session_id ?? config?.sessionId
       if (!sessionId) {
         docStudioActions.setChatMessages([])
         return
       }
       try {
-        const { data } = await listSessionMessages({
+        const data = await listWorkspaceMessages({
+          workspaceId: _workspaceId,
           sessionId: String(sessionId),
           page: 1,
           pageSize: 200,
+        }, {
+          loading: false,
+          errorToast: false,
         })
         const items = Array.isArray(data?.items) ? data.items : []
         const messages: DocStudioChatMessage[] = []
         items.forEach((item) => {
           const retrievalData = parseRetrievalContent(item.retrieval_content)
-          const source = retrievalData?.source
-          const sourceWorkspace = retrievalData?.workspace_id
-          if (source && source !== 'doc_studio') return
-          if (sourceWorkspace && sourceWorkspace !== workspaceId) return
+          const historyImagesRaw = Array.isArray(retrievalData?.images)
+            ? retrievalData.images
+            : Array.isArray(retrievalData?.image_attachments)
+              ? retrievalData.image_attachments
+              : Array.isArray(retrievalData?.imageAttachments)
+                ? retrievalData.imageAttachments
+                : []
+          const historyImages: ChatImageAttachment[] = historyImagesRaw
+            .map((img: any, idx: number) => {
+              const dataUrl =
+                typeof img?.dataUrl === 'string'
+                  ? img.dataUrl
+                  : typeof img?.data_url === 'string'
+                    ? img.data_url
+                    : ''
+              if (!dataUrl) return null
+              const sizeRaw = Number(img?.size || 0)
+              return {
+                id: String(img?.id || `${item.message_id || 'history'}-img-${idx + 1}`),
+                name: String(img?.name || `image-${idx + 1}`),
+                mimeType: String(img?.mimeType || img?.mime_type || 'image/png'),
+                size: Number.isFinite(sizeRaw) && sizeRaw > 0 ? sizeRaw : 0,
+                dataUrl,
+              }
+            })
+            .filter((img: ChatImageAttachment | null): img is ChatImageAttachment => Boolean(img))
+          const historySelections = normalizeSelectionFragments(
+            retrievalData?.selections
+              ?? retrievalData?.selection_fragments
+              ?? retrievalData?.selectionFragments
+              ?? retrievalData?.selection,
+          )
+          const historyFileMentions = normalizeFileMentionFragments(
+            retrievalData?.file_mentions
+              ?? retrievalData?.fileMentions
+              ?? retrievalData?.files,
+          )
           const createdAt = item.create_time ? Date.parse(item.create_time) : Date.now()
           const baseId = item.message_id || `${createdAt}-${Math.random()}`
           if (item.user_question) {
@@ -1210,9 +2035,16 @@ const LatexEditorPage = () => {
               createdAt,
               meta: {
                 messageId: item.message_id,
-                source,
-                workspaceId: sourceWorkspace,
+                source: retrievalData?.source,
+                workspaceId: retrievalData?.workspace_id,
                 traceId: retrievalData?.trace_id,
+                runId: retrievalData?.run_id || retrievalData?.runId,
+                imageCount: historyImages.length || 0,
+                images: historyImages,
+                selectionCount: historySelections.length || 0,
+                selections: historySelections,
+                fileMentionCount: historyFileMentions.length || 0,
+                fileMentions: historyFileMentions,
               },
             })
           }
@@ -1224,48 +2056,73 @@ const LatexEditorPage = () => {
               createdAt: createdAt + 1,
               meta: {
                 messageId: item.message_id,
-                source,
-                workspaceId: sourceWorkspace,
+                source: retrievalData?.source,
+                workspaceId: retrievalData?.workspace_id,
                 traceId: retrievalData?.trace_id,
+                runId: retrievalData?.run_id || retrievalData?.runId,
               },
             })
           }
         })
         docStudioActions.setChatMessages(messages)
+        const sid = String(sessionId)
+        const firstUserPrompt = messages.find((msg) => msg.role === 'user')?.content
+        const autoTitle = buildSessionTitleFromPrompt(firstUserPrompt)
+        const currentTitle = String(sessionTitlesRef.current[sid] || '').trim()
+        if (autoTitle && (!currentTitle || isPlaceholderSessionTitle(currentTitle))) {
+          sessionTitlesRef.current = {
+            ...sessionTitlesRef.current,
+            [sid]: autoTitle,
+          }
+          setSessionTitleVersion((value) => value + 1)
+          if (!autoTitledSessionRef.current[sid]) {
+            autoTitledSessionRef.current[sid] = true
+            void renameSession(
+              { sessionId: sid, sessionName: autoTitle },
+              { loading: false, errorToast: false },
+            ).catch(() => {})
+          }
+        }
       } catch (error) {
-        console.warn('Failed to load session messages', error)
+        console.warn('[DocStudio] 加载对话历史失败:', error)
+        docStudioActions.setChatMessages([])
       }
     },
-    [],
+    [showRequestError],
   )
+
+  const isRestoringWorkspaceRef = useRef(false)
 
   const loadWorkspaceFiles = useCallback(
     async (workspaceId: string, shouldOpenDefault = true) => {
       try {
-        const data = await fetchWorkspaceFiles({ workspaceId })
+        isRestoringWorkspaceRef.current = true
+        const data = await fetchWorkspaceFiles({ workspaceId }, {
+          loading: false,
+          errorToast: false,
+        })
         docStudioActions.setFileTree(data.files)
         docStudioActions.setWorkspaceConfig(data.config)
         applyLlmOptionsFromConfig(data.config)
-        applyPromptPresetsFromConfig(data.config)
-        applyWorkspaceFlagsFromConfig(data.config)
+        // Cursor 逻辑：有 session_id 则加载持久化对话；无则显示「新对话」
         await loadWorkspaceChatHistory(workspaceId, data.config)
         setLlmOptionsReady(true)
-        setPromptPresetsReady(true)
-        setWorkspaceFlagsReady(true)
         
-        // 调试：打印文件树结构
+        // 打印文件树（用于调试）
         const printFileTree = (nodes: any[], indent = '') => {
           for (const node of nodes) {
-            console.log(`${indent}${node.type === 'directory' ? '📁' : '📄'} ${node.name} (${node.path})`)
+            console.log(
+              `${indent}${node.type === 'directory' ? '目录' : '文件'} ${node.name} (${node.path})`,
+            )
             if (node.children && node.children.length > 0) {
               printFileTree(node.children, indent + '  ')
             }
           }
         }
-        console.log('📂 文件树已更新:')
+        console.log('当前文件树:')
         printFileTree(data.files)
 
-        // 【Cursor 风格】从 localStorage 恢复该工作区上次打开的文件标签页
+        // 从 localStorage 恢复上次打开的文件
         if (shouldOpenDefault) {
           const allPaths = collectAllFilePaths(data.files)
           const preferredFile =
@@ -1289,12 +2146,12 @@ const LatexEditorPage = () => {
               const validOpened = parsed.openedFiles?.filter((p) => allPaths.includes(p)) ?? []
 
               if (validOpened.length > 0) {
-                // 依次打开所有上次的文件标签
+                // ?????????????
                 for (const path of validOpened) {
                   // eslint-disable-next-line no-await-in-loop
                   await openFile(path)
                 }
-                // 如果有记录激活文件且仍然存在，则切换到该文件
+                // 恢复上次激活的文件
                 if (parsed.activeFilePath && validOpened.includes(parsed.activeFilePath)) {
                   docStudioActions.setActiveFile(parsed.activeFilePath)
                 }
@@ -1302,56 +2159,68 @@ const LatexEditorPage = () => {
               }
             }
           } catch (e) {
-            // 恢复失败不影响正常逻辑，忽略即�?
             // eslint-disable-next-line no-console
-            console.warn('恢复工作区文件状态失�?, e)
+            console.warn('恢复工作区状态失败', e)
           }
 
-          // 如果没有可恢复的状态，就不要自动打开任何文件（空标签栏）
           if (!restored) {
             docStudioActions.setActiveFile('')
           }
         }
       } catch (error) {
-        message.error(getErrorMessage(error))
+        showRequestError(error)
+      } finally {
+        isRestoringWorkspaceRef.current = false
       }
     },
     [
       applyLlmOptionsFromConfig,
-      applyPromptPresetsFromConfig,
-      applyWorkspaceFlagsFromConfig,
       openFile,
       loadWorkspaceChatHistory,
       preferredFileFromUrl,
     ],
   )
 
+  const syncWorkspaceFileTree = useCallback(
+    async (workspaceId: string) => {
+      if (!workspaceId) return
+      try {
+        const data = await fetchWorkspaceFiles(
+          { workspaceId },
+          {
+            loading: false,
+            errorToast: false,
+          },
+        )
+        docStudioActions.setFileTree(data.files)
+      } catch (error) {
+        console.warn('[DocStudio] 静默刷新文件树失败', error)
+      }
+    },
+    [],
+  )
+
   const loadKnowledgeBases = useCallback(async () => {
     setKnowledgeLoading(true)
     try {
-      const data = await listAgentKnowledgeBases()
+      const data = await listAgentKnowledgeBases({
+        loading: false,
+        errorToast: false,
+      })
       const list = Array.isArray(data) ? data : []
-      // 过滤掉临时知识库（ephemeral），只显示永久知识库
+      // ?????????ephemeral??????????
       const permanentBases = list.filter((item) => !item.is_ephemeral)
       setKnowledgeBases(permanentBases)
-      // 不自动选择知识库，保持用户当前选择（如果有�?
-      setSelectedKnowledgeBaseId((current) => {
-        // 如果当前选择的知识库仍然存在，保持选择
-        if (current && permanentBases.some((item) => item.id === current)) {
-          return current
-        }
-        // 如果 URL 参数指定了知识库且仍然存在，使用�?
-        if (
-          preferredKbFromUrl &&
-          permanentBases.some((item) => item.id === preferredKbFromUrl)
-        ) {
-          return preferredKbFromUrl
-        }
-        // 否则不选择任何知识库（null），由用户手动选择
-        return null
-      })
+      const nextKbId = resolvePreferredKnowledgeBaseId(permanentBases, [
+        selectedKnowledgeBaseIdRef.current,
+        preferredKbFromUrl,
+      ])
+      setSelectedKnowledgeBaseId(nextKbId)
+      if (nextKbId != null) {
+        persistLastUsedKnowledgeBaseId(nextKbId)
+      }
     } catch (error) {
-      message.error(getErrorMessage(error))
+      showRequestError(error)
       if (asyncMode) {
         setChatLoading(false)
       }
@@ -1360,11 +2229,449 @@ const LatexEditorPage = () => {
     }
   }, [preferredKbFromUrl])
 
+  useEffect(() => {
+    selectedKnowledgeBaseIdRef.current = selectedKnowledgeBaseId
+  }, [selectedKnowledgeBaseId])
+
+  const chatSessionIds = useMemo(() => {
+    const ids = snap.workspaceConfig?.session_ids
+    const list = Array.isArray(ids) ? ids : []
+    return list.filter((id): id is string => id !== '__new__')
+  }, [snap.workspaceConfig?.session_ids])
+
+  const hasNewConversationSlot = useMemo(() => {
+    const ids = snap.workspaceConfig?.session_ids
+    return Array.isArray(ids) && ids.includes('__new__')
+  }, [snap.workspaceConfig?.session_ids])
+
+  const closedSessionIds = useMemo(() => {
+    const ids = snap.workspaceConfig?.session_history
+    return Array.isArray(ids) ? ids : []
+  }, [snap.workspaceConfig?.session_history])
+
+  const currentChatSessionId = snap.workspaceConfig?.session_id ?? snap.workspaceConfig?.sessionId ?? null
+
+  const isPlaceholderSessionTitle = useCallback((value?: string) => {
+    const text = String(value || '').trim()
+    if (!text) return true
+    if (/^session[_\s-]/i.test(text)) return true
+    if (/^session kb \d+$/i.test(text)) return true
+    if (/^session for kb \d+$/i.test(text)) return true
+    if (/^message-only session /i.test(text)) return true
+    if (/^对话 [a-z0-9_-]{4,}$/i.test(text)) return true
+    return false
+  }, [])
+
+  const buildSessionTitleFromPrompt = useCallback((rawPrompt?: string) => {
+    const normalized = String(rawPrompt || '')
+      .replace(/\[已附带图片\s*\d+\s*张\]/g, ' ')
+      .replace(/@selection\d+/gi, ' ')
+      .replace(/@file\d+/gi, ' ')
+      .replace(/`+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+    if (!normalized) return ''
+
+    const politePrefixRegex = /^(请你|请帮我|请|帮我|麻烦你|麻烦|可以帮我|可以|能不能|能否|我想|我需要|我希望)\s*/i
+    const weakStartRegex = /^(这里|这段|这个|当前|现在)\s*/i
+    const actionHints = [
+      '修改',
+      '改写',
+      '重写',
+      '润色',
+      '优化',
+      '修复',
+      '排查',
+      '分析',
+      '总结',
+      '解释',
+      '完善',
+      '重构',
+      '补充',
+      '新增',
+      '删除',
+      '调整',
+      'replace',
+      'rewrite',
+      'refactor',
+      'fix',
+      'summarize',
+      'analyze',
+      'optimize',
+    ]
+
+    const sanitizeSegment = (segment: string) =>
+      segment
+        .replace(politePrefixRegex, '')
+        .replace(weakStartRegex, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+
+    const segments = normalized
+      .split(/[。！？!?；;：:\n]/)
+      .map((item) => sanitizeSegment(item))
+      .filter(Boolean)
+
+    let candidate = segments.find((item) =>
+      actionHints.some((hint) => item.toLowerCase().includes(hint.toLowerCase())),
+    ) || segments[0] || normalized
+
+    if (candidate.length < 10 && segments.length > 1) {
+      candidate = `${candidate} · ${segments[1]}`
+    }
+
+    candidate = candidate
+      .replace(/^[，,。.；;：:\-\s]+/, '')
+      .replace(/[，,。.；;：:\-\s]+$/, '')
+      .trim()
+
+    if (!candidate) candidate = normalized
+
+    const softLimit = 36
+    const hardLimit = 120
+    if (candidate.length > hardLimit) {
+      return `${candidate.slice(0, hardLimit).trim()}...`
+    }
+    if (candidate.length > softLimit) {
+      return `${candidate.slice(0, softLimit).trim()}...`
+    }
+    return candidate
+  }, [])
+
+  useEffect(() => {
+    if (!historyDropdownOpen && historySearchKeyword) {
+      setHistorySearchKeyword('')
+    }
+  }, [historyDropdownOpen, historySearchKeyword])
+
+  useEffect(() => {
+    sessionTitlesRef.current = {}
+    autoTitledSessionRef.current = {}
+  }, [snap.workspaceId])
+
+  useEffect(() => {
+    if (!snap.workspaceId) return
+    const allSessionIds = Array.from(new Set([...chatSessionIds, ...closedSessionIds].filter(Boolean)))
+    if (!allSessionIds.length) return
+    let cancelled = false
+    ;(async () => {
+      try {
+        const { data } = await listSessions(
+          { surface: 'doc_studio' },
+          { loading: false, errorToast: false },
+        )
+        if (cancelled) return
+        const rows = Array.isArray(data?.sessions) ? data.sessions : []
+        const sessionNameMap = new Map(
+          rows.map((item) => [String(item.session_id || ''), String(item.session_name || '').trim()]),
+        )
+
+        const syncedTitles: Record<string, string> = {}
+        allSessionIds.forEach((sid) => {
+          const storedTitle = String(sessionNameMap.get(sid) || '').trim()
+          if (storedTitle && sessionTitlesRef.current[sid] !== storedTitle) {
+            syncedTitles[sid] = storedTitle
+          }
+        })
+        if (Object.keys(syncedTitles).length > 0) {
+          sessionTitlesRef.current = {
+            ...sessionTitlesRef.current,
+            ...syncedTitles,
+          }
+          setSessionTitleVersion((value) => value + 1)
+        }
+
+        const autoPatchedTitles: Record<string, string> = {}
+        for (const sid of allSessionIds) {
+          if (cancelled) return
+          if (!sessionNameMap.has(sid)) continue
+          if (autoTitledSessionRef.current[sid]) continue
+          const knownTitle = String(
+            autoPatchedTitles[sid] || syncedTitles[sid] || sessionTitlesRef.current[sid] || '',
+          ).trim()
+          if (knownTitle && !isPlaceholderSessionTitle(knownTitle)) continue
+          try {
+            const { data: historyData } = await listSessionMessages(
+              {
+                sessionId: sid,
+                page: 1,
+                pageSize: 20,
+              },
+              { loading: false, errorToast: false },
+            )
+            if (cancelled) return
+            const firstPrompt = (Array.isArray(historyData?.items) ? historyData.items : []).find(
+              (item) => typeof item.user_question === 'string' && item.user_question.trim(),
+            )?.user_question
+            const autoTitle = buildSessionTitleFromPrompt(firstPrompt)
+            if (!autoTitle) continue
+            autoPatchedTitles[sid] = autoTitle
+            autoTitledSessionRef.current[sid] = true
+            void renameSession(
+              { sessionId: sid, sessionName: autoTitle },
+              { loading: false, errorToast: false },
+            ).catch(() => {})
+          } catch {
+            // 忽略单个会话标题补齐失败
+          }
+        }
+        if (!cancelled && Object.keys(autoPatchedTitles).length > 0) {
+          sessionTitlesRef.current = {
+            ...sessionTitlesRef.current,
+            ...autoPatchedTitles,
+          }
+          setSessionTitleVersion((value) => value + 1)
+        }
+      } catch {
+        // 忽略会话标题拉取失败，不影响主流程
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [snap.workspaceId, chatSessionIds, closedSessionIds, isPlaceholderSessionTitle, buildSessionTitleFromPrompt])
+
+  // 当处于新对话状态且 session_ids 中无 __new__ 占位符时，调用 bind(null) 以插入占位符，便于后续「替换」逻辑
+  // 注意：仅在已有其他会话时插入 __new__，避免与「首次发送」竞态（用户发送时 create+bind 会插入新会话，若 bind(null) 晚返回会覆盖为 [__new__, newSessionId]）
+  useEffect(() => {
+    if (!snap.workspaceId || currentChatSessionId) return
+    if (hasNewConversationSlot) return
+    if (chatSessionIds.length === 0) return
+    bindWorkspaceSession(
+      { workspaceId: snap.workspaceId, sessionId: null },
+      { loading: false, errorToast: false },
+    )
+      .then((res) => {
+        const cur = docStudioState.workspaceConfig
+        const curSessionId = cur?.session_id ?? cur?.sessionId
+        if (curSessionId) return
+        docStudioActions.setWorkspaceConfig(res.config)
+      })
+      .catch(() => {})
+  }, [snap.workspaceId, currentChatSessionId, hasNewConversationSlot, chatSessionIds.length])
+
+  /** Cursor 风格：点击 + 新建对话 → 切换到「新对话」占位，不立即创建 session，等用户发送首条消息时再创建 */
+  const handleNewChat = useCallback(async () => {
+    if (!snap.workspaceId) return
+    try {
+      docStudioActions.setChatMessages([])
+      const detail = await bindWorkspaceSession(
+        { workspaceId: snap.workspaceId, sessionId: null },
+        { loading: false, errorToast: false },
+      )
+      docStudioActions.setWorkspaceConfig(detail.config)
+    } catch {
+      docStudioActions.setWorkspaceConfig({ ...snap.workspaceConfig, session_id: null })
+    }
+  }, [snap.workspaceId, snap.workspaceConfig])
+
+  const handleSwitchChatSession = useCallback(
+    async (sessionId: string) => {
+      if (!snap.workspaceId) return
+      try {
+        await bindWorkspaceSession(
+          { workspaceId: snap.workspaceId, sessionId },
+          { loading: false, errorToast: false },
+        )
+        const data = await fetchWorkspaceFiles({ workspaceId: snap.workspaceId }, {
+          loading: false,
+          errorToast: false,
+        })
+        docStudioActions.setWorkspaceConfig(data.config)
+        await loadWorkspaceChatHistory(snap.workspaceId, data.config, sessionId)
+      } catch (e) {
+        showRequestError(e)
+      }
+    },
+    [snap.workspaceId, loadWorkspaceChatHistory],
+  )
+
+  /** 关闭 tab：仅从打开列表移除，加入历史记录，可随时从历史重新打开 */
+  const handleCloseChatSession = useCallback(
+    async (sessionId: string) => {
+      if (!snap.workspaceId) return
+      const ids = chatSessionIds.filter((id) => id !== sessionId)
+      const nextCurrent = ids[0] ?? null
+      const idsForConfig = nextCurrent ? ids : [...ids, '__new__']
+      const history = [...closedSessionIds]
+      if (!history.includes(sessionId)) {
+        history.unshift(sessionId)
+      }
+      const newConfig = {
+        ...snap.workspaceConfig,
+        session_ids: idsForConfig,
+        session_id: nextCurrent,
+        session_history: history,
+      }
+      try {
+        await updateWorkspace(
+          { workspaceId: snap.workspaceId, config: newConfig },
+          { loading: false, errorToast: false },
+        )
+        docStudioActions.setWorkspaceConfig(newConfig)
+        if (currentChatSessionId === sessionId) {
+          if (nextCurrent) {
+            await loadWorkspaceChatHistory(snap.workspaceId, newConfig, nextCurrent)
+          } else {
+            docStudioActions.setChatMessages([])
+          }
+        }
+      } catch (e) {
+        showRequestError(e)
+      }
+    },
+    [
+      snap.workspaceId,
+      snap.workspaceConfig,
+      chatSessionIds,
+      closedSessionIds,
+      currentChatSessionId,
+      loadWorkspaceChatHistory,
+    ],
+  )
+
+  /** 从历史记录重新打开对话 */
+  const handleReopenChatSession = useCallback(
+    async (sessionId: string) => {
+      if (!snap.workspaceId) return
+      let ids = chatSessionIds.includes(sessionId) ? chatSessionIds : [sessionId, ...chatSessionIds]
+      if (!ids.includes('__new__')) ids = [...ids, '__new__']
+      const history = closedSessionIds.filter((id) => id !== sessionId)
+      const newConfig = {
+        ...snap.workspaceConfig,
+        session_ids: ids,
+        session_id: sessionId,
+        session_history: history,
+      }
+      try {
+        await updateWorkspace(
+          { workspaceId: snap.workspaceId, config: newConfig },
+          { loading: false, errorToast: false },
+        )
+        docStudioActions.setWorkspaceConfig(newConfig)
+        await loadWorkspaceChatHistory(snap.workspaceId, newConfig, sessionId)
+      } catch (e) {
+        showRequestError(e)
+      }
+    },
+    [snap.workspaceId, snap.workspaceConfig, chatSessionIds, closedSessionIds, loadWorkspaceChatHistory],
+  )
+
+  /** 彻底删除：删除后端数据，从打开列表和历史中移除，不可恢复 */
+  const handleDeleteChatSession = useCallback(
+    async (sessionId: string) => {
+      if (!snap.workspaceId) return
+      try {
+        try {
+          await removeSession({ sessionId }, { loading: false, errorToast: false })
+        } catch (e: any) {
+          const status = e?.response?.status
+          if (status !== 404) {
+            throw e
+          }
+          // 历史残留会话：后端已不存在，允许继续做本地配置清理。
+          console.warn('[DocStudio] 删除会话时发现后端不存在，继续清理本地引用', {
+            sessionId,
+            detail: e?.response?.data?.detail,
+          })
+        }
+        const ids = chatSessionIds.filter((id) => id !== sessionId)
+        const history = closedSessionIds.filter((id) => id !== sessionId)
+        const nextCurrent = ids[0] ?? null
+        const idsForConfig = nextCurrent ? ids : [...ids, '__new__']
+        const newConfig = {
+          ...snap.workspaceConfig,
+          session_ids: idsForConfig,
+          session_id: nextCurrent,
+          session_history: history,
+        }
+        await updateWorkspace(
+          { workspaceId: snap.workspaceId, config: newConfig },
+          { loading: false, errorToast: false },
+        )
+        docStudioActions.setWorkspaceConfig(newConfig)
+        if (currentChatSessionId === sessionId) {
+          if (nextCurrent) {
+            await loadWorkspaceChatHistory(snap.workspaceId, newConfig, nextCurrent)
+          } else {
+            docStudioActions.setChatMessages([])
+          }
+        }
+      } catch (e) {
+        showRequestError(e)
+      }
+    },
+    [
+      snap.workspaceId,
+      snap.workspaceConfig,
+      chatSessionIds,
+      closedSessionIds,
+      currentChatSessionId,
+      loadWorkspaceChatHistory,
+    ],
+  )
+
+  const handleRenameChatSession = useCallback(
+    (sessionId: string, initialTitle?: string) => {
+      setHistoryDropdownOpen(false)
+      const fallbackTitle = String(sessionTitlesRef.current[sessionId] || '').trim()
+      const presetValue = String(initialTitle || fallbackTitle || '').trim()
+      let draftName = presetValue
+      Modal.confirm({
+        title: '重命名对话',
+        okText: '保存',
+        cancelText: '取消',
+        closable: true,
+        maskClosable: true,
+        content: (
+          <Input
+            autoFocus
+            maxLength={120}
+            defaultValue={presetValue}
+            placeholder="请输入对话名称"
+            onChange={(event) => {
+              draftName = event.target.value
+            }}
+          />
+        ),
+        onOk: async () => {
+          const nextName = String(draftName || '').trim()
+          if (!nextName) {
+            message.warning('会话名称不能为空')
+            throw new Error('__invalid_session_name__')
+          }
+          try {
+            const { data } = await renameSession(
+              { sessionId, sessionName: nextName },
+              { loading: false, errorToast: false },
+            )
+            const finalName = String(data?.sessionName || nextName).trim() || nextName
+            sessionTitlesRef.current = {
+              ...sessionTitlesRef.current,
+              [sessionId]: finalName,
+            }
+            autoTitledSessionRef.current[sessionId] = true
+            setSessionTitleVersion((value) => value + 1)
+            setHistoryDropdownOpen(false)
+            message.success('对话名称已更新')
+          } catch (error) {
+            showRequestError(error)
+            throw error
+          }
+        },
+      })
+    },
+    [showRequestError],
+  )
+
   const loadWorkspaces = useCallback(
     async (targetWorkspace?: string) => {
       docStudioActions.setWorkspaceLoading(true)
       try {
-        const list = await listWorkspaces()
+        const list = await listWorkspaces({
+          loading: false,
+          errorToast: false,
+        })
         docStudioActions.setWorkspaces(list)
         const preferred =
           targetWorkspace ||
@@ -1376,7 +2683,7 @@ const LatexEditorPage = () => {
           await loadWorkspaceFiles(preferred)
         }
       } catch (error) {
-        message.error(getErrorMessage(error))
+        showRequestError(error)
       } finally {
         docStudioActions.setWorkspaceLoading(false)
       }
@@ -1393,14 +2700,33 @@ const LatexEditorPage = () => {
   }, [loadKnowledgeBases])
 
   useEffect(() => {
-    if (!isLatexWorkspace && rightTab === 'compile') {
+    if (!supportsCompilePanel && rightTab === 'compile') {
       setRightTab('chat')
     }
-  }, [isLatexWorkspace, rightTab])
+  }, [supportsCompilePanel, rightTab])
 
-  // 【Cursor 风格】将每个工作区的打开文件状态持久化�?localStorage
   useEffect(() => {
-    if (!snap.workspaceId) return
+    try {
+      localStorage.setItem('doc_studio_right_tab', rightTab)
+    } catch {
+      // ignore
+    }
+  }, [rightTab])
+
+  useEffect(() => {
+    const el = chatInputContainerRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver((entries) => {
+      const { width } = entries[0]?.contentRect ?? {}
+      setChatToolbarCompact(typeof width === 'number' && width < 340)
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [rightTab])
+
+  // 持久化工作区状态到 localStorage（恢复过程中不覆盖，避免 setWorkspaceId 清空后立即写入空数据）
+  useEffect(() => {
+    if (!snap.workspaceId || isRestoringWorkspaceRef.current) return
     const storageKey = `latex_editor_workspace_state_${snap.workspaceId}`
     const payload = {
       openedFiles: snap.openedFiles,
@@ -1409,14 +2735,13 @@ const LatexEditorPage = () => {
     try {
       localStorage.setItem(storageKey, JSON.stringify(payload))
     } catch (e) {
-      // 本地存储失败不影响正常使用，忽略即可
       // eslint-disable-next-line no-console
-      console.warn('保存工作区文件状态失�?, e)
+      console.warn('保存工作区状态失败', e)
     }
   }, [snap.workspaceId, snap.openedFiles, snap.activeFilePath])
 
-  // 移除自动�?workspaceConfig 加载知识库的逻辑
-  // 知识库选择应该由用户手动设置，不自动继承工作区配置
+  // ??????workspaceConfig ????????
+  // ?????????????????????????
   // useEffect(() => {
   //   const workspaceKbRaw =
   //     (snap.workspaceConfig?.knowledge_base_id ??
@@ -1431,7 +2756,7 @@ const LatexEditorPage = () => {
       ? snap.chatMessages[snap.chatMessages.length - 1]?.id ?? null
       : null
 
-  // 仅在新增消息时自动滚动到底部，避免用户查看历史时被打�?
+  // ????????????????????????????
   useEffect(() => {
     if (!lastChatMessageId) {
       lastAutoScrollMessageIdRef.current = null
@@ -1441,32 +2766,96 @@ const LatexEditorPage = () => {
       return
     }
     lastAutoScrollMessageIdRef.current = lastChatMessageId
-    chatMessagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    const container = chatMessagesContainerRef.current
+    if (container) {
+      container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' })
+    }
   }, [lastChatMessageId])
 
-  // 处理左侧分割线拖�?
+  useEffect(() => {
+    if (!chatLoading) return
+    const container = chatMessagesContainerRef.current
+    if (container) {
+      container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' })
+    }
+  }, [chatLoading, liveAgentStatus, liveAgentTimeline.length, liveAgentPreviewText.length])
+
+  useEffect(() => {
+    if (!chatLoading) return
+    const timer = window.setInterval(() => {
+      setLiveAgentElapsedSec((value) => value + 1)
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [chatLoading])
+
+  useEffect(() => {
+    const el = liveOutputRef.current
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+  }, [liveAgentPreviewText])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    localStorage.setItem('doc_studio_right_panel_closed', String(rightPanelClosed))
+  }, [rightPanelClosed])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    localStorage.setItem('doc_studio_left_panel_closed', String(leftPanelClosed))
+  }, [leftPanelClosed])
+
+  const rightPanelClosedRef = useRef(rightPanelClosed)
+  rightPanelClosedRef.current = rightPanelClosed
+
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey)) return
+      const key = e.key.toLowerCase()
+      if (key === 'l') {
+        if (rightPanelClosedRef.current) {
+          e.preventDefault()
+          setRightPanelClosed(false)
+          setRightTab('chat')
+        }
+      }
+      if (key === 'b') {
+        e.preventDefault()
+        setLeftPanelClosed((prev) => !prev)
+      }
+    }
+    document.addEventListener('keydown', handleGlobalKeyDown)
+    return () => document.removeEventListener('keydown', handleGlobalKeyDown)
+  }, [])
+
   const handleLeftResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
     setIsDraggingLeft(true)
   }, [])
 
-  // 处理右侧分割线拖�?
+  // ??????????
   const handleRightResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
     setIsDraggingRight(true)
   }, [])
 
-  // 处理拖拽移动
+  // ??????
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
       if (isDraggingLeft) {
         const container = document.querySelector('.doc-studio')
         if (container) {
           const containerRect = container.getBoundingClientRect()
-          // 计算相对于容器的位置
-          const newWidth = e.clientX - containerRect.left
-          if (newWidth >= 200 && newWidth <= 600) {
-            setLeftSiderWidth(newWidth)
+          const cursorWidth = e.clientX - containerRect.left
+          const dynamicMaxLeft = Math.min(
+            MAX_LEFT_SIDER_WIDTH,
+            containerRect.width - rightSiderWidth - MIN_CENTER_WIDTH,
+          )
+          if (dynamicMaxLeft >= MIN_LEFT_SIDER_WIDTH) {
+            const nextLeftWidth = Math.max(
+              MIN_LEFT_SIDER_WIDTH,
+              Math.min(dynamicMaxLeft, cursorWidth),
+            )
+            setLeftSiderWidth(nextLeftWidth)
           }
         }
       }
@@ -1474,9 +2863,17 @@ const LatexEditorPage = () => {
         const container = document.querySelector('.doc-studio')
         if (container) {
           const containerRect = container.getBoundingClientRect()
-          const newWidth = containerRect.right - e.clientX
-          if (newWidth >= 250 && newWidth <= 800) {
-            setRightSiderWidth(newWidth)
+          const cursorWidth = containerRect.right - e.clientX
+          const dynamicMaxRight = Math.min(
+            MAX_RIGHT_SIDER_WIDTH,
+            containerRect.width - leftSiderWidth - MIN_CENTER_WIDTH,
+          )
+          if (dynamicMaxRight >= MIN_RIGHT_SIDER_WIDTH) {
+            const nextRightWidth = Math.max(
+              MIN_RIGHT_SIDER_WIDTH,
+              Math.min(dynamicMaxRight, cursorWidth),
+            )
+            setRightSiderWidth(nextRightWidth)
           }
         }
       }
@@ -1508,6 +2905,51 @@ const LatexEditorPage = () => {
     }
   }, [isDraggingLeft, isDraggingRight, leftSiderWidth, rightSiderWidth])
 
+  useEffect(() => {
+    const clampPaneWidths = () => {
+      const container = document.querySelector('.doc-studio')
+      if (!container) return
+
+      const containerRect = container.getBoundingClientRect()
+      let nextLeftWidth = Math.max(
+        MIN_LEFT_SIDER_WIDTH,
+        Math.min(MAX_LEFT_SIDER_WIDTH, leftSiderWidth),
+      )
+      const maxRightByCurrentLeft = Math.min(
+        MAX_RIGHT_SIDER_WIDTH,
+        containerRect.width - nextLeftWidth - MIN_CENTER_WIDTH,
+      )
+      let nextRightWidth = Math.max(
+        MIN_RIGHT_SIDER_WIDTH,
+        Math.min(
+          maxRightByCurrentLeft >= MIN_RIGHT_SIDER_WIDTH
+            ? maxRightByCurrentLeft
+            : MIN_RIGHT_SIDER_WIDTH,
+          rightSiderWidth,
+        ),
+      )
+
+      const maxLeftByCurrentRight = Math.min(
+        MAX_LEFT_SIDER_WIDTH,
+        containerRect.width - nextRightWidth - MIN_CENTER_WIDTH,
+      )
+      if (maxLeftByCurrentRight >= MIN_LEFT_SIDER_WIDTH) {
+        nextLeftWidth = Math.min(nextLeftWidth, maxLeftByCurrentRight)
+      }
+
+      if (nextLeftWidth !== leftSiderWidth) {
+        setLeftSiderWidth(nextLeftWidth)
+      }
+      if (nextRightWidth !== rightSiderWidth) {
+        setRightSiderWidth(nextRightWidth)
+      }
+    }
+
+    clampPaneWidths()
+    window.addEventListener('resize', clampPaneWidths)
+    return () => window.removeEventListener('resize', clampPaneWidths)
+  }, [leftSiderWidth, rightSiderWidth])
+
   const handleWorkspaceChange = (workspaceId: string) => {
     navigate(`/doc-studio/${workspaceId}`)
   }
@@ -1516,10 +2958,61 @@ const LatexEditorPage = () => {
     const parsed = Number(value)
     if (Number.isFinite(parsed)) {
       setSelectedKnowledgeBaseId(parsed)
+      persistLastUsedKnowledgeBaseId(parsed)
     } else {
       setSelectedKnowledgeBaseId(null)
     }
   }
+
+  const handleToggleRagEnabled = useCallback(() => {
+    if (ragEnabled) {
+      setRagEnabled(false)
+      return
+    }
+    if (knowledgeLoading) {
+      message.info('知识库加载中，请稍候')
+      return
+    }
+    if (!knowledgeBases.length) {
+      message.warning('暂无可用知识库，请先在知识库页面创建。')
+      return
+    }
+    const targetKbId = resolvePreferredKnowledgeBaseId(knowledgeBases, [
+      selectedKnowledgeBaseId,
+      preferredKbFromUrl,
+    ])
+    if (targetKbId == null) {
+      message.warning('暂无可用知识库，请先在知识库页面创建。')
+      return
+    }
+    setSelectedKnowledgeBaseId(targetKbId)
+    persistLastUsedKnowledgeBaseId(targetKbId)
+    setRagEnabled(true)
+  }, [
+    ragEnabled,
+    knowledgeLoading,
+    knowledgeBases,
+    selectedKnowledgeBaseId,
+    preferredKbFromUrl,
+  ])
+
+  useEffect(() => {
+    if (!ragEnabled) return
+    if (!knowledgeBases.length) return
+    if (
+      selectedKnowledgeBaseId != null &&
+      knowledgeBases.some((item) => item.id === selectedKnowledgeBaseId)
+    ) {
+      return
+    }
+    const targetKbId = resolvePreferredKnowledgeBaseId(knowledgeBases, [
+      selectedKnowledgeBaseId,
+      preferredKbFromUrl,
+    ])
+    if (targetKbId == null) return
+    setSelectedKnowledgeBaseId(targetKbId)
+    persistLastUsedKnowledgeBaseId(targetKbId)
+  }, [ragEnabled, knowledgeBases, selectedKnowledgeBaseId, preferredKbFromUrl])
 
   const handleCreateWorkspace = async () => {
     if (!newWorkspaceName.trim()) {
@@ -1551,7 +3044,7 @@ const LatexEditorPage = () => {
       setNewWorkspaceName('')
       setNewWorkspaceType('latex')
       await loadWorkspaces(workspace.workspaceId)
-      message.success('创建成功')
+      message.success('工作区创建成功')
     } catch (error) {
       message.error(getErrorMessage(error))
     } finally {
@@ -1559,7 +3052,7 @@ const LatexEditorPage = () => {
     }
   }
 
-  // 查找文件树节点的辅助函数
+  // ????????????
   const findNode = useCallback((nodes: any, targetPath: string): any => {
     if (!nodes || !Array.isArray(nodes)) return null
     for (const node of nodes) {
@@ -1575,50 +3068,83 @@ const LatexEditorPage = () => {
   const handleTreeSelect = async (keys: React.Key[]) => {
     const path = String(keys[0] || '')
     if (!path) return
+    setTreeFocusPath(path)
     
     const node = findNode(snap.fileTree, path)
     
-    // 如果是目录，不做任何操作（Tree 组件会自动处理展开/折叠�?
+    // ?????????????Tree ?????????/????
     if (node && node.type === 'directory') {
       return
     }
     
-    // 如果是文件，并且不是当前激活的文件，则打开�?
+    // ???????????????????????
     if (snap.activeFilePath !== path) {
       await openFile(path)
     }
   }
-  
-  // 处理右键菜单
+
+  const openContextMenuAt = useCallback(
+    (event: Pick<MouseEvent, 'clientX' | 'clientY'>, path: string, type: ContextMenuTargetType) => {
+      setContextMenuPath(path)
+      setContextMenuType(type)
+      setContextMenuPosition({ x: event.clientX, y: event.clientY })
+      setContextMenuVisible(true)
+    },
+    [],
+  )
+
+  const handleExplorerContextMenu = (event: React.MouseEvent) => {
+    event.preventDefault()
+    event.stopPropagation()
+    openContextMenuAt(event, '', 'workspace')
+  }
+
+  // ??????
   const handleRightClick = (info: any) => {
     const { event, node } = info
     event.preventDefault()
     event.stopPropagation()
-    
+
     const nodeData = findNode(snap.fileTree, node.key as string)
-    
-    setContextMenuPath(node.key as string)
-    setContextMenuType(nodeData?.type || 'file')
-    setContextMenuPosition({ x: event.clientX, y: event.clientY })
-    setContextMenuVisible(true)
+    const nodeType: ContextMenuTargetType = nodeData?.type === 'directory' ? 'directory' : 'file'
+    setTreeFocusPath(node.key as string)
+    openContextMenuAt(event, node.key as string, nodeType)
   }
-  
-  // 在目录中创建文本文件�?tex, .bib 等）
-  const handleCreateFileInDirectory = (directoryPath: string) => {
-    setFileModalType('file')
-    setFileModalPath(directoryPath + '/')  // 在目录路径后添加斜杠表示在此目录下创�?
+
+  const openCreateModalAtPath = (type: 'file' | 'directory', baseDirectoryPath = '') => {
+    if (baseDirectoryPath && isNotebookSystemPath(baseDirectoryPath, { protectParents: true })) {
+      message.warning('Notebook 系统目录不允许手动创建或修改')
+      setContextMenuVisible(false)
+      return
+    }
+    const normalizedPath = baseDirectoryPath ? `${baseDirectoryPath.replace(/\/+$/, '')}/` : ''
+    setFileModalType(type)
+    setFileModalPath(normalizedPath)
     setFileModalContent('')
     setFileModalOpen(true)
     setContextMenuVisible(false)
   }
+
+  const handleCreateFileInDirectory = (directoryPath: string) => {
+    openCreateModalAtPath('file', directoryPath)
+  }
+
+  const handleCreateFolderInDirectory = (directoryPath: string) => {
+    openCreateModalAtPath('directory', directoryPath)
+  }
   
-  // 上传文件到指定目�?
+  // ??????????
   const handleUploadToDirectory = (directoryPath: string) => {
+    if (isNotebookSystemPath(directoryPath, { protectParents: true })) {
+      message.warning('Notebook 系统目录不允许手动上传文件')
+      setContextMenuVisible(false)
+      return
+    }
     setContextMenuVisible(false)
-    // 创建一个临时的文件输入元素
+    // ?????????????
     const input = document.createElement('input')
     input.type = 'file'
-    input.accept = '*/*'  // 接受所有文件类�?
+    input.accept = '*/*'  // ?????????
     input.onchange = async (e: Event) => {
       const target = e.target as HTMLInputElement
       const file = target.files?.[0]
@@ -1626,37 +3152,39 @@ const LatexEditorPage = () => {
       
       setUploading(true)
       try {
-        console.log('📤 开始上传文�?', {
+        console.log('准备上传文件', {
           fileName: file.name,
           fileSize: file.size,
           directory: directoryPath,
           workspaceId: snap.workspaceId,
         })
         
-        // 上传到指定目�?
+        // ????????
         const result = await uploadFile({ 
           workspaceId: snap.workspaceId, 
           file,
-          directory: directoryPath  // 使用 directory 参数指定目标目录
+          directory: directoryPath  // ?? directory ????????
         })
         
-        console.log('�?上传成功，服务器返回:', result)
-        message.success(`文件已上传到 ${directoryPath || '根目�?}: ${file.name} (${(file.size / 1024).toFixed(2)} KB)`)
+        console.log('上传完成响应:', result)
+        message.success(
+          `上传成功 ${directoryPath || '根目录'}: ${file.name} (${(file.size / 1024).toFixed(2)} KB)`,
+        )
         
-        // 等待一小段时间确保后端文件系统已更�?
+        // ???????????????????
         await new Promise(resolve => setTimeout(resolve, 500))
         
-        // 刷新文件�?
-        console.log('🔄 刷新文件�?..')
+        // ??????
+        console.log('刷新工作区文件...')
         await loadWorkspaceFiles(snap.workspaceId, false)
-        console.log('�?文件树已刷新')
+        console.log('刷新完成')
         
-        // 确保目标目录展开，让用户能看到上传的文件
+        // ????????????????????
         if (directoryPath && !expandedKeys.includes(directoryPath)) {
           setExpandedKeys(prev => [...prev, directoryPath])
         }
         
-        // 如果上传的是文本文件，自动打开
+        // ???????????????
         if (
           file.name.endsWith('.tex') ||
           file.name.endsWith('.bib') ||
@@ -1665,10 +3193,10 @@ const LatexEditorPage = () => {
           file.name.endsWith('.txt')
         ) {
           const fullPath = directoryPath ? `${directoryPath}/${file.name}` : file.name
-          setTimeout(() => openFile(fullPath), 500)  // 稍微延迟以确保文件树已刷�?
+          setTimeout(() => openFile(fullPath), 500)  // ??????????????
         }
       } catch (error) {
-        console.error('�?上传失败:', error)
+        console.error('上传失败:', error)
         message.error(`上传失败: ${getErrorMessage(error)}`)
       } finally {
         setUploading(false)
@@ -1677,12 +3205,21 @@ const LatexEditorPage = () => {
     input.click()
   }
   
-  // 隐藏右键菜单
+  // ??????
   useEffect(() => {
     const handleClick = () => setContextMenuVisible(false)
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setContextMenuVisible(false)
+      }
+    }
     if (contextMenuVisible) {
       document.addEventListener('click', handleClick)
-      return () => document.removeEventListener('click', handleClick)
+      document.addEventListener('keydown', handleKeyDown)
+      return () => {
+        document.removeEventListener('click', handleClick)
+        document.removeEventListener('keydown', handleKeyDown)
+      }
     }
   }, [contextMenuVisible])
 
@@ -1702,7 +3239,7 @@ const LatexEditorPage = () => {
 
   const handleEditorChange = useCallback((value?: string) => {
     if (!snap.activeFilePath) return
-    // 防止撤销操作导致空白（只有当值真正变化时才更新）
+    // ????????????????????????
     const currentContent = snap.files[snap.activeFilePath]?.content ?? ''
     if (value !== currentContent) {
     docStudioActions.updateFileContent(snap.activeFilePath, value ?? '')
@@ -1713,14 +3250,14 @@ const LatexEditorPage = () => {
     (editorInstance: any) => {
       editorRef.current = editorInstance
 
-      // 立即获得焦点
+      // ??????
       editorInstance.focus()
 
-      // 自定义快捷键：Ctrl+A / Ctrl+L
+      // ???????Ctrl+A / Ctrl+L
       if (typeof window !== 'undefined' && (window as any).monaco) {
         const monaco = (window as any).monaco
 
-        // Ctrl+A 全选（兜底�?
+        // Ctrl+A ???????
         editorInstance.addCommand(
           monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyA,
           () => {
@@ -1731,7 +3268,7 @@ const LatexEditorPage = () => {
           },
         )
 
-        // Ctrl+L 添加当前选中文本为片�?
+        // Ctrl+L ????????????
         editorInstance.addCommand(
           monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyL,
           () => {
@@ -1743,36 +3280,111 @@ const LatexEditorPage = () => {
     [addSelectionSnippet],
   )
 
-  const handleSave = async () => {
-    if (!snap.workspaceId || !snap.activeFilePath) {
-      message.warning('请选择工作区和文件')
-      return
+  const handleSave = useCallback(
+    async (options?: { silent?: boolean }) => {
+      if (!snap.workspaceId || !snap.activeFilePath) {
+        if (!options?.silent) {
+          message.warning('请先选择工作区文件')
+        }
+        return false
+      }
+      const buffer = docStudioState.files[snap.activeFilePath]
+      if (!buffer || buffer.loading || !buffer.dirty) {
+        return true
+      }
+      if (saveInFlightRef.current) {
+        return false
+      }
+
+      const path = snap.activeFilePath
+      const contentToSave = buffer.content || ''
+      const encodingToSave = buffer.encoding
+
+      saveInFlightRef.current = true
+      try {
+        await updateFileContent({
+          workspaceId: snap.workspaceId,
+          path,
+          content: contentToSave,
+          encoding: encodingToSave,
+        }, {
+          loading: false,
+          errorToast: false,
+        })
+        docStudioActions.markFileSaved(path, contentToSave)
+        return true
+      } catch (error) {
+        if (!options?.silent) {
+          message.error(getErrorMessage(error))
+        }
+        return false
+      } finally {
+        saveInFlightRef.current = false
+      }
+    },
+    [snap.activeFilePath, snap.workspaceId],
+  )
+
+  useEffect(() => {
+    const handleSaveShortcut = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey)) return
+      if (event.key.toLowerCase() !== 's') return
+      event.preventDefault()
+      void handleSave({ silent: true })
     }
-    try {
-      await updateFileContent({
-        workspaceId: snap.workspaceId,
-        path: snap.activeFilePath,
-        content: currentFileBuffer?.content || '',
-        encoding: currentFileBuffer?.encoding,
-      })
-      docStudioActions.markFileSaved(snap.activeFilePath)
-      message.success('保存成功')
-    } catch (error) {
-      message.error(getErrorMessage(error))
-    }
-  }
+    document.addEventListener('keydown', handleSaveShortcut)
+    return () => document.removeEventListener('keydown', handleSaveShortcut)
+  }, [handleSave])
+
+  useEffect(() => {
+    if (!snap.workspaceId || !snap.activeFilePath) return
+    if (!currentFileBuffer || currentFileBuffer.loading || !currentFileBuffer.dirty) return
+    const timer = window.setTimeout(() => {
+      void handleSave({ silent: true })
+    }, 900)
+    return () => window.clearTimeout(timer)
+  }, [
+    currentFileBuffer?.content,
+    currentFileBuffer?.dirty,
+    currentFileBuffer?.encoding,
+    currentFileBuffer?.loading,
+    handleSave,
+    snap.activeFilePath,
+    snap.workspaceId,
+  ])
 
   const handleCompile = async () => {
     if (!snap.workspaceId) {
-      message.warning('请选择工作�?)
+      message.warning('请先选择工作区')
       return
     }
-    if (!isLatexWorkspace) {
-      message.info('当前工作区非 LaTeX，编译功能不可用')
+    if (!supportsCompilePanel) {
+      message.info('当前文件类型不支持编译')
+      return
+    }
+    if (isPlaintextActiveFile) {
+      message.info('TXT 文件无需编译')
+      return
+    }
+    if (isMarkdownActiveFile) {
+      const markdownPath = String(snap.activeFilePath || '').trim()
+      if (!markdownPath) {
+        message.warning('请先打开 Markdown 文件')
+        return
+      }
+      const markdownContent = String(docStudioState.files[markdownPath]?.content || '')
+      const markdownResult = buildMarkdownCompileResult(markdownPath, markdownContent)
+      docStudioActions.setCompileResult(markdownResult)
+      setRightTab('compile')
+      if (markdownResult.success) {
+        message.success(markdownResult.summary || 'Markdown 检查通过')
+      } else {
+        message.error(markdownResult.error || markdownResult.summary || 'Markdown 检查失败')
+      }
       return
     }
 
-    // 【Cursor 风格】优先编译当前激活的 .tex 文件，其次使用工作区配置中的 main_file
+    // ?Cursor ???????????? .tex ?????????????? main_file
     const activeTexFile =
       snap.activeFilePath && snap.activeFilePath.toLowerCase().endsWith('.tex')
         ? snap.activeFilePath
@@ -1784,12 +3396,12 @@ const LatexEditorPage = () => {
     const mainFile = activeTexFile || configuredMainFile
 
     if (!mainFile) {
-      message.warning('请先打开要编译的 .tex 主文�?)
+      message.warning('未找到 .tex 主文件')
       return
     }
 
-    // 调试日志：显示即将编译的文件
-    console.log('🔨 准备编译文件:', {
+    // ??????????????
+    console.log('编译入口文件:', {
       activeFilePath: snap.activeFilePath,
       activeTexFile,
       configuredMainFile,
@@ -1806,12 +3418,12 @@ const LatexEditorPage = () => {
       if (result.success) {
         message.success(result.summary || '编译成功')
       } else {
-        // 提取所有错误，特别关注"文件未找�?错误
+        // ???????????"????????
         const allErrors = result.data?.errors || []
         const missingFiles = allErrors
-          .filter((err: string) => err.includes('not found') || err.includes('文件未找�?))
+          .filter((err: string) => err.includes('not found') || err.includes('文件不存在'))
           .map((err: string) => {
-            const match = err.match(/File `([^']+)'|文件未找�?\s*(.+)/)
+            const match = err.match(/File `([^']+)'|文件不存在\s*(.+)/)
             return match ? (match[1] || match[2]) : null
           })
           .filter(Boolean) as string[]
@@ -1820,7 +3432,7 @@ const LatexEditorPage = () => {
           message.error({
             content: (
               <div>
-                <div style={{ marginBottom: 8, fontWeight: 'bold' }}>编译失败：缺少以下文�?/div>
+                <div style={{ marginBottom: 8, fontWeight: 'bold' }}>缺失文件:</div>
                 <ul style={{ margin: 0, paddingLeft: 20 }}>
                   {missingFiles.map((file, idx) => (
                     <li key={idx} style={{ marginBottom: 4 }}>
@@ -1829,7 +3441,7 @@ const LatexEditorPage = () => {
                   ))}
                 </ul>
                 <div style={{ marginTop: 8, fontSize: 12, color: '#666' }}>
-                  请检查文件是否已上传到正确位置，或修�?.tex 文件中的引用路径
+                  请确认引用的 .tex 文件是否存在
                 </div>
               </div>
             ),
@@ -1837,7 +3449,7 @@ const LatexEditorPage = () => {
           })
         } else {
           const firstError = result.error || allErrors[0]
-          message.error(firstError ? `编译失败�?{firstError}` : '编译失败')
+          message.error(firstError ? `编译失败: ${firstError}` : '编译失败')
         }
       }
     } catch (error) {
@@ -1845,13 +3457,47 @@ const LatexEditorPage = () => {
     }
   }
 
+  useEffect(() => {
+    if (!autoCompileFromUrl || autoCompileHandledRef.current) return
+    if (!snap.workspaceId || !snap.activeFilePath) return
+    if (preferredFileFromUrl && snap.activeFilePath !== preferredFileFromUrl) return
+    if (!currentFileBuffer || currentFileBuffer.loading) return
+
+    const activePath = String(snap.activeFilePath || '').trim()
+    const extension = getFileExtension(activePath)
+    if (extension !== '.md' && extension !== '.markdown') {
+      autoCompileHandledRef.current = true
+      clearAutoCompileFlagFromUrl()
+      return
+    }
+
+    const markdownResult = buildMarkdownCompileResult(activePath, currentFileBuffer.content || '')
+    docStudioActions.setCompileResult(markdownResult)
+    setRightPanelClosed(false)
+    setRightTab('compile')
+    autoCompileHandledRef.current = true
+    clearAutoCompileFlagFromUrl()
+    if (markdownResult.success) {
+      message.success(markdownResult.summary || 'Markdown 检查通过')
+    } else {
+      message.error(markdownResult.error || markdownResult.summary || 'Markdown 检查失败')
+    }
+  }, [
+    autoCompileFromUrl,
+    clearAutoCompileFlagFromUrl,
+    currentFileBuffer,
+    preferredFileFromUrl,
+    snap.activeFilePath,
+    snap.workspaceId,
+  ])
+
   const handlePreviewPdf = async () => {
     if (!snap.workspaceId) return
     try {
       const blob = await downloadPdf({ workspaceId: snap.workspaceId })
       const url = URL.createObjectURL(blob)
     window.open(url, '_blank')
-      // 延迟释放 URL，确保新标签页已加载
+      // ???? URL??????????
       setTimeout(() => URL.revokeObjectURL(url), 1000)
     } catch (error) {
       message.error(getErrorMessage(error))
@@ -1876,63 +3522,233 @@ const LatexEditorPage = () => {
     }
   }
 
-  const handleDownloadCurrentFile = async () => {
-    if (!snap.workspaceId || !snap.activeFilePath) return
+  const handleDownloadFileAtPath = async (filePath: string) => {
+    if (!snap.workspaceId || !filePath) return
     try {
       const blob = await downloadFile({
         workspaceId: snap.workspaceId,
-        filePath: snap.activeFilePath,
+        filePath,
       })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = snap.activeFilePath.split('/').pop() || 'file'
+      a.download = filePath.split('/').pop() || 'file'
       document.body.appendChild(a)
       a.click()
       document.body.removeChild(a)
       URL.revokeObjectURL(url)
-      message.success('文件下载成功')
+      message.success('文件已下载')
     } catch (error) {
       message.error(getErrorMessage(error))
     }
   }
 
-  const handleDeleteCurrentFile = async () => {
-    if (!snap.workspaceId || !snap.activeFilePath) return
-    try {
-      await deleteFile({
-        workspaceId: snap.workspaceId,
-        path: snap.activeFilePath,
-      })
-      message.success('删除成功')
-      docStudioActions.setActiveFile('')
-      await loadWorkspaceFiles(snap.workspaceId, false)
-    } catch (error) {
-      message.error(getErrorMessage(error))
-    }
+  const handleDownloadCurrentFile = async () => {
+    if (!snap.activeFilePath) return
+    await handleDownloadFileAtPath(snap.activeFilePath)
   }
   
-  // 从文件树右键菜单删除文件或文件夹
+  // ????????????????
   const handleDeleteFromTree = async (path: string, type: 'file' | 'directory') => {
     if (!snap.workspaceId) return
+    if (type === 'directory' && isNotebookSystemPath(path, { protectParents: true })) {
+      message.warning('Notebook 系统目录不允许删除')
+      setContextMenuVisible(false)
+      return
+    }
     try {
       await deleteFile({
         workspaceId: snap.workspaceId,
         path: path,
       })
-      message.success(`删除${type === 'file' ? '文件' : '文件�?}成功`)
+      message.success(`已删除${type === 'file' ? '文件' : '文件夹'}`)
       
-      // 如果删除的是当前打开的文件，关闭�?
+      // ??????????????????
       if (type === 'file' && snap.activeFilePath === path) {
         docStudioActions.setActiveFile('')
       }
       
-      // 刷新文件�?
+      // ??????
       await loadWorkspaceFiles(snap.workspaceId, false)
       setContextMenuVisible(false)
     } catch (error) {
       message.error(getErrorMessage(error))
       setContextMenuVisible(false)
+    }
+  }
+
+  const showDeleteConfirm = useCallback(
+    (path: string, type: 'file' | 'directory') => {
+      setContextMenuVisible(false)
+      if (type === 'directory' && isNotebookSystemPath(path, { protectParents: true })) {
+        message.warning('Notebook 系统目录不允许删除')
+        return
+      }
+      const label = type === 'directory' ? '文件夹' : '文件'
+      const detail =
+        type === 'directory'
+          ? `确定删除文件夹 "${path}" 及其所有内容？`
+          : `确定删除文件 "${path}"？`
+      Modal.confirm({
+        title: `确认删除${label}？`,
+        content: detail,
+        okText: '删除',
+        okType: 'danger',
+        cancelText: '取消',
+        onOk: () => handleDeleteFromTree(path, type),
+      })
+    },
+    [handleDeleteFromTree, isNotebookSystemPath],
+  )
+
+  const openRenameModal = useCallback((path: string, type: 'file' | 'directory') => {
+    if (isNotebookSystemPath(path, { protectParents: type === 'directory' })) {
+      message.warning('Notebook 系统目录不允许重命名或移动')
+      setContextMenuVisible(false)
+      return
+    }
+    const { normalized, name } = splitWorkspacePath(path)
+    if (!normalized || !name) {
+      message.warning('无法重命名该路径')
+      return
+    }
+    setRenameSourcePath(normalized)
+    setRenameSourceType(type)
+    setRenameNameInput(name)
+    setTreeFocusPath(normalized)
+    setRenameModalOpen(true)
+    setContextMenuVisible(false)
+  }, [isNotebookSystemPath])
+
+  useEffect(() => {
+    const handleF2Rename = (event: KeyboardEvent) => {
+      if (event.key !== 'F2') return
+      const target = event.target as HTMLElement | null
+      if (
+        target &&
+        (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+      ) {
+        return
+      }
+      if (renameModalOpen || fileModalOpen || workspaceModalOpen || diffModalOpen || agentDiffReviewOpen) return
+
+      const candidatePath = treeFocusPath || snap.activeFilePath
+      if (!candidatePath) return
+      const node = findNode(snap.fileTree, candidatePath)
+      if (!node || (node.type !== 'file' && node.type !== 'directory')) return
+
+      event.preventDefault()
+      openRenameModal(candidatePath, node.type)
+    }
+
+    document.addEventListener('keydown', handleF2Rename)
+    return () => document.removeEventListener('keydown', handleF2Rename)
+  }, [
+    agentDiffReviewOpen,
+    diffModalOpen,
+    fileModalOpen,
+    findNode,
+    openRenameModal,
+    renameModalOpen,
+    snap.activeFilePath,
+    snap.fileTree,
+    treeFocusPath,
+    workspaceModalOpen,
+  ])
+
+  const applyRenamedPathsToFrontendState = (
+    sourcePath: string,
+    targetPath: string,
+    sourceType: 'file' | 'directory',
+  ) => {
+    const remap = (path: string) => remapPathWithPrefix(path, sourcePath, targetPath, sourceType)
+
+    const nextOpenedFiles = snap.openedFiles.map(remap)
+    const dedupOpenedFiles: string[] = []
+    nextOpenedFiles.forEach((path) => {
+      if (path && !dedupOpenedFiles.includes(path)) {
+        dedupOpenedFiles.push(path)
+      }
+    })
+    if (
+      dedupOpenedFiles.length !== snap.openedFiles.length ||
+      dedupOpenedFiles.some((path, index) => path !== snap.openedFiles[index])
+    ) {
+      docStudioActions.setOpenedFiles(dedupOpenedFiles)
+    }
+
+    const nextActivePath = remap(snap.activeFilePath || '')
+    if (nextActivePath !== (snap.activeFilePath || '')) {
+      docStudioActions.setActiveFile(nextActivePath)
+    }
+
+    const nextFileBuffers: Record<string, any> = {}
+    let changed = false
+    Object.entries(docStudioState.files).forEach(([path, buffer]) => {
+      const mappedPath = remap(path)
+      nextFileBuffers[mappedPath] = buffer
+      if (mappedPath !== path) {
+        changed = true
+      }
+    })
+    if (changed) {
+      docStudioState.files = nextFileBuffers as any
+    }
+  }
+
+  const handleRenamePath = async () => {
+    if (!snap.workspaceId || !renameSourcePath) return
+    if (isNotebookSystemPath(renameSourcePath, { protectParents: renameSourceType === 'directory' })) {
+      message.warning('Notebook 系统目录不允许重命名或移动')
+      return
+    }
+    const nextName = renameNameInput.trim()
+    if (!nextName) {
+      message.warning('请输入新的名称')
+      return
+    }
+    if (nextName === '.' || nextName === '..') {
+      message.warning('名称不合法')
+      return
+    }
+    if (/[\\/]/.test(nextName)) {
+      message.warning('名称不能包含斜杠')
+      return
+    }
+
+    const { name: currentName, parentPath } = splitWorkspacePath(renameSourcePath)
+    if (!currentName) {
+      message.warning('源路径无效')
+      return
+    }
+    if (nextName === currentName) {
+      setRenameModalOpen(false)
+      return
+    }
+
+    const targetPath = parentPath ? `${parentPath}/${nextName}` : nextName
+    if (isNotebookSystemPath(targetPath)) {
+      message.warning('目标路径位于 Notebook 系统目录，不允许移动')
+      return
+    }
+    setRenameSubmitting(true)
+    try {
+      await renameFileOrDirectory({
+        workspaceId: snap.workspaceId,
+        sourcePath: renameSourcePath,
+        targetPath,
+      })
+      applyRenamedPathsToFrontendState(renameSourcePath, targetPath, renameSourceType)
+      setTreeFocusPath(targetPath)
+      setRenameModalOpen(false)
+      setRenameSourcePath('')
+      setRenameNameInput('')
+      await refreshFileTree(false)
+      message.success('重命名成功')
+    } catch (error) {
+      message.error(getErrorMessage(error))
+    } finally {
+      setRenameSubmitting(false)
     }
   }
 
@@ -1944,15 +3760,24 @@ const LatexEditorPage = () => {
   }
 
   const handleCreateFile = async () => {
-    if (!snap.workspaceId || !fileModalPath.trim()) {
-      message.warning('请输入路�?)
+    const targetPath = fileModalPath.trim()
+    if (!snap.workspaceId || !targetPath) {
+      message.warning('请输入文件路径')
+      return
+    }
+    if (isNotebookSystemPath(targetPath)) {
+      message.warning('该路径为 Notebook 系统目录，不允许手动创建')
+      return
+    }
+    if (fileModalType === 'file' && /[\\/]$/.test(targetPath)) {
+      message.warning('新建文件时路径必须包含文件名，例如 sections/test.md')
       return
     }
     setFileSubmitting(true)
     try {
       await createFileOrDirectory({
         workspaceId: snap.workspaceId,
-        path: fileModalPath.trim(),
+        path: targetPath,
         type: fileModalType,
         content: fileModalType === 'file' ? fileModalContent : undefined,
       })
@@ -1960,8 +3785,8 @@ const LatexEditorPage = () => {
       message.success('创建成功')
       await loadWorkspaceFiles(snap.workspaceId, false)
       
-      // 确保父目录展开
-      const pathParts = fileModalPath.trim().split('/')
+      // ???????
+      const pathParts = targetPath.split('/')
       if (pathParts.length > 1) {
         const parentPath = pathParts.slice(0, -1).join('/')
         if (parentPath && !expandedKeys.includes(parentPath)) {
@@ -1970,7 +3795,7 @@ const LatexEditorPage = () => {
       }
       
       if (fileModalType === 'file') {
-        setTimeout(() => openFile(fileModalPath.trim()), 300)
+        setTimeout(() => openFile(targetPath), 300)
       }
     } catch (error) {
       message.error(getErrorMessage(error))
@@ -1979,7 +3804,18 @@ const LatexEditorPage = () => {
     }
   }
 
-  const handleUploadClick = () => {
+  const refreshFileTree = useCallback(
+    async (showToast = true) => {
+      if (!snap.workspaceId) return
+      await loadWorkspaceFiles(snap.workspaceId, false)
+      if (showToast) {
+        message.success('文件列表已刷新')
+      }
+    },
+    [loadWorkspaceFiles, snap.workspaceId],
+  )
+
+  const handleWorkspaceUploadClick = () => {
     fileInputRef.current?.click()
   }
 
@@ -2000,233 +3836,183 @@ const LatexEditorPage = () => {
     }
   }
 
-  const handleQuickPromptApply = useCallback(
-    (preset: PromptPreset) => {
-      // 1. 检查编辑器中是否有选中文本（但还没有添加到 selections�?
-      const editor = editorRef.current
-      let newSelection: SelectionFragment | null = null
-      
-      if (editor) {
-        const selectionRanges = editor.getSelections() || []
-        const targetRange = selectionRanges.find((range: any) => !range.isEmpty())
-        if (targetRange) {
-          const model = editor.getModel()
-          if (model) {
-            const selectedText = model.getValueInRange(targetRange).trim()
-            if (selectedText) {
-              const start = model.getOffsetAt(targetRange.getStartPosition())
-              const end = model.getOffsetAt(targetRange.getEndPosition())
-              // 检查这个选中文本是否已经�?selections �?
-              const isAlreadyAdded = selections.some(
-                (sel) => sel.start === start && sel.end === end && sel.text === selectedText
-              )
-              if (!isAlreadyAdded) {
-                // 创建新的 selection fragment
-                const placeholder = `@selection${selections.length + 1}`
-                newSelection = {
-                  id: generateId(),
-                  start,
-                  end,
-                  text: selectedText,
-                  filePath: snap.activeFilePath,
-                  placeholder,
-                }
-              }
-            }
+  const buildChatImageAttachmentsFromFiles = useCallback(async (files: File[]) => {
+        const incoming: ChatImageAttachment[] = []
+    for (const file of files) {
+          if (!file.type.startsWith('image/')) {
+            message.warning(`已跳过非图片文件：${file.name || 'unknown'}`)
+            continue
           }
-        }
-      }
-      
-      // 2. 如果有新的选中文本，先添加�?selections
-      const finalSelections = newSelection 
-        ? [...selections, newSelection]
-        : selections
-      
-      const hasSelection = finalSelections.length > 0
-      const promptText = typeof preset.prompt === 'function'
-        ? preset.prompt(hasSelection)
-        : preset.prompt
-
-      if (preset.llm_options) {
-        applyLlmOptionsFromConfig({ llm_options: preset.llm_options })
-      }
-      
-      // 3. 生成最终提示词，确保包含所有占位符
-      let finalPrompt = promptText
-      if (hasSelection && finalSelections.length > 0) {
-        const placeholders = finalSelections.map((item) => item.placeholder)
-        const missingPlaceholders = placeholders.filter((token) => !promptText.includes(token))
-        if (missingPlaceholders.length) {
-          // 将占位符添加到提示词中（如果提示词不为空，用空格分隔；否则直接使用占位符�?
-          finalPrompt = promptText.trim()
-            ? `${promptText} ${missingPlaceholders.join(' ')}`
-            : missingPlaceholders.join(' ')
-        }
-      }
-      
-      // 4. 更新状�?
-      if (newSelection) {
-        setSelections(finalSelections)
-        // 如果 prompt 当前为空，直接设置为包含占位符的提示�?
-        if (!prompt.trim()) {
-          setPrompt(finalPrompt)
-        } else {
-          // 否则追加占位符（如果还没有）
-          setPrompt((currentPrompt) => {
-            const placeholders = finalSelections.map((item) => item.placeholder)
-            const hasAllPlaceholders = placeholders.every(p => currentPrompt.includes(p))
-            if (hasAllPlaceholders) {
-              return currentPrompt
-            } else {
-              const missing = placeholders.filter(p => !currentPrompt.includes(p))
-              return missing.length > 0 
-                ? `${currentPrompt} ${missing.join(' ')}`
-                : currentPrompt
-            }
+          if (file.size > MAX_CHAT_IMAGE_FILE_SIZE) {
+            message.warning(
+              `图片过大（>${Math.round(MAX_CHAT_IMAGE_FILE_SIZE / 1024 / 1024)}MB）：${file.name || 'unnamed'}`,
+            )
+            continue
+          }
+          // eslint-disable-next-line no-await-in-loop
+          const dataUrl = await readFileAsDataUrl(file)
+          incoming.push({
+            id: generateId(),
+            name: file.name || `image-${Date.now()}.png`,
+            mimeType: file.type || 'image/png',
+            size: file.size,
+            dataUrl,
           })
         }
-      } else {
-        setPrompt(finalPrompt)
+    return incoming
+  }, [])
+
+  const appendChatImageFiles = useCallback(
+    async (files: File[]) => {
+      if (!files.length) return
+      const remain = MAX_CHAT_IMAGE_COUNT - chatImageAttachments.length
+      if (remain <= 0) {
+        message.warning(`最多可添加 ${MAX_CHAT_IMAGE_COUNT} 张图片`)
+        return
       }
-      
-      setTimeout(() => {
-        promptInputDivRef.current?.focus()
-      }, 0)
+
+      const candidates = files.slice(0, remain)
+      if (files.length > remain) {
+        message.info(`最多可添加 ${MAX_CHAT_IMAGE_COUNT} 张图片，已截取前 ${remain} 张`)
+      }
+
+      setChatImageProcessing(true)
+      try {
+        const incoming = await buildChatImageAttachmentsFromFiles(candidates)
+        if (!incoming.length) return
+        setChatImageAttachments((prev) => {
+          const used = new Set(prev.map((item) => `${item.name}::${item.size}`))
+          const deduped = incoming.filter((item) => {
+            const key = `${item.name}::${item.size}`
+            if (used.has(key)) return false
+            used.add(key)
+            return true
+          })
+          return deduped.length ? [...prev, ...deduped] : prev
+        })
+      } finally {
+        setChatImageProcessing(false)
+      }
     },
-    [applyLlmOptionsFromConfig, selections, snap.activeFilePath],
+    [buildChatImageAttachmentsFromFiles, chatImageAttachments.length],
   )
 
-  const handleOpenPresetModal = (preset?: CustomPromptPreset) => {
-    if (!preset && !prompt.trim()) {
-      message.warning('请输入指令后再保存模�?)
-      return
-    }
-    if (preset) {
-      setPresetEditingId(preset.id)
-      setPresetName(preset.label)
-      setPresetIntent(preset.intent || 'custom')
-      setPresetPrompt(preset.prompt)
-      setPresetBindModel(Boolean(preset.llm_options))
-    } else {
-      setPresetEditingId(null)
-      setPresetName('')
-      setPresetIntent('edit')
-      setPresetPrompt(prompt.trim())
-      setPresetBindModel(false)
-    }
-    setPresetModalOpen(true)
-  }
+  const handleChatImagePickerClick = useCallback(() => {
+    chatImageInputRef.current?.click()
+  }, [])
 
-  const handleSavePreset = () => {
-    const name = presetName.trim()
-    const content = presetPrompt.trim()
-    if (!name) {
-      message.warning('请输入模板名�?)
-      return
-    }
-    if (!content) {
-      message.warning('模板内容不能为空')
-      return
-    }
-    const existingIndexById = presetEditingId
-      ? customPromptPresets.findIndex((item) => item.id === presetEditingId)
-      : -1
-    const existingIndexByName = customPromptPresets.findIndex((item) => item.label === name)
-    const existingIndex = existingIndexById >= 0 ? existingIndexById : existingIndexByName
-    const targetId =
-      existingIndexById >= 0 && presetEditingId
-        ? presetEditingId
-        : existingIndexByName >= 0
-          ? customPromptPresets[existingIndexByName].id
-          : generateId()
-    const existingItem =
-      existingIndex >= 0 ? customPromptPresets[existingIndex] : undefined
-    const payload: CustomPromptPreset = {
-      id: targetId,
-      label: name,
-      description: '自定义模�?,
-      prompt: content,
-      intent: presetIntent,
-      llm_options: presetBindModel ? llmOptionsConfig : undefined,
-      pinned: existingItem?.pinned,
-    }
-    const next = [...customPromptPresets]
-    if (existingIndex >= 0) {
-      next[existingIndex] = payload
-      message.success('已更新同名模�?)
-    } else {
-      next.push(payload)
-      message.success('模板已保�?)
-    }
-    persistCustomPromptPresets(next)
-    setPresetModalOpen(false)
-    setPresetEditingId(null)
-    setPresetBindModel(false)
-  }
+  const handleChatImageInputChange = useCallback(
+    async (event: React.ChangeEvent<HTMLInputElement>) => {
+      const files = Array.from(event.target.files || [])
+      if (files.length) {
+        await appendChatImageFiles(files)
+      }
+      event.target.value = ''
+    },
+    [appendChatImageFiles],
+  )
 
-  const handleDeletePreset = (id: string) => {
-    const next = customPromptPresets.filter((item) => item.id !== id)
-    persistCustomPromptPresets(next)
-    message.success('已删除模�?)
-    if (presetEditingId === id) {
-      setPresetModalOpen(false)
-      setPresetEditingId(null)
-      setPresetBindModel(false)
-    }
-  }
-
-  const handleTogglePresetPin = (id: string) => {
-    const next = customPromptPresets.map((item) =>
-      item.id === id ? { ...item, pinned: !item.pinned } : item,
-    )
-    persistCustomPromptPresets(next)
-  }
-
-  const handleBindSession = async (clear?: boolean) => {
-    if (!snap.workspaceId) {
-      message.warning('请选择工作�?)
-      return
-    }
-    const sessionId = clear ? '' : sessionBindValue.trim()
-    if (!clear && !sessionId) {
-      message.warning('请输�?Session ID')
-      return
-    }
-    setSessionBindLoading(true)
-    try {
-      const detail = await bindWorkspaceSession({
-        workspaceId: snap.workspaceId,
-        sessionId: sessionId || null,
+  const handlePromptPaste = useCallback(
+    async (event: React.ClipboardEvent<HTMLDivElement>) => {
+      const items = Array.from(event.clipboardData?.items || [])
+      const imageFiles: File[] = []
+      items.forEach((item) => {
+        if (item.type.startsWith('image/')) {
+          const file = item.getAsFile()
+          if (file) imageFiles.push(file)
+        }
       })
-      docStudioActions.setWorkspaceConfig(detail.config)
-      setSessionBindValue(detail.config?.session_id || '')
-      message.success(clear ? '已解绑会�? : '已绑定会�?)
-    } catch (error) {
-      message.error('绑定会话失败')
-    } finally {
-      setSessionBindLoading(false)
-    }
-  }
+      if (!imageFiles.length) return
+      event.preventDefault()
+      await appendChatImageFiles(imageFiles)
+    },
+    [appendChatImageFiles],
+  )
+
+  const removeChatImageAttachment = useCallback((id: string) => {
+    setChatImageAttachments((prev) => prev.filter((item) => item.id !== id))
+  }, [])
+
+  const appendReEditImageFiles = useCallback(
+    async (files: File[]) => {
+      if (!files.length || !reEditDraft) return
+      const remain = MAX_CHAT_IMAGE_COUNT - reEditDraft.images.length
+      if (remain <= 0) {
+        message.warning(`最多可添加 ${MAX_CHAT_IMAGE_COUNT} 张图片`)
+        return
+      }
+      const candidates = files.slice(0, remain)
+      if (files.length > remain) {
+        message.info(`最多可添加 ${MAX_CHAT_IMAGE_COUNT} 张图片，已截取前 ${remain} 张`)
+      }
+      const expectedMessageId = reEditDraft.messageId
+      const incoming = await buildChatImageAttachmentsFromFiles(candidates)
+      if (!incoming.length) return
+      setReEditDraft((prev) => {
+        if (!prev || prev.messageId !== expectedMessageId) return prev
+        const used = new Set(prev.images.map((item) => `${item.name}::${item.size}`))
+        const deduped = incoming.filter((item) => {
+          const key = `${item.name}::${item.size}`
+          if (used.has(key)) return false
+          used.add(key)
+          return true
+        })
+        if (!deduped.length) return prev
+        return { ...prev, images: [...prev.images, ...deduped] }
+      })
+    },
+    [buildChatImageAttachmentsFromFiles, reEditDraft],
+  )
+
+  const removeReEditImageAttachment = useCallback((id: string) => {
+    setReEditDraft((prev) => {
+      if (!prev) return prev
+      return { ...prev, images: prev.images.filter((item) => item.id !== id) }
+    })
+  }, [])
+
+  const handleReEditPromptPaste = useCallback(
+    async (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      const items = Array.from(event.clipboardData?.items || [])
+      const imageFiles: File[] = []
+      items.forEach((item) => {
+        if (item.type.startsWith('image/')) {
+          const file = item.getAsFile()
+          if (file) imageFiles.push(file)
+        }
+      })
+      if (!imageFiles.length) return
+      event.preventDefault()
+      await appendReEditImageFiles(imageFiles)
+    },
+    [appendReEditImageFiles],
+  )
 
   const handleUndoLastApply = async () => {
     if (!snap.workspaceId) {
-      message.warning('请选择工作�?)
+      message.warning('请先选择工作区')
       return
     }
     if (!lastOperationId) {
-      message.info('暂无可撤销的修�?)
+      message.info('没有可撤销的操作')
       return
     }
     setUndoingLastApply(true)
     try {
-      const result = await revertOperation({
-        workspaceId: snap.workspaceId,
-        operationId: lastOperationId,
-      })
+      const result = await revertOperation(
+        {
+          workspaceId: snap.workspaceId,
+          operationId: lastOperationId,
+        },
+        {
+          loading: false,
+          errorToast: false,
+        },
+      )
       const revertedFiles = result.reverted_files || []
       for (const filePath of revertedFiles) {
         if (snap.openedFiles.includes(filePath)) {
-          await openFile(filePath, true)
+          await openFile(filePath, true, true)
         }
       }
       if (result.deleted_files?.length) {
@@ -2234,13 +4020,13 @@ const LatexEditorPage = () => {
       }
       const affectedCount = (result.reverted_files?.length || 0) + (result.deleted_files?.length || 0)
       if (affectedCount) {
-        message.success(`已撤销 ${affectedCount} 个文件的修改`)
+        message.success(`已回滚 ${affectedCount} 个变更`)
       } else {
-        message.info('未检测到需要撤销的文�?)
+        message.info('没有可回滚的变更')
       }
       setLastOperationId(null)
     } catch (error) {
-      message.error(`撤销失败�?{getErrorMessage(error)}`)
+      message.error(`回滚失败: ${getErrorMessage(error)}`)
     } finally {
       setUndoingLastApply(false)
     }
@@ -2250,10 +4036,16 @@ const LatexEditorPage = () => {
     if (!snap.workspaceId) return
     setOperationHistoryLoading(true)
     try {
-      const data = await listOperations({ workspaceId: snap.workspaceId })
+      const data = await listOperations(
+        { workspaceId: snap.workspaceId },
+        {
+          loading: false,
+          errorToast: false,
+        },
+      )
       setOperationHistory(Array.isArray(data) ? data : [])
     } catch (error) {
-      message.error('加载操作历史失败')
+      message.error('加载历史失败')
     } finally {
       setOperationHistoryLoading(false)
     }
@@ -2267,14 +4059,14 @@ const LatexEditorPage = () => {
       }
       try {
         const [metrics, health] = await Promise.all([
-          fetchMetricsSummary(),
-          fetchLlmHealth(),
+          fetchMetricsSummary({ loading: false, errorToast: false }),
+          fetchLlmHealth({ loading: false, errorToast: false }),
         ])
         setMetricsSummary(metrics)
         setLlmHealth(health)
       } catch (error) {
         if (!silent) {
-          message.error('加载运行统计失败')
+          message.error('系统状态获取失败')
         }
       } finally {
         setSystemStatsLoading(false)
@@ -2284,9 +4076,9 @@ const LatexEditorPage = () => {
   )
 
   useEffect(() => {
-    if (!operationHistoryOpen) return
+    if (rightTab !== 'history') return
     loadOperationHistory()
-  }, [operationHistoryOpen, loadOperationHistory])
+  }, [loadOperationHistory, rightTab])
 
   useEffect(() => {
     if (!snap.workspaceId) return
@@ -2302,8 +4094,69 @@ const LatexEditorPage = () => {
     if (!diffEditorRef.current) return
     const changes = diffEditorRef.current.getLineChanges?.() || []
     setLineChanges(changes)
-    setAcceptedLineChanges(new Set())
+    setCurrentHunkIndex((index) => {
+      if (!changes.length) return 0
+      return Math.min(index, changes.length - 1)
+    })
   }, [])
+
+  const resolveHunkLineRange = useCallback((change: any, lineCount: number) => {
+    const modifiedStart = Number(change?.modifiedStartLineNumber || 0)
+    const modifiedEnd = Number(change?.modifiedEndLineNumber || 0)
+    const originalStart = Number(change?.originalStartLineNumber || 0)
+    const baseStart = modifiedStart || originalStart || 1
+    const startLine = Math.max(1, Math.min(baseStart, lineCount || 1))
+    const baseEnd = modifiedEnd || startLine
+    const endLine = Math.max(startLine, Math.min(baseEnd, lineCount || 1))
+    return { startLine, endLine }
+  }, [])
+
+  const focusCurrentHunk = useCallback(() => {
+    const diffEditor = diffEditorRef.current
+    if (!diffEditor) return
+    const modifiedEditor =
+      typeof diffEditor.getModifiedEditor === 'function'
+        ? diffEditor.getModifiedEditor()
+        : diffEditor
+    if (!modifiedEditor?.getModel) return
+    const model = modifiedEditor.getModel()
+    if (!model) return
+
+    const clearDecorations = () => {
+      if (typeof modifiedEditor.deltaDecorations !== 'function') return
+      diffHunkDecorationsRef.current = modifiedEditor.deltaDecorations(diffHunkDecorationsRef.current, [])
+    }
+
+    const change = lineChanges[currentHunkIndex]
+    if (!change) {
+      clearDecorations()
+      return
+    }
+
+    const lineCount = model.getLineCount?.() || 1
+    const { startLine, endLine } = resolveHunkLineRange(change, lineCount)
+
+    if (typeof modifiedEditor.revealLineInCenter === 'function') {
+      modifiedEditor.revealLineInCenter(startLine)
+    }
+    if (typeof modifiedEditor.deltaDecorations === 'function') {
+      diffHunkDecorationsRef.current = modifiedEditor.deltaDecorations(diffHunkDecorationsRef.current, [
+        {
+          range: {
+            startLineNumber: startLine,
+            startColumn: 1,
+            endLineNumber: endLine,
+            endColumn: model.getLineMaxColumn(endLine),
+          },
+          options: {
+            isWholeLine: true,
+            className: 'doc-studio__review-hunk-active-line',
+            linesDecorationsClassName: 'doc-studio__review-hunk-active-gutter',
+          },
+        },
+      ])
+    }
+  }, [currentHunkIndex, lineChanges, resolveHunkLineRange])
 
   const loadDiffContent = useCallback(
     async (diff: DocStudioAPI.FileDiff | undefined) => {
@@ -2323,36 +4176,30 @@ const LatexEditorPage = () => {
         return
       }
 
-      setDiffContentLoading(true)
+      setResolvedOriginal(fallbackOriginal)
+      setResolvedModified(fallbackModified)
       try {
-        let originalContent = fallbackOriginal
-        try {
-          const snapshot = await fetchOperationSnapshotFile({
+        const [snapshot, current] = await Promise.all([
+          fetchOperationSnapshotFile(
+            {
             workspaceId: snap.workspaceId,
             operationId: diffOperationId,
             filePath: diff.file_path,
             version: 'before',
-          })
-          originalContent = snapshot?.content ?? ''
-        } catch (error) {
-          originalContent = fallbackOriginal
-        }
-
-        let modifiedContent = fallbackModified
-        try {
-          const current = await fetchFileContent({
-            workspaceId: snap.workspaceId,
-            path: diff.file_path,
-          })
-          modifiedContent = current?.content ?? fallbackModified
-        } catch (error) {
-          modifiedContent = fallbackModified
-        }
-
+            },
+            { loading: false, errorToast: false },
+          ),
+          fetchFileContent(
+            { workspaceId: snap.workspaceId, path: diff.file_path },
+            { loading: false, errorToast: false },
+          ),
+        ])
+        const originalContent = snapshot?.content ?? fallbackOriginal
+        const modifiedContent = current?.content ?? fallbackModified
         setResolvedOriginal(originalContent)
         setResolvedModified(modifiedContent)
-      } finally {
-        setDiffContentLoading(false)
+      } catch {
+        // 保持 fallback，不闪烁
       }
     },
     [diffOperationId, snap.workspaceId],
@@ -2363,27 +4210,280 @@ const LatexEditorPage = () => {
   }, [allFileDiffs, currentDiffIndex, loadDiffContent])
 
   useEffect(() => {
+    setCurrentHunkIndex(0)
+  }, [currentDiffIndex])
+
+  useEffect(() => {
     if (!resolvedOriginal && !resolvedModified) return
     requestAnimationFrame(() => {
       refreshLineChanges()
     })
   }, [resolvedOriginal, resolvedModified, refreshLineChanges])
 
-  const handleRevertOperation = async (operationId: string) => {
+  useEffect(() => {
+    requestAnimationFrame(() => {
+      focusCurrentHunk()
+    })
+  }, [currentHunkIndex, lineChanges, resolvedModified, focusCurrentHunk])
+
+  const confirmOverwriteDirtyFiles = useCallback(async () => {
+    const dirtyFilePaths = Object.entries(docStudioState.files || {})
+      .filter(([, buffer]) => Boolean((buffer as any)?.dirty))
+      .map(([filePath]) => filePath)
+    if (!dirtyFilePaths.length) return
+    await new Promise<void>((resolve, reject) => {
+      Modal.confirm({
+        title: '检测到未保存修改',
+        content: (
+          <div style={{ paddingTop: 4 }}>
+            <p style={{ marginBottom: 8 }}>
+              当前有 {dirtyFilePaths.length} 个文件存在未保存内容，恢复快照后这些本地改动可能被覆盖。
+            </p>
+            <p style={{ color: '#6b7280', fontSize: 13, marginBottom: 0 }}>
+              建议先保存文件，或选择“继续但不恢复”。
+            </p>
+          </div>
+        ),
+        okText: '仍然恢复',
+        cancelText: '取消',
+        okType: 'primary',
+        onOk: () => resolve(),
+        onCancel: () => reject(new Error('__user_abort__')),
+      })
+    })
+  }, [])
+
+  const confirmReEditRestoreAction = useCallback(async (hasCheckpoint: boolean) => {
+    await new Promise<void>((resolve, reject) => {
+      Modal.confirm({
+        title: '确认继续并恢复？',
+        okType: 'danger',
+        okText: '确认继续并恢复',
+        cancelText: '取消',
+        content: (
+          <div style={{ paddingTop: 4 }}>
+            <p style={{ marginBottom: 8 }}>
+              该操作会清理当前消息之后的全部对话，并尝试将工作区文件回退到该消息发送前的状态。
+            </p>
+            <p style={{ color: '#b42318', fontSize: 13, marginBottom: 0 }}>
+              这是敏感操作，后续修改可能丢失。建议先保存或备份重要修改。
+            </p>
+            {!hasCheckpoint && (
+              <p style={{ color: '#6b7280', fontSize: 13, marginTop: 8, marginBottom: 0 }}>
+                当前消息无 checkpoint，确认后将自动降级为仅清理后续对话。
+              </p>
+            )}
+          </div>
+        ),
+        onOk: () => resolve(),
+        onCancel: () => reject(new Error('__user_abort__')),
+      })
+    })
+  }, [])
+
+  const handleReEditMessage = useCallback(
+    (msg: DocStudioChatMessage, msgIndex: number) => {
+      if (!snap.workspaceId) {
+        message.warning('请先选择工作区')
+        return
+      }
+      if (chatLoading || reEditSubmitting) {
+        message.warning('任务执行中，请稍后再试')
+        return
+      }
+      const rawText = (msg.content || '')
+        .replace(/\n*\[已附带图片\s*\d+\s*张\]\s*/g, '')
+        .trim()
+      const runId = typeof msg.meta?.runId === 'string' ? msg.meta.runId : ''
+      const beforeMessageId =
+        typeof msg.meta?.messageId === 'string' ? msg.meta.messageId.trim() : ''
+      const prevImagesRaw = Array.isArray(msg.meta?.images) ? msg.meta.images : []
+      const prevImages: ChatImageAttachment[] = prevImagesRaw
+        .map((img: any, idx: number) => ({
+          id: String(img?.id || `${Date.now()}-${idx}`),
+          name: String(img?.name || `image-${idx + 1}`),
+          dataUrl: String(img?.dataUrl || img?.data_url || ''),
+          mimeType: String(img?.mimeType || 'image/png'),
+          size: Number(img?.size || 0),
+        }))
+        .filter((item) => Boolean(item.dataUrl))
+      const prevSelections = normalizeSelectionFragments(msg.meta?.selections)
+      const prevFileMentions = normalizeFileMentionFragments(
+        msg.meta?.fileMentions ?? msg.meta?.file_mentions,
+      )
+      setReEditDraft({
+        messageId: msg.id,
+        msgIndex: Math.max(0, Math.floor(msgIndex)),
+        prompt: rawText,
+        runId,
+        beforeMessageId,
+        images: prevImages,
+        selections: prevSelections,
+        fileMentions: prevFileMentions,
+      })
+    },
+    [chatLoading, reEditSubmitting, snap.workspaceId],
+  )
+
+  const handleCancelReEdit = useCallback(() => {
+    if (reEditSubmitting) return
+    setReEditDraft(null)
+  }, [reEditSubmitting])
+
+  useEffect(() => {
+    if (!reEditDraft) return
+    const handleOutsideMouseDown = (event: MouseEvent) => {
+      if (reEditSubmitting) return
+      const target = event.target as Node | null
+      const container = reEditContainerRef.current
+      if (!container || !target) return
+      if (container.contains(target)) return
+      setReEditDraft(null)
+    }
+    document.addEventListener('mousedown', handleOutsideMouseDown, true)
+    return () => {
+      document.removeEventListener('mousedown', handleOutsideMouseDown, true)
+    }
+  }, [reEditDraft, reEditSubmitting])
+
+  const handleSubmitReEdit = useCallback(
+    async (restoreFiles: boolean) => {
+      if (!snap.workspaceId) {
+        message.warning('请先选择工作区')
+        return
+      }
+      if (chatLoading || reEditSubmitting) {
+        message.warning('任务执行中，请稍后再试')
+        return
+      }
+      if (!reEditDraft) {
+        message.warning('请先编辑一条历史消息')
+        return
+      }
+      const submitPrompt = reEditDraft.prompt.trim()
+      if (!submitPrompt && reEditDraft.images.length === 0) {
+        message.warning('请输入指令或添加图片')
+        return
+      }
+
+      const safeMsgIndex = Math.max(0, Math.floor(reEditDraft.msgIndex))
+      const keepUserTurns = snap.chatMessages
+        .slice(0, safeMsgIndex)
+        .filter((item) => item.role === 'user').length
+      const currentDraft = reEditDraft
+
+      setReEditSubmitting(true)
+      try {
+        if (restoreFiles) {
+          await confirmReEditRestoreAction(Boolean(currentDraft.runId))
+          await confirmOverwriteDirtyFiles()
+        }
+
+        const sessionId = String(
+          docStudioState.workspaceConfig?.session_id ||
+            docStudioState.workspaceConfig?.sessionId ||
+            '',
+        ).trim()
+        if (!sessionId) {
+          docStudioActions.truncateMessagesFromIndex(safeMsgIndex)
+        } else {
+          await rewindConversation(
+            {
+              workspaceId: snap.workspaceId,
+              keepUserTurns,
+              beforeMessageId: currentDraft.beforeMessageId || undefined,
+            },
+            { loading: false, errorToast: false },
+          )
+          try {
+            await loadWorkspaceChatHistory(snap.workspaceId, docStudioState.workspaceConfig || {})
+          } catch (error) {
+            // 服务端已回卷成功时，至少保证本地消息也被截断，避免 UI 与后端不一致。
+            docStudioActions.truncateMessagesFromIndex(safeMsgIndex)
+            message.warning(`会话已回卷，但刷新历史失败：${getErrorMessage(error)}`)
+          }
+        }
+
+        if (restoreFiles) {
+          if (!currentDraft.runId) {
+            message.info('该消息无可用 checkpoint，已自动降级为仅清理后续对话')
+          } else {
+            try {
+              const result = await restoreCheckpoint(
+                { workspaceId: snap.workspaceId, runId: currentDraft.runId },
+                { loading: false, errorToast: false },
+              )
+              const restoredFiles = result.restored_files || []
+              for (const filePath of restoredFiles) {
+                if (snap.openedFiles.includes(filePath)) {
+                  await openFile(filePath, true, true)
+                }
+              }
+              if (restoredFiles.length) {
+                await loadWorkspaceFiles(snap.workspaceId, false)
+              }
+            } catch (error) {
+              message.warning(`文件快照恢复失败：${getErrorMessage(error)}，已仅执行对话回卷`)
+            }
+          }
+        }
+
+        setReEditDraft(null)
+        await handleSend({
+          overridePrompt: submitPrompt,
+          overrideImages: currentDraft.images,
+          overrideSelections: currentDraft.selections,
+          overrideFileMentions: currentDraft.fileMentions,
+          useCurrentSelections: false,
+          clearComposer: false,
+        })
+      } catch (error) {
+        if ((error as Error)?.message === '__user_abort__') return
+        message.error(`重编辑失败: ${getErrorMessage(error)}`)
+      } finally {
+        setReEditSubmitting(false)
+      }
+    },
+    [
+      chatLoading,
+      confirmReEditRestoreAction,
+      confirmOverwriteDirtyFiles,
+      handleSend,
+      loadWorkspaceChatHistory,
+      loadWorkspaceFiles,
+      openFile,
+      reEditDraft,
+      reEditSubmitting,
+      snap.chatMessages,
+      snap.openedFiles,
+      snap.workspaceId,
+    ],
+  )
+
+  const handleRevertOperation = async (operationId: string, files?: string[]) => {
     if (!snap.workspaceId) {
-      message.warning('请选择工作�?)
+      message.warning('请先选择工作区')
       return
     }
+    const targetFiles = Array.isArray(files) ? files.filter(Boolean) : []
+    const scopedRevert = targetFiles.length > 0
     setRevertingOperationId(operationId)
     try {
-      const result = await revertOperation({
-        workspaceId: snap.workspaceId,
-        operationId,
-      })
+      const result = await revertOperation(
+        {
+          workspaceId: snap.workspaceId,
+          operationId,
+          files: scopedRevert ? targetFiles : undefined,
+        },
+        {
+          loading: false,
+          errorToast: false,
+        },
+      )
       const revertedFiles = result.reverted_files || []
       for (const filePath of revertedFiles) {
         if (snap.openedFiles.includes(filePath)) {
-          await openFile(filePath, true)
+          await openFile(filePath, true, true)
         }
       }
       if (result.deleted_files?.length) {
@@ -2391,160 +4491,274 @@ const LatexEditorPage = () => {
       }
       const affectedCount = (result.reverted_files?.length || 0) + (result.deleted_files?.length || 0)
       if (affectedCount) {
-        message.success(`已回�?${affectedCount} 个文件`)
+        message.success(
+          scopedRevert
+            ? `已恢复文件到该时间点（影响 ${affectedCount} 处变更）`
+            : `已回滚 ${affectedCount} 个变更`,
+        )
       } else {
-        message.info('未检测到可回滚的文件')
+        message.info(scopedRevert ? '该时间点没有可恢复内容' : '没有需要回滚的变更')
       }
       if (lastOperationId === operationId) {
         setLastOperationId(null)
       }
       await loadOperationHistory()
+      if (diffModalOpen && diffModalContext === 'timeline') {
+        closeDiffModal(
+          allFileDiffs.map((d) => d.file_path).filter((p): p is string => Boolean(p)),
+        )
+      }
     } catch (error) {
-      message.error(`回滚失败�?{getErrorMessage(error)}`)
+      message.error(`回滚失败: ${getErrorMessage(error)}`)
     } finally {
       setRevertingOperationId(null)
     }
   }
 
-  const handleFinalizeDiffs = async () => {
-    if (!snap.workspaceId) {
-      message.warning('请选择工作�?)
-      return
-    }
-    if (!diffOperationId) {
-      message.error('缺少操作 ID，无法回�?)
-      return
-    }
-    const rejectedFiles = allFileDiffs
-      .filter((_, index) => !acceptedDiffs.has(index))
-      .map((diff) => diff.file_path)
-      .filter(Boolean)
-
-    if (!rejectedFiles.length) {
-      setDiffModalOpen(false)
-      setAllFileDiffs([])
-      setCurrentDiffIndex(0)
-      setAcceptedDiffs(new Set())
-      setDiffOperationId(null)
-      message.success('已保留全部修�?)
-      return
-    }
-
-    setDiffReverting(true)
-    try {
-      const result = await revertOperation({
-        workspaceId: snap.workspaceId,
-        operationId: diffOperationId,
-        files: rejectedFiles,
-      })
-      const revertedFiles = result.reverted_files || []
-      for (const filePath of revertedFiles) {
-        if (snap.openedFiles.includes(filePath)) {
-          await openFile(filePath, true)
+  const closeDiffModal = useCallback(
+    (pathsToRefresh?: string[], contentByPath?: Record<string, string>) => {
+      const paths = pathsToRefresh && pathsToRefresh.length > 0 ? pathsToRefresh : []
+      paths.forEach((p) => {
+        const content = contentByPath?.[p]
+        if (typeof content === 'string') {
+          docStudioActions.setFileContent(p, content)
+        } else {
+          void openFile(p, true)
         }
-      }
-      if (result.deleted_files?.length) {
-        await loadWorkspaceFiles(snap.workspaceId, false)
-      }
-      const affectedCount = (result.reverted_files?.length || 0) + (result.deleted_files?.length || 0)
-      message.success(`已撤销 ${affectedCount} 个文件的修改`)
-      setDiffModalOpen(false)
-      setAllFileDiffs([])
-      setCurrentDiffIndex(0)
-      setAcceptedDiffs(new Set())
-      setDiffOperationId(null)
-    } catch (error) {
-      message.error(`撤销未接受修改失败：${getErrorMessage(error)}`)
-    } finally {
-      setDiffReverting(false)
+      })
+    const diffEditor = diffEditorRef.current
+    const modifiedEditor =
+      diffEditor && typeof diffEditor.getModifiedEditor === 'function'
+        ? diffEditor.getModifiedEditor()
+        : diffEditor
+    if (modifiedEditor && typeof modifiedEditor.deltaDecorations === 'function') {
+      diffHunkDecorationsRef.current = modifiedEditor.deltaDecorations(diffHunkDecorationsRef.current, [])
     }
-  }
+    if (diffEditorListenerRef.current.length > 0) {
+      diffEditorListenerRef.current.forEach((listener) => {
+        try {
+          listener.dispose()
+        } catch (error) {
+          // ignore dispose errors
+        }
+      })
+      diffEditorListenerRef.current = []
+    }
+    setDiffModalOpen(false)
+    setAgentDiffReviewOpen(false)
+    setAllFileDiffs([])
+    setCurrentDiffIndex(0)
+    setDiffOperationId(null)
+    setDiffModalContext('agent')
+    setResolvedOriginal('')
+    setResolvedModified('')
+    setLineChanges([])
+    setCurrentHunkIndex(0)
+    },
+    [openFile],
+  )
+
+  const openTimelineDiffPreview = useCallback((operationId: string, filePath?: string) => {
+    const normalizedPath = normalizeWorkspacePath(String(filePath || ''))
+    if (!operationId || !normalizedPath) {
+      message.warning('缺少可预览的版本信息')
+      return
+    }
+    setAgentDiffReviewOpen(false)
+    setDiffModalContext('timeline')
+    setDiffOperationId(operationId)
+    setAllFileDiffs([
+      {
+        file_path: normalizedPath,
+        original_content: '',
+        modified_content: '',
+      },
+    ])
+    setCurrentDiffIndex(0)
+    setResolvedOriginal('')
+    setResolvedModified('')
+    setLineChanges([])
+    setCurrentHunkIndex(0)
+    setDiffModalOpen(true)
+  }, [])
 
   const handleRejectCurrentDiff = async () => {
     if (!snap.workspaceId) {
-      message.warning('请选择工作�?)
+      message.warning('请先选择工作区')
       return
     }
     const target = allFileDiffs[currentDiffIndex]
     if (!target?.file_path) {
-      message.warning('未找到当前文�?)
+      message.warning('请选择差异文件')
       return
     }
     if (!diffOperationId) {
-      message.error('缺少操作 ID，无法回�?)
+      message.error('缺少变更 ID')
       return
     }
     if (diffReverting) return
     setDiffReverting(true)
     try {
-      const result = await revertOperation({
-        workspaceId: snap.workspaceId,
-        operationId: diffOperationId,
-        files: [target.file_path],
-      })
+      const result = await revertOperation(
+        {
+          workspaceId: snap.workspaceId,
+          operationId: diffOperationId,
+          files: [target.file_path],
+        },
+        {
+          loading: false,
+          errorToast: false,
+        },
+      )
       const revertedFiles = result.reverted_files || []
       for (const filePath of revertedFiles) {
         if (snap.openedFiles.includes(filePath)) {
-          await openFile(filePath, true)
+          await openFile(filePath, true, true)
         }
       }
       if (result.deleted_files?.length) {
         await loadWorkspaceFiles(snap.workspaceId, false)
       }
       const affectedCount = (result.reverted_files?.length || 0) + (result.deleted_files?.length || 0)
-      message.success(affectedCount ? `已回�?${affectedCount} 个文件` : '已回滚该文件')
+      message.success(affectedCount ? `已回滚 ${affectedCount} 个变更` : '没有需要回滚的变更')
 
       const nextDiffs = allFileDiffs.filter((_, index) => index !== currentDiffIndex)
-      const nextAccepted = new Set<number>()
-      acceptedDiffs.forEach((index) => {
-        if (index === currentDiffIndex) return
-        nextAccepted.add(index > currentDiffIndex ? index - 1 : index)
-      })
       if (!nextDiffs.length) {
-        setDiffModalOpen(false)
-        setAllFileDiffs([])
-        setCurrentDiffIndex(0)
-        setAcceptedDiffs(new Set())
-        setDiffOperationId(null)
+        closeDiffModal()
       } else {
         setAllFileDiffs(nextDiffs)
-        setAcceptedDiffs(nextAccepted)
         setCurrentDiffIndex(Math.min(currentDiffIndex, nextDiffs.length - 1))
       }
     } catch (error) {
-      message.error(`回滚失败�?{getErrorMessage(error)}`)
+      message.error(`回滚失败: ${getErrorMessage(error)}`)
     } finally {
       setDiffReverting(false)
     }
   }
 
-  const handleKeepCurrentDiff = () => {
+  const handleKeepCurrentDiff = useCallback(
+    (finalContent?: string) => {
+      const currentPath = allFileDiffs[currentDiffIndex]?.file_path
+      const paths = allFileDiffs.map((d) => d.file_path).filter((p): p is string => Boolean(p))
+      const content =
+        finalContent ??
+        agentDiffReviewRef.current?.getCurrentModifiedContent() ??
+        resolvedModified ??
+        allFileDiffs[currentDiffIndex]?.modified_content
+      const contentByPath = content && currentPath ? { [currentPath]: content } : undefined
     const nextDiffs = allFileDiffs.filter((_, index) => index !== currentDiffIndex)
-    const nextAccepted = new Set<number>()
-    acceptedDiffs.forEach((index) => {
-      if (index === currentDiffIndex) return
-      nextAccepted.add(index > currentDiffIndex ? index - 1 : index)
-    })
     if (!nextDiffs.length) {
-      setDiffModalOpen(false)
-      setAllFileDiffs([])
-      setCurrentDiffIndex(0)
-      setAcceptedDiffs(new Set())
-      setDiffOperationId(null)
+        closeDiffModal(paths, contentByPath)
     } else {
+        if (contentByPath && currentPath) {
+          docStudioActions.setFileContent(currentPath, content)
+        }
       setAllFileDiffs(nextDiffs)
-      setAcceptedDiffs(nextAccepted)
       setCurrentDiffIndex(Math.min(currentDiffIndex, nextDiffs.length - 1))
+    }
+    },
+    [allFileDiffs, currentDiffIndex, closeDiffModal, resolvedModified],
+  )
+
+  const handleKeepAllDiffs = useCallback(() => {
+    if (!allFileDiffs.length) {
+      closeDiffModal()
+      return
+    }
+    const paths = allFileDiffs.map((d) => d.file_path).filter((p): p is string => Boolean(p))
+    const contentByPath: Record<string, string> = {}
+    const currentModified =
+      agentDiffReviewRef.current?.getCurrentModifiedContent() ?? resolvedModified
+    allFileDiffs.forEach((d, idx) => {
+      if (d.file_path) {
+        contentByPath[d.file_path] =
+          idx === currentDiffIndex && currentModified ? currentModified : (d.modified_content ?? '')
+      }
+    })
+    closeDiffModal(paths, Object.keys(contentByPath).length > 0 ? contentByPath : undefined)
+    message.success('已保留全部文件变更')
+  }, [allFileDiffs, closeDiffModal, currentDiffIndex, resolvedModified])
+
+  const handleRejectAllDiffs = async () => {
+    if (!snap.workspaceId) {
+      message.warning('请先选择工作区')
+      return
+    }
+    if (!diffOperationId) {
+      message.error('缺少变更 ID')
+      return
+    }
+    const files = allFileDiffs
+      .map((diff) => diff.file_path)
+      .filter((path): path is string => Boolean(path))
+    if (!files.length) {
+      closeDiffModal()
+      return
+    }
+    setDiffReverting(true)
+    try {
+      const result = await revertOperation(
+        {
+          workspaceId: snap.workspaceId,
+          operationId: diffOperationId,
+          files,
+        },
+        {
+          loading: false,
+          errorToast: false,
+        },
+      )
+      const revertedFiles = result.reverted_files || []
+      for (const filePath of revertedFiles) {
+        if (snap.openedFiles.includes(filePath)) {
+          await openFile(filePath, true, true)
+        }
+      }
+      if (result.deleted_files?.length) {
+        await loadWorkspaceFiles(snap.workspaceId, false)
+      }
+      const affectedCount = (result.reverted_files?.length || 0) + (result.deleted_files?.length || 0)
+      message.success(affectedCount ? `已回滚 ${affectedCount} 个变更` : '没有需要回滚的变更')
+      closeDiffModal(files)
+    } catch (error) {
+      message.error(`回滚失败: ${getErrorMessage(error)}`)
+    } finally {
+      setDiffReverting(false)
     }
   }
 
-  const handleAcceptLineChange = (changeIndex: number) => {
-    setAcceptedLineChanges((prev) => {
-      const next = new Set(prev)
-      next.add(changeIndex)
-      return next
-    })
-  }
+  const handleKeepHunk = useCallback(
+    (hunkIndex: number) => {
+      const change = lineChanges[hunkIndex]
+      if (!change) return
+      const orig = resolvedOriginal || allFileDiffs[currentDiffIndex]?.original_content || ''
+      const mod =
+        (agentDiffReviewRef.current?.getCurrentModifiedContent() ??
+          resolvedModified ??
+          allFileDiffs[currentDiffIndex]?.modified_content) ??
+        ''
+      const newOriginal = applyHunkKeep(change, orig, mod)
+      setResolvedOriginal(newOriginal)
+      setResolvedModified(mod)
+      setCurrentHunkIndex(0)
+      if (newOriginal === mod) {
+        handleKeepCurrentDiff(newOriginal)
+      }
+    },
+    [
+      lineChanges,
+      resolvedOriginal,
+      resolvedModified,
+      allFileDiffs,
+      currentDiffIndex,
+      handleKeepCurrentDiff,
+    ],
+  )
+
+  const handleKeepCurrentHunk = useCallback(() => {
+    if (!lineChanges.length) return
+    handleKeepHunk(currentHunkIndex)
+  }, [currentHunkIndex, lineChanges.length, handleKeepHunk])
 
   const applyLineChangeRevert = (
     change: any,
@@ -2563,16 +4777,13 @@ const LatexEditorPage = () => {
     const originalSlice = hasOriginal ? originalLines.slice(Math.max(oStart - 1, 0), oEnd) : []
 
     if (!hasOriginal && hasModified) {
-      // 插入：删除新增内�?
       const start = Math.max(mStart - 1, 0)
       const count = Math.max(mEnd - mStart + 1, 0)
       modifiedLines.splice(start, count)
     } else if (hasOriginal && !hasModified) {
-      // 删除：插回原始内�?
       const insertPos = Math.max((mStart || oStart) - 1, 0)
       modifiedLines.splice(insertPos, 0, ...originalSlice)
     } else {
-      // 替换
       const start = Math.max(mStart - 1, 0)
       const count = Math.max(mEnd - mStart + 1, 0)
       modifiedLines.splice(start, count, ...originalSlice)
@@ -2581,31 +4792,57 @@ const LatexEditorPage = () => {
     return modifiedLines.join('\n')
   }
 
+  const applyHunkKeep = (
+    change: any,
+    originalText: string,
+    modifiedText: string,
+  ) => {
+    const originalLines = originalText.split('\n')
+    const modifiedLines = modifiedText.split('\n')
+    const oStart = Number(change?.originalStartLineNumber || 0)
+    const oEnd = Number(change?.originalEndLineNumber || 0)
+    const mStart = Number(change?.modifiedStartLineNumber || 0)
+    const mEnd = Number(change?.modifiedEndLineNumber || 0)
+    const removeCount = oStart > 0 && oEnd >= oStart ? oEnd - oStart + 1 : 0
+    const insertSlice =
+      mStart > 0 && mEnd >= mStart
+        ? modifiedLines.slice(Math.max(mStart - 1, 0), mEnd)
+        : []
+    const insertIdx = Math.max((oStart || 1) - 1, 0)
+    originalLines.splice(insertIdx, removeCount, ...insertSlice)
+    return originalLines.join('\n')
+  }
+
   const handleRejectLineChange = async (changeIndex: number) => {
     if (!snap.workspaceId) {
-      message.warning('请选择工作�?)
+      message.warning('请先选择工作区')
       return
     }
     const diff = allFileDiffs[currentDiffIndex]
     if (!diff?.file_path) {
-      message.warning('未找到当前文�?)
+      message.warning('请选择差异文件')
       return
     }
     const change = lineChanges[changeIndex]
     if (!change) {
-      message.warning('未找到该修改片段')
+      message.warning('未找到该变更')
       return
     }
-    if (diffContentLoading) return
-
     setDiffReverting(true)
     try {
       const nextContent = applyLineChangeRevert(change, resolvedOriginal, resolvedModified)
-      await updateFileContent({
-        workspaceId: snap.workspaceId,
-        path: diff.file_path,
-        content: nextContent,
-      })
+      await updateFileContent(
+        {
+          workspaceId: snap.workspaceId,
+          path: diff.file_path,
+          content: nextContent,
+        },
+        {
+          loading: false,
+          errorToast: false,
+        },
+      )
+      docStudioActions.setFileContent(diff.file_path, nextContent)
       setResolvedModified(nextContent)
       setAllFileDiffs((prev) =>
         prev.map((item, idx) =>
@@ -2614,83 +4851,102 @@ const LatexEditorPage = () => {
             : item,
         ),
       )
-      message.success('已回滚该处修�?)
-      requestAnimationFrame(() => {
-        refreshLineChanges()
-      })
+      if (nextContent === resolvedOriginal) {
+        const currentPath = diff.file_path
+        const paths = allFileDiffs.map((d) => d.file_path).filter((p): p is string => Boolean(p))
+        const contentByPath = currentPath ? { [currentPath]: nextContent } : undefined
+        const nextDiffs = allFileDiffs.filter((_, index) => index !== currentDiffIndex)
+        if (!nextDiffs.length) {
+          closeDiffModal(paths, contentByPath)
+        } else {
+          if (currentPath) {
+            docStudioActions.setFileContent(currentPath, nextContent)
+          }
+          setAllFileDiffs(nextDiffs)
+          setCurrentDiffIndex(Math.min(currentDiffIndex, nextDiffs.length - 1))
+        }
+        message.success('该修改文件已全部撤销')
+        return
+      }
+      message.success('已撤销该变更')
     } catch (error) {
-      message.error(`回滚失败�?{getErrorMessage(error)}`)
+      message.error(`更新失败: ${getErrorMessage(error)}`)
     } finally {
       setDiffReverting(false)
     }
   }
 
-  const handleExportPresets = () => {
-    if (!customPromptPresets.length) {
-      message.warning('暂无可导出的自定义模�?)
-      return
-    }
-    downloadJson('doc-studio-presets.json', {
-      exported_at: new Date().toISOString(),
-      presets: customPromptPresets,
-    })
-  }
+  const handleRejectCurrentHunk = useCallback(async () => {
+    if (!lineChanges.length) return
+    await handleRejectLineChange(currentHunkIndex)
+  }, [currentHunkIndex, lineChanges.length, handleRejectLineChange])
 
-  const handleImportPresets = () => {
-    presetFileInputRef.current?.click()
-  }
+  useEffect(() => {
+    const reviewActive = agentDiffReviewOpen && diffModalContext === 'agent' && allFileDiffs.length > 0
+    if (!reviewActive) return
 
-  const handlePresetFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0]
-    if (!file) return
-    try {
-      const text = await file.text()
-      const parsed = JSON.parse(text)
-      const rawPresets = Array.isArray(parsed) ? parsed : parsed?.presets
-      if (!Array.isArray(rawPresets)) {
-        message.error('模板文件格式无效')
+    const handleReviewHotkeys = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null
+      if (
+        target &&
+        (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+      ) {
         return
       }
-      const allowedIntents: PromptIntent[] = ['edit', 'suggest', 'qa', 'citation', 'custom']
-      const sanitized: CustomPromptPreset[] = rawPresets
-        .filter((item: any) => item && typeof item.label === 'string' && typeof item.prompt === 'string')
-        .map((item: any) => ({
-          id: item.id || generateId(),
-          label: item.label,
-          description: item.description || '自定义模�?,
-          prompt: item.prompt,
-          intent: allowedIntents.includes(item.intent) ? item.intent : 'custom',
-          llm_options: item.llm_options,
-          pinned: Boolean(item.pinned),
-        }))
-      if (!sanitized.length) {
-        message.warning('未找到可导入的模�?)
+      const lowerKey = event.key.toLowerCase()
+      const withCtrl = event.ctrlKey || event.metaKey
+
+      if (event.altKey && event.key === 'ArrowLeft') {
+        event.preventDefault()
+        setCurrentDiffIndex((index) => Math.max(index - 1, 0))
         return
       }
-      const merged = [...customPromptPresets]
-      const byId = new Map(merged.map((item) => [item.id, item]))
-      const byLabel = new Map(merged.map((item) => [item.label, item]))
-      let added = 0
-      let updated = 0
-      sanitized.forEach((item) => {
-        const existing = byId.get(item.id) || byLabel.get(item.label)
-        if (existing) {
-          Object.assign(existing, item)
-          updated += 1
+      if (event.altKey && event.key === 'ArrowRight') {
+        event.preventDefault()
+        setCurrentDiffIndex((index) => Math.min(index + 1, allFileDiffs.length - 1))
+        return
+      }
+      if (withCtrl && event.shiftKey && lowerKey === 'y') {
+        event.preventDefault()
+        if (lineChanges.length > 0) {
+          handleKeepCurrentHunk()
         } else {
-          merged.push(item)
-          added += 1
+          handleKeepCurrentDiff()
         }
-      })
-      persistCustomPromptPresets(merged)
-      message.success(`模板导入完成：新�?${added} 条，更新 ${updated} 条`)
-    } catch (error) {
-      console.warn('Failed to import presets', error)
-      message.error('模板导入失败')
-    } finally {
-      event.target.value = ''
+        return
+      }
+      if (withCtrl && lowerKey === 'n') {
+        event.preventDefault()
+        if (lineChanges.length > 0) {
+          void handleRejectCurrentHunk()
+        } else {
+          void handleRejectCurrentDiff()
+        }
+        return
+      }
+      if (event.altKey && event.key === 'ArrowUp') {
+        event.preventDefault()
+        setCurrentHunkIndex((index) => Math.max(index - 1, 0))
+        return
+      }
+      if (event.altKey && event.key === 'ArrowDown') {
+        event.preventDefault()
+        setCurrentHunkIndex((index) => Math.min(index + 1, Math.max(lineChanges.length - 1, 0)))
+      }
     }
-  }
+
+    document.addEventListener('keydown', handleReviewHotkeys)
+    return () => document.removeEventListener('keydown', handleReviewHotkeys)
+  }, [
+    agentDiffReviewOpen,
+    allFileDiffs.length,
+    diffModalContext,
+    lineChanges.length,
+    handleKeepCurrentHunk,
+    handleKeepCurrentDiff,
+    handleRejectCurrentHunk,
+    handleRejectCurrentDiff,
+  ])
 
   const closeAsyncStream = useCallback(() => {
     if (asyncStreamRef.current) {
@@ -2698,6 +4954,197 @@ const LatexEditorPage = () => {
       asyncStreamRef.current = null
     }
   }, [])
+
+  const pushChatMessage = useCallback((payload: Omit<DocStudioChatMessage, 'id' | 'createdAt'>) => {
+    docStudioActions.appendChatMessage(payload)
+  }, [])
+
+  const resetLiveAgentPreview = useCallback(() => {
+    setLiveAgentStatus('')
+    setLiveAgentTimeline([])
+    setLiveAgentPreviewText('')
+    setLiveDeltaCharCount(0)
+    setLiveAgentElapsedSec(0)
+    liveDeltaStartedRef.current = false
+    seenLiveEventIdsRef.current = new Set()
+    handledInteractionIdsRef.current = new Set()
+    lastLiveEventSequenceRef.current = -1
+    activeRunIdRef.current = null
+  }, [])
+
+  const appendLiveTimelineEvent = useCallback((params: {
+    text?: string
+    eventType?: string
+    level?: LiveTimelineLevel
+    eventId?: string
+    sequence?: number
+    timestamp?: number
+  }) => {
+    const text = String(params.text || '').trim()
+    if (!text) return
+    const eventId = String(params.eventId || '').trim()
+    const sequence = Number(params.sequence)
+    if (eventId) {
+      if (seenLiveEventIdsRef.current.has(eventId)) return
+      seenLiveEventIdsRef.current.add(eventId)
+    }
+    if (Number.isFinite(sequence)) {
+      if (sequence <= lastLiveEventSequenceRef.current) {
+        return
+      }
+      lastLiveEventSequenceRef.current = sequence
+    }
+    const normalized: LiveTimelineEntry = {
+      id: eventId || `local-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+      sequence: Number.isFinite(sequence) ? sequence : lastLiveEventSequenceRef.current + 1,
+      eventType: params.eventType || 'log',
+      text,
+      level: params.level || 'info',
+      timestamp: Number(params.timestamp) || Date.now(),
+    }
+    setLiveAgentTimeline((prev) => {
+      const next = [...prev, normalized]
+      return next.length > 120 ? next.slice(next.length - 120) : next
+    })
+  }, [])
+
+  const appendLiveAgentEvent = useCallback((line?: string) => {
+    const text = String(line || '').trim()
+    if (!text) return
+    appendLiveTimelineEvent({ text, eventType: 'log', level: 'info' })
+  }, [appendLiveTimelineEvent])
+
+  const summarizeStreamStep = useCallback((step: any) => {
+    if (!step || typeof step !== 'object') return ''
+    const type = String(step.type || '').toLowerCase()
+    const tool = formatLiveToolName(step.tool || step.tool_name)
+    const content = truncateLiveText(step.content, 96)
+    const result =
+      step.result && typeof step.result === 'object' ? (step.result as Record<string, any>) : undefined
+    const durationSeconds = Number(result?.duration_seconds)
+    const duration = Number.isFinite(durationSeconds) ? ` (${durationSeconds.toFixed(1)}s)` : ''
+    const summary = typeof result?.summary === 'string' ? truncateLiveText(result.summary, 72) : ''
+    const err = typeof result?.error === 'string' ? truncateLiveText(result.error, 72) : ''
+
+    if (type === 'thought') return content ? `Thinking · ${content}` : 'Thinking...'
+    if (type === 'reflection') return content ? `Reviewing · ${content}` : 'Reviewing...'
+    if (type === 'action') {
+      if (tool) return `调用工具 · ${tool}`
+      return content ? `执行中 · ${content}` : '执行中...'
+    }
+    if (type === 'result') {
+      const success = result?.success !== false
+      if (tool) {
+        if (success) {
+          return summary ? `完成工具 · ${tool}${duration} · ${summary}` : `完成工具 · ${tool}${duration}`
+        }
+        return err ? `工具失败 · ${tool}${duration} · ${err}` : `工具失败 · ${tool}${duration}`
+      }
+      return content ? `结果 · ${content}` : ''
+    }
+    if (type === 'finish') return '正在生成最终回答...'
+    if (type === 'start') return '任务已启动...'
+    if (content) return content
+    return ''
+  }, [])
+
+  const parseLiveEventMeta = useCallback((event: MessageEvent<string>, payload: any) => {
+    const eventId = String(event.lastEventId || payload?.event_id || payload?.id || '').trim()
+    const sequenceRaw = Number(payload?.sequence)
+    const sequence = Number.isFinite(sequenceRaw) ? sequenceRaw : undefined
+    const timestampRaw = Number(payload?.timestamp)
+    const timestamp = Number.isFinite(timestampRaw)
+      ? (timestampRaw > 1e12 ? Math.round(timestampRaw) : Math.round(timestampRaw * 1000))
+      : Date.now()
+    return { eventId, sequence, timestamp }
+  }, [])
+
+  const markPendingSendCommitted = useCallback((reason: 'delta' | 'tool') => {
+    const pending = pendingSendRef.current
+    if (!pending || pending.committed) return
+    pending.committed = true
+    pending.commitReason = reason
+    docStudioActions.updateMessageMeta(pending.userMessageId, {
+      streamCommitted: true,
+      streamCommitReason: reason,
+    })
+  }, [])
+
+  const rollbackPendingSendToComposer = useCallback(() => {
+    const pending = pendingSendRef.current
+    if (!pending || pending.committed) return false
+    docStudioActions.removeChatMessageById(pending.userMessageId)
+    setPrompt(pending.prompt)
+    setSelections(normalizeSelectionFragments(pending.selections))
+    setFileMentions(normalizeFileMentionFragments(pending.fileMentions))
+    setChatImageAttachments(pending.images.map((item) => ({ ...item })))
+    clearFileMentionSuggest()
+    skipNextComposerClearRef.current = true
+    pendingSendRef.current = null
+    requestAnimationFrame(() => {
+      promptInputDivRef.current?.focus()
+    })
+    return true
+  }, [clearFileMentionSuggest])
+
+  const handleStopSending = useCallback(async () => {
+    if (!chatLoading) return
+    stopRequestedRef.current = true
+    const currentRunId = activeRunIdRef.current
+    let cancelRequested = false
+    if (snap.workspaceId && currentRunId) {
+      try {
+        await cancelAgentRun(
+          { workspaceId: snap.workspaceId, runId: currentRunId },
+          { loading: false, errorToast: false },
+        )
+        cancelRequested = true
+        appendLiveTimelineEvent({
+          text: '任务已取消',
+          eventType: 'cancelled',
+          level: 'warning',
+        })
+      } catch (error) {
+        console.warn('Failed to cancel async run', error)
+      }
+    } else {
+      cancelRequested = true
+    }
+
+    const pending = pendingSendRef.current
+    const partialPreview = normalizeLiveDeltaText(liveAgentPreviewText).trim()
+    const hasCommittedOutput = Boolean(pending?.committed)
+    if (pending && !hasCommittedOutput && cancelRequested) {
+      rollbackPendingSendToComposer()
+      message.info('已撤回本次发送，可继续编辑后重发')
+    } else {
+      pendingSendRef.current = null
+      if (partialPreview) {
+        pushChatMessage({
+          role: 'agent',
+          content: `${partialPreview}\n\n[输出已中断，内容未完成]`,
+          meta: {
+            traceId: pending?.traceId,
+            interrupted: true,
+            partial: true,
+          },
+        })
+      }
+    }
+    asyncRunResolvedRef.current = true
+    resetLiveAgentPreview()
+    closeAsyncStream()
+    setChatLoading(false)
+  }, [
+    appendLiveTimelineEvent,
+    chatLoading,
+    closeAsyncStream,
+    liveAgentPreviewText,
+    pushChatMessage,
+    resetLiveAgentPreview,
+    rollbackPendingSendToComposer,
+    snap.workspaceId,
+  ])
 
   useEffect(() => {
     return () => {
@@ -2708,27 +5155,24 @@ const LatexEditorPage = () => {
   useEffect(() => {
     if (!asyncMode) {
       closeAsyncStream()
-      setAsyncRunStatus('idle')
     }
   }, [asyncMode, closeAsyncStream])
 
-  const pushChatMessage = (payload: Omit<DocStudioChatMessage, 'id' | 'createdAt'>) => {
-    docStudioActions.appendChatMessage(payload)
-  }
-
   const handleAgentResponse = useCallback(
     async (response: DocStudioAPI.AgentResponse, traceId: string) => {
+      pendingSendRef.current = null
       const changeCount = response.changes?.length || 0
       const operationId = response.operation_id || null
       const hasChanges = Boolean(
         (response.file_diffs && response.file_diffs.length > 0) ||
           (response.changes && response.changes.length > 0),
       )
+      const isFileOpIntent = String(response.intent_type || '').toLowerCase() === 'file_op'
       pushChatMessage({
         role: 'agent',
         content: response.execution_history?.[response.execution_history.length - 1]?.content
           ? response.execution_history[response.execution_history.length - 1].content
-          : `完成，检测到 ${changeCount} 处变更`,
+          : `已执行变更 ${changeCount} 项`,
         meta: {
           changes: response.changes,
           traceId: response.trace_id || traceId,
@@ -2747,12 +5191,20 @@ const LatexEditorPage = () => {
       if (operationId && hasChanges) {
         setLastOperationId(operationId)
       }
+      // 文件操作（创建/移动/删除）不一定产生可视 diff，但必须立即同步左侧文件树。
+      if ((hasChanges || isFileOpIntent) && snap.workspaceId) {
+        await syncWorkspaceFileTree(snap.workspaceId)
+      }
+      if (operationId) {
+        void loadOperationHistory()
+      }
       if (response.file_diffs && response.file_diffs.length > 0) {
         setAllFileDiffs(response.file_diffs)
         setCurrentDiffIndex(0)
-        setAcceptedDiffs(new Set(response.file_diffs.map((_, index) => index)))
+        setAgentDiffReviewOpen(true)
+        setDiffModalContext('agent')
         setDiffOperationId(operationId)
-        setDiffModalOpen(true)
+        setDiffModalOpen(false)
       } else if (response.changes && response.changes.length > 0) {
         const affectedFiles = Array.from(
           new Set(
@@ -2764,30 +5216,40 @@ const LatexEditorPage = () => {
         for (const filePath of affectedFiles) {
           await openFile(filePath)
         }
-        message.info(`已应�?${changeCount} 处修改`)
+        message.info(`已应用变更 ${changeCount} 项`)
       }
       refreshSystemStats(true)
+      resetLiveAgentPreview()
+      activeRunIdRef.current = null
       setChatLoading(false)
     },
-    [openFile, pushChatMessage, refreshSystemStats],
+    [
+      loadOperationHistory,
+      openFile,
+      pushChatMessage,
+      refreshSystemStats,
+      resetLiveAgentPreview,
+      snap.workspaceId,
+      syncWorkspaceFileTree,
+    ],
   )
 
   const handleFeedbackSubmit = useCallback(
     async (messageId: string, traceId: string | undefined, rating: DocStudioAPI.AgentFeedbackRating) => {
       if (!traceId) {
-        message.warning('该回复缺�?Trace ID，无法反�?)
+        message.warning('缺少 Trace ID，无法提交反馈')
       return
     }
       const target = snap.chatMessages.find((item) => item.id === messageId)
       if (target?.meta?.feedback === rating) {
-        message.success('已记录该反馈')
+        message.success('已提交反馈')
         return
       }
       setFeedbackSubmitting((prev) => ({ ...prev, [messageId]: true }))
       try {
         await sendAgentFeedback({ traceId, rating })
         docStudioActions.setMessageFeedback(messageId, rating)
-        message.success('感谢反馈�?)
+        message.success('反馈已提交')
       } catch (error) {
         message.error(getErrorMessage(error))
       } finally {
@@ -2797,80 +5259,273 @@ const LatexEditorPage = () => {
     [snap.chatMessages],
   )
 
-  const handleSend = async () => {
+  async function handleSend(options?: {
+    overridePrompt?: string
+    overrideImages?: ChatImageAttachment[]
+    overrideSelections?: SelectionFragment[]
+    overrideFileMentions?: FileMentionFragment[]
+    useCurrentSelections?: boolean
+    clearComposer?: boolean
+  }) {
+    const sourcePrompt = String(options?.overridePrompt ?? prompt)
+    const sourceImages = Array.isArray(options?.overrideImages)
+      ? options.overrideImages
+      : chatImageAttachments
+    const useCurrentSelections = options?.useCurrentSelections !== false
+    const sourceSelections = Array.isArray(options?.overrideSelections)
+      ? normalizeSelectionFragments(options.overrideSelections)
+      : useCurrentSelections
+        ? normalizeSelectionFragments(selections)
+        : []
+    const sourceFileMentions = Array.isArray(options?.overrideFileMentions)
+      ? normalizeFileMentionFragments(options.overrideFileMentions)
+      : normalizeFileMentionFragments(fileMentions)
+    const clearComposer = options?.clearComposer !== false
+    if (reEditDraft) {
+      setReEditDraft(null)
+    }
     if (!snap.workspaceId) {
-      message.warning('请选择工作�?)
+      message.warning('请先选择工作区')
       return
     }
-    if (!prompt.trim()) {
-      message.warning('请输入指�?)
+    if (!sourcePrompt.trim() && sourceImages.length === 0) {
+      message.warning('请输入指令或添加图片')
       return
+    }
+    let activeSessionId =
+      snap.workspaceConfig?.session_id ?? snap.workspaceConfig?.sessionId ?? null
+    if (!snap.workspaceConfig?.session_id && !snap.workspaceConfig?.sessionId) {
+      try {
+        const { data: sessionRes } = await createSession(
+          { ephemeral: true, surface: 'doc_studio' },
+          { loading: false, errorToast: false },
+        )
+        const sessionId = sessionRes?.sessionId
+        if (!sessionId) {
+          message.error('创建会话失败，无法持久化对话')
+          return
+        }
+        const detail = await bindWorkspaceSession(
+          { workspaceId: snap.workspaceId, sessionId },
+          { loading: false, errorToast: false },
+        )
+        docStudioActions.setWorkspaceConfig(detail.config)
+        activeSessionId =
+          detail?.config?.session_id ?? detail?.config?.sessionId ?? sessionId
+      } catch (e: any) {
+        const detail = e?.response?.data?.detail
+        const status = e?.response?.status
+        const errStr =
+          typeof detail === 'string'
+            ? detail
+            : Array.isArray(detail)
+              ? detail[0]?.msg ?? JSON.stringify(detail)
+              : detail?.message ?? e?.message ?? String(e)
+        console.error('[DocStudio] 创建并绑定会话失败:', {
+          error: e,
+          response: e?.response?.data,
+          status,
+        })
+        const hint =
+          status === 404 || status === 502
+            ? '请确认主后端(8000)与 Doc Studio 服务已启动。'
+            : errStr
+        message.error(`创建并绑定会话失败：${hint}`)
+        return
+      }
     }
     const traceId =
       window.crypto?.randomUUID?.() ??
       `trace-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
     
-    // 【Cursor 风格改进】将 @selectionX 替换为更自然的引用，�?LLM 更容易理�?
-    let finalPrompt = prompt.trim()
+    let finalPrompt = sourcePrompt.trim() || '请结合图片内容回答我的问题。'
     const contextPayload: Record<string, any> = {}
+    let linkedSelections: SelectionFragment[] = []
+    let linkedFileMentions: FileMentionFragment[] = []
     
     if (snap.activeFilePath) {
       contextPayload.file_path = snap.activeFilePath
     }
     
-    if (selections.length > 0) {
-      // 构建结构化的 selections 上下文（包含完整文本和元信息�?
-      contextPayload.selections = selections.map((sel, idx) => ({
-        id: idx + 1,
-        start: sel.start,
-        end: sel.end,
-        text: sel.text,
-        file_path: sel.filePath || snap.activeFilePath,
-        placeholder: sel.placeholder || `@selection${idx + 1}`,
-      }))
-      
-      // 为了向后兼容，保留第一个选择的快捷引�?
-      contextPayload.selection = {
-        start: selections[0].start,
-        end: selections[0].end,
-        text: selections[0].text,
+    if (sourceSelections.length > 0) {
+      const placeholdersInPrompt = new Set(finalPrompt.match(SELECTION_PLACEHOLDER_REGEX) || [])
+      const selectionPairs = sourceSelections.map((sel, idx) => {
+        const placeholder = normalizeSelectionPlaceholder(sel.placeholder, idx)
+        const filePath = sel.filePath || snap.activeFilePath
+        return {
+          payload: {
+            id: idx + 1,
+            start: sel.start,
+            end: sel.end,
+            text: sel.text,
+            file_path: filePath,
+            placeholder,
+          },
+          fragment: {
+            id: sel.id || `${placeholder}-${sel.start}-${sel.end}-${idx}`,
+            start: sel.start,
+            end: sel.end,
+            text: sel.text,
+            filePath,
+            placeholder,
+          } as SelectionFragment,
+        }
+      })
+      const effectiveSelectionPairs = selectionPairs.filter((item) =>
+        placeholdersInPrompt.has(item.payload.placeholder),
+      )
+      if (placeholdersInPrompt.size > 0 && effectiveSelectionPairs.length < placeholdersInPrompt.size) {
+        const linked = new Set(effectiveSelectionPairs.map((item) => item.payload.placeholder))
+        const missingCount = Array.from(placeholdersInPrompt).filter((ph) => !linked.has(ph)).length
+        if (missingCount > 0) {
+          message.warning(`检测到 ${missingCount} 个未绑定引用标签，将按普通文本处理`)
+        }
       }
-      
-      // 【Cursor 风格】将 @selectionX 替换为更自然的中文引�?
-      const originalPrompt = prompt.trim()
-      selections.forEach((sel, idx) => {
-        const placeholder = sel.placeholder || `@selection${idx + 1}`
-        const naturalRef = `【片�?{idx + 1}】`
-        // 全局替换占位�?
-        finalPrompt = finalPrompt.replace(new RegExp(escapeRegExp(placeholder), 'g'), naturalRef)
+      if (effectiveSelectionPairs.length > 0) {
+        const persistedSelections = effectiveSelectionPairs.map((item) => item.payload)
+        contextPayload.selections = persistedSelections
+        contextPayload.selection = {
+          start: persistedSelections[0].start,
+          end: persistedSelections[0].end,
+          text: persistedSelections[0].text,
+        }
+        linkedSelections = effectiveSelectionPairs.map((item) => item.fragment)
+      }
+    } else if (containsSelectionPlaceholder(finalPrompt)) {
+      message.warning('检测到选区标签但未绑定选区内容，将按普通文本处理')
+    }
+    if (sourceFileMentions.length > 0) {
+      const filePlaceholdersInPrompt = new Set(finalPrompt.match(FILE_PLACEHOLDER_REGEX) || [])
+      const mentionPairs = sourceFileMentions.map((mention, idx) => {
+        const placeholder = normalizeFileMentionPlaceholder(mention.placeholder, idx)
+        return {
+          payload: {
+            id: idx + 1,
+            file_path: mention.filePath,
+            placeholder,
+            strategy: mention.strategy,
+            total_chars: mention.totalChars,
+            total_lines: mention.totalLines,
+            file_hash: mention.fileHash,
+            file_size: mention.fileSize,
+          },
+          mention: {
+            ...mention,
+            placeholder,
+          } as FileMentionFragment,
+        }
       })
-      
-      // 📊 保存日志，供 UI 显示（方便调试和理解系统行为�?
-      setLastPromptLog({
-        original: originalPrompt,
-        final: finalPrompt,
-        selectionsCount: selections.length,
-        timestamp: new Date().toLocaleTimeString('zh-CN'),
-      })
-      
-      // 📊 控制台日志：显示替换后的最�?prompt
-      console.group('🚀 发送给 Agent 的完整信�?)
-      console.log('原始 Prompt:', originalPrompt)
-      console.log('替换�?Prompt:', finalPrompt)
-      console.log('选中片段�?', selections.length)
-      console.log('Context Payload:', contextPayload)
-      console.groupEnd()
+      const effectiveMentionPairs = mentionPairs.filter((item) =>
+        filePlaceholdersInPrompt.has(item.payload.placeholder),
+      )
+      if (filePlaceholdersInPrompt.size > 0 && effectiveMentionPairs.length < filePlaceholdersInPrompt.size) {
+        const linked = new Set(effectiveMentionPairs.map((item) => item.payload.placeholder))
+        const missingCount = Array.from(filePlaceholdersInPrompt).filter((ph) => !linked.has(ph)).length
+        if (missingCount > 0) {
+          message.warning(`检测到 ${missingCount} 个未绑定文件引用标签，将按普通文本处理`)
+        }
+      }
+      if (effectiveMentionPairs.length > 0) {
+        contextPayload.file_mentions = effectiveMentionPairs.map((item) => item.payload)
+        linkedFileMentions = effectiveMentionPairs.map((item) => item.mention)
+      }
+    } else if (containsFilePlaceholder(finalPrompt)) {
+      message.warning('检测到文件引用标签但未绑定文件内容，将按普通文本处理')
+    }
+
+    if (sourceImages.length > 0) {
+      contextPayload.image_attachments = sourceImages.map((item) => ({
+        name: item.name,
+        mime_type: item.mimeType,
+        size: item.size,
+        data_url: item.dataUrl,
+      }))
+    }
+
+    let effectiveModel: LlmModelValue = llmModel
+    if (sourceImages.length > 0) {
+      if (!isVisionModel(effectiveModel)) {
+        effectiveModel = defaultVisionModelByProvider(resolveProviderByModel(effectiveModel))
+        message.info(`检测到图片输入，本次请求自动切换模型为 ${effectiveModel}`)
+      }
+    }
+    const effectiveLlmOptions = {
+      ...llmOptions,
+      interaction_mode: interactionMode,
+      llm_provider: resolveProviderByModel(effectiveModel),
+      llm_model: effectiveModel,
     }
     
-    pushChatMessage({ role: 'user', content: finalPrompt, meta: { traceId } })
+    const userMessageText =
+      sourceImages.length > 0
+        ? `${finalPrompt}\n\n[已附带图片 ${sourceImages.length} 张]`
+        : finalPrompt
+    // Generate a stable id so we can back-patch runId after the run is created.
+    const userMsgId = crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`
+    docStudioActions.appendChatMessage({
+      id: userMsgId,
+      role: 'user',
+      content: userMessageText,
+      meta: {
+        traceId,
+        imageCount: sourceImages.length || 0,
+        images: sourceImages.map((item) => ({
+          id: item.id,
+          name: item.name,
+          dataUrl: item.dataUrl,
+          mimeType: item.mimeType,
+          size: item.size,
+        })),
+        selectionCount: linkedSelections.length || 0,
+        selections: linkedSelections,
+        fileMentionCount: linkedFileMentions.length || 0,
+        fileMentions: linkedFileMentions,
+      },
+    })
+    pendingSendRef.current = {
+      userMessageId: userMsgId,
+      traceId,
+      prompt: sourcePrompt,
+      images: sourceImages.map((item) => ({ ...item })),
+      selections: sourceSelections.map((item) => ({ ...item })),
+      fileMentions: sourceFileMentions.map((item) => ({ ...item })),
+      committed: false,
+    }
+    stopRequestedRef.current = false
+    skipNextComposerClearRef.current = false
+    const sid = activeSessionId
+    if (sid) {
+      const currentTitle = String(sessionTitlesRef.current[String(sid)] || '').trim()
+      const nextTitle = buildSessionTitleFromPrompt(finalPrompt || userMessageText)
+      if (nextTitle && isPlaceholderSessionTitle(currentTitle)) {
+        sessionTitlesRef.current = {
+          ...sessionTitlesRef.current,
+          [sid]: nextTitle,
+        }
+        setSessionTitleVersion((value) => value + 1)
+        autoTitledSessionRef.current[String(sid)] = true
+        void renameSession(
+          { sessionId: String(sid), sessionName: nextTitle },
+          { loading: false, errorToast: false },
+        ).catch(() => {})
+      }
+    }
+    asyncRunResolvedRef.current = false
+    setLiveAgentStatus('请求已接收，正在准备执行...')
+    setLiveAgentTimeline([])
+    setLiveAgentPreviewText('')
+    setLiveDeltaCharCount(0)
+    setLiveAgentElapsedSec(0)
+    liveDeltaStartedRef.current = false
+    seenLiveEventIdsRef.current = new Set()
+    lastLiveEventSequenceRef.current = -1
     setChatLoading(true)
     try {
       docStudioActions.setAgentStatus({ intentType: undefined, plan: undefined, warnings: [] })
-      const knowledgeBaseId = selectedKnowledgeBaseId ?? undefined
-      const knowledgeBaseName = knowledgeBaseId ? selectedKnowledgeBase?.name : undefined
+      const knowledgeBaseId = ragEnabled ? (selectedKnowledgeBaseId ?? undefined) : undefined
+      const knowledgeBaseName = ragEnabled && knowledgeBaseId ? selectedKnowledgeBase?.name : undefined
       if (asyncMode) {
         closeAsyncStream()
-        setAsyncRunStatus('running')
         const asyncResult = await runAgentTaskAsync(
           {
             workspaceId: snap.workspaceId,
@@ -2878,35 +5533,164 @@ const LatexEditorPage = () => {
             context: Object.keys(contextPayload).length ? contextPayload : undefined,
             knowledgeBaseId,
             knowledgeBaseName,
-            options: Object.keys(llmOptions).length ? llmOptions : undefined,
+            options: Object.keys(effectiveLlmOptions).length ? effectiveLlmOptions : undefined,
           },
-          { headers: { 'X-Trace-Id': traceId } },
+          {
+            headers: { 'X-Trace-Id': traceId },
+            loading: false,
+            errorToast: false,
+          },
         )
+        if (stopRequestedRef.current) {
+          if (asyncResult?.runId && snap.workspaceId) {
+            try {
+              await cancelAgentRun(
+                { workspaceId: snap.workspaceId, runId: asyncResult.runId },
+                { loading: false, errorToast: false },
+              )
+            } catch (error) {
+              console.warn('Failed to cancel async run after stop request', error)
+            }
+          }
+          rollbackPendingSendToComposer()
+          asyncRunResolvedRef.current = true
+          activeRunIdRef.current = null
+          setChatLoading(false)
+          closeAsyncStream()
+          return
+        }
         if (!asyncResult.runId) {
           throw new Error('Failed to start async run')
         }
-        setAsyncRunId(asyncResult.runId)
+        activeRunIdRef.current = asyncResult.runId
+        // Back-patch the user message with runId so "re-edit" can restore the checkpoint.
+        docStudioActions.updateMessageMeta(userMsgId, { runId: asyncResult.runId })
+        appendLiveAgentEvent(`任务已创建：${asyncResult.runId.slice(0, 8)}`)
+        setLiveAgentStatus('任务已提交，等待执行...')
         const url = getAgentAsyncEventsUrl(snap.workspaceId, asyncResult.runId)
         const source = new EventSource(url)
         asyncStreamRef.current = source
 
-        source.addEventListener('status', (event) => {
-          const payload = JSON.parse((event as MessageEvent<string>).data || '{}')
-          if (payload?.warning) {
-            message.warning(payload.warning)
+        source.addEventListener('start', (event) => {
+          try {
+            const messageEvent = event as MessageEvent<string>
+            const payload = JSON.parse(messageEvent.data || '{}')
+            const meta = parseLiveEventMeta(messageEvent, payload)
+            const opId = String(payload?.operation_id || '')
+            const mode = String(payload?.mode || '').toLowerCase()
+            let text = '任务开始，正在分析需求...'
+            if (opId) {
+              text = `任务开始 · Op ${opId.slice(0, 8)}`
+            }
+            appendLiveTimelineEvent({
+              text,
+              eventType: 'start',
+              level: 'info',
+              eventId: meta.eventId,
+              sequence: meta.sequence,
+              timestamp: meta.timestamp,
+            })
+            if (mode === 'ask') {
+              appendLiveTimelineEvent({
+                text: '运行模式 · Ask',
+                eventType: 'mode',
+                level: 'info',
+                eventId: meta.eventId ? `${meta.eventId}:mode` : undefined,
+                timestamp: meta.timestamp,
+              })
+              setLiveAgentStatus('Ask 模式：正在生成回答...')
+            } else {
+              setLiveAgentStatus('正在分析需求...')
+            }
+          } catch (error) {
+            console.warn('Failed to parse start event', error)
           }
-          if (payload.status === 'running') {
-            setAsyncRunStatus('running')
-          } else if (payload.status === 'succeeded') {
-            setAsyncRunStatus('succeeded')
-          } else if (payload.status === 'failed') {
-            setAsyncRunStatus('failed')
+        })
+
+        source.addEventListener('delta', (event) => {
+          try {
+            const payload = JSON.parse((event as MessageEvent<string>).data || '{}')
+            const delta = normalizeLiveDeltaText(payload?.delta)
+            if (!delta) return
+            markPendingSendCommitted('delta')
+            setLiveAgentPreviewText((prev) => {
+              const next = `${prev}${delta}`
+              return next.length > 16000 ? next.slice(next.length - 16000) : next
+            })
+            setLiveDeltaCharCount((prev) => prev + delta.length)
+            if (!liveDeltaStartedRef.current) {
+              liveDeltaStartedRef.current = true
+              setLiveAgentStatus('正在流式输出回答...')
+              appendLiveTimelineEvent({
+                text: '正在流式输出回答（下方灰色区域为实时文本预览）',
+                eventType: 'delta_start',
+                level: 'info',
+              })
+            }
+          } catch (error) {
+            console.warn('Failed to parse delta event', error)
+          }
+        })
+
+        source.addEventListener('status', (event) => {
+          try {
+            const messageEvent = event as MessageEvent<string>
+            const payload = JSON.parse(messageEvent.data || '{}')
+            const meta = parseLiveEventMeta(messageEvent, payload)
+            const status = String(payload?.status || '')
+            if (status) {
+              const statusMap: Record<string, string> = {
+                queued: '任务已排队，等待执行...',
+                running: '任务执行中...',
+                awaiting_user_interaction: '等待你确认危险操作...',
+                awaiting_confirmation: '等待你确认危险操作...',
+                succeeded: '任务完成，正在整理结果...',
+                failed: '任务执行失败',
+                cancelled: '任务已取消',
+              }
+              const statusText = statusMap[status] || `任务状态：${status}`
+              setLiveAgentStatus(statusText)
+              appendLiveTimelineEvent({
+                text: statusText,
+                eventType: 'status',
+                level: status === 'failed' ? 'error' : status === 'cancelled' ? 'warning' : 'info',
+                eventId: meta.eventId,
+                sequence: meta.sequence,
+                timestamp: meta.timestamp,
+              })
+            }
+            if (payload?.warning) {
+              message.warning(payload.warning)
+              appendLiveTimelineEvent({
+                text: `警告：${payload.warning}`,
+                eventType: 'status_warning',
+                level: 'warning',
+                eventId: meta.eventId ? `${meta.eventId}:warning` : undefined,
+                timestamp: meta.timestamp,
+              })
+            }
+          } catch (error) {
+            console.warn('Failed to parse status event', error)
           }
         })
         source.addEventListener('plan', (event) => {
           try {
-            const payload = JSON.parse((event as MessageEvent<string>).data || '{}')
+            const messageEvent = event as MessageEvent<string>
+            const payload = JSON.parse(messageEvent.data || '{}')
+            const meta = parseLiveEventMeta(messageEvent, payload)
             if (payload?.steps) {
+              const planSteps = Array.isArray(payload.steps) ? payload.steps.length : 0
+              if (planSteps > 0) {
+                const text = `执行计划已生成：${planSteps} 步`
+                appendLiveTimelineEvent({
+                  text,
+                  eventType: 'plan',
+                  level: 'info',
+                  eventId: meta.eventId,
+                  sequence: meta.sequence,
+                  timestamp: meta.timestamp,
+                })
+              }
               const current = docStudioState.agentStatus
               docStudioActions.setAgentStatus({
                 intentType: current.intentType,
@@ -2923,8 +5707,28 @@ const LatexEditorPage = () => {
         })
         source.addEventListener('step', (event) => {
           try {
-            const payload = JSON.parse((event as MessageEvent<string>).data || '{}')
+            const messageEvent = event as MessageEvent<string>
+            const payload = JSON.parse(messageEvent.data || '{}')
+            const meta = parseLiveEventMeta(messageEvent, payload)
             if (payload?.step) {
+              const preview = summarizeStreamStep(payload.step)
+              if (preview) {
+                const stepType = String(payload.step.type || '').toLowerCase()
+                if (stepType === 'action') {
+                  markPendingSendCommitted('tool')
+                }
+                appendLiveTimelineEvent({
+                  text: preview,
+                  eventType: `step_${stepType || 'unknown'}`,
+                  level: stepType === 'error' ? 'error' : 'info',
+                  eventId: meta.eventId,
+                  sequence: meta.sequence,
+                  timestamp: meta.timestamp,
+                })
+                if (stepType === 'action' || stepType === 'thought' || stepType === 'reflection') {
+                  setLiveAgentStatus(preview)
+                }
+              }
               const next = [...docStudioState.executionHistory, payload.step]
               docStudioActions.setExecutionHistory(next)
             }
@@ -2943,9 +5747,271 @@ const LatexEditorPage = () => {
             console.warn('Failed to parse step event', error)
           }
         })
+        source.addEventListener('tool_call_start', (event) => {
+          try {
+            const messageEvent = event as MessageEvent<string>
+            const payload = JSON.parse(messageEvent.data || '{}')
+            const meta = parseLiveEventMeta(messageEvent, payload)
+            markPendingSendCommitted('tool')
+            const rawToolName = String(payload?.tool_name || '')
+            const displayToolName = formatLiveToolName(rawToolName)
+            const text = displayToolName ? `开始工具 · ${displayToolName}` : '开始工具调用'
+            appendLiveTimelineEvent({
+              text,
+              eventType: 'tool_call_start',
+              level: 'info',
+              eventId: meta.eventId || String(payload?.tool_call_id || ''),
+              sequence: meta.sequence,
+              timestamp: meta.timestamp,
+            })
+            setLiveAgentStatus(text)
+          } catch (error) {
+            console.warn('Failed to parse tool_call_start event', error)
+          }
+        })
+        source.addEventListener('tool_call_end', (event) => {
+          try {
+            const messageEvent = event as MessageEvent<string>
+            const payload = JSON.parse(messageEvent.data || '{}')
+            const meta = parseLiveEventMeta(messageEvent, payload)
+            const rawToolName = String(payload?.tool_name || '')
+            const displayToolName = formatLiveToolName(rawToolName)
+            const ok = payload?.success !== false
+            const durationRaw = Number(payload?.duration_seconds)
+            const durationSuffix = Number.isFinite(durationRaw) ? ` (${durationRaw.toFixed(1)}s)` : ''
+            const summary = truncateLiveText(
+              ok ? String(payload?.summary || '') : String(payload?.error || ''),
+              72,
+            )
+            const text = ok
+              ? `完成工具 · ${displayToolName || rawToolName}${durationSuffix}${summary ? ` · ${summary}` : ''}`
+              : `工具失败 · ${displayToolName || rawToolName}${durationSuffix}${summary ? ` · ${summary}` : ''}`
+            appendLiveTimelineEvent({
+              text,
+              eventType: 'tool_call_end',
+              level: ok ? 'info' : 'error',
+              eventId: meta.eventId || String(payload?.tool_call_id || ''),
+              sequence: meta.sequence,
+              timestamp: meta.timestamp,
+            })
+          } catch (error) {
+            console.warn('Failed to parse tool_call_end event', error)
+          }
+        })
+        const handleInteractionRequired = (event: Event) => {
+          try {
+            const messageEvent = event as MessageEvent<string>
+            const payload = JSON.parse(messageEvent.data || '{}')
+            const meta = parseLiveEventMeta(messageEvent, payload)
+            const interactionId = String(payload?.interaction_id || payload?.confirmation_id || '').trim()
+            if (!interactionId) return
+            if (handledInteractionIdsRef.current.has(interactionId)) return
+            handledInteractionIdsRef.current.add(interactionId)
+
+            markPendingSendCommitted('tool')
+            const interactionType = String(payload?.interaction_type || 'dangerous_action_confirm')
+            const toolName = formatLiveToolName(String(payload?.tool_name || 'delete_path_tool'))
+            const targetPath = String(payload?.target_path || '')
+            const recursive = Boolean(payload?.recursive)
+            const preview =
+              payload?.preview && typeof payload.preview === 'object'
+                ? (payload.preview as Record<string, any>)
+                : {}
+            const samplePaths = Array.isArray(preview.sample_paths)
+              ? preview.sample_paths
+                  .map((item) => String(item || '').trim())
+                  .filter(Boolean)
+                  .slice(0, 6)
+              : []
+            const previewSummaryParts: string[] = []
+            const fileSize = Number(preview.file_size_bytes)
+            const fileCount = Number(preview.file_count)
+            const dirCount = Number(preview.directory_count)
+            if (Number.isFinite(fileSize) && fileSize > 0) previewSummaryParts.push(`文件大小 ${fileSize} B`)
+            if (Number.isFinite(fileCount) && fileCount >= 0) previewSummaryParts.push(`文件数 ${fileCount}`)
+            if (Number.isFinite(dirCount) && dirCount >= 0) previewSummaryParts.push(`目录数 ${dirCount}`)
+            const summaryText = previewSummaryParts.join('，')
+            const timelineText = targetPath
+              ? `等待交互确认 · ${toolName} · ${targetPath}`
+              : `等待交互确认 · ${toolName}`
+            appendLiveTimelineEvent({
+              text: timelineText,
+              eventType: 'interaction_required',
+              level: 'warning',
+              eventId: meta.eventId,
+              sequence: meta.sequence,
+              timestamp: meta.timestamp,
+            })
+            setLiveAgentStatus('等待你确认危险操作...')
+
+            if (interactionType !== 'dangerous_action_confirm') {
+              appendLiveTimelineEvent({
+                text: `暂不支持的交互类型：${interactionType}`,
+                eventType: 'interaction_unsupported',
+                level: 'error',
+              })
+              void respondAgentRunInteraction(
+                {
+                  workspaceId: snap.workspaceId,
+                  runId: asyncResult.runId,
+                  interactionId,
+                  decision: 'reject',
+                  note: `unsupported_interaction_type:${interactionType}`,
+                },
+                { loading: false, errorToast: false },
+              ).catch((error) => {
+                console.warn('Failed to auto reject unsupported interaction', error)
+                handledInteractionIdsRef.current.delete(interactionId)
+              })
+              return
+            }
+
+            Modal.confirm({
+              title: String(payload?.title || '确认危险操作'),
+              okText: '确认执行',
+              okType: 'danger',
+              cancelText: '取消',
+              maskClosable: false,
+              content: (
+                <div style={{ whiteSpace: 'pre-wrap', lineHeight: 1.6 }}>
+                  <div>{`Agent 请求执行：${toolName}`}</div>
+                  {targetPath ? <div>{`目标路径：${targetPath}`}</div> : null}
+                  <div>{`递归删除：${recursive ? '是' : '否'}`}</div>
+                  {summaryText ? <div>{`影响预览：${summaryText}`}</div> : null}
+                  {samplePaths.length ? <div>{`样本路径：${samplePaths.join('，')}`}</div> : null}
+                </div>
+              ),
+              onOk: async () => {
+                try {
+                  await respondAgentRunInteraction(
+                    {
+                      workspaceId: snap.workspaceId,
+                      runId: asyncResult.runId,
+                      interactionId,
+                      decision: 'approve',
+                    },
+                    { loading: false, errorToast: false },
+                  )
+                  appendLiveTimelineEvent({
+                    text: targetPath ? `你已确认执行危险操作：${targetPath}` : '你已确认执行危险操作',
+                    eventType: 'interaction_user_approved',
+                    level: 'warning',
+                  })
+                  setLiveAgentStatus('已确认，Agent 正在继续执行...')
+                } catch (error) {
+                  console.warn('Failed to submit approval decision', error)
+                  message.error('提交确认失败，请重试')
+                  handledInteractionIdsRef.current.delete(interactionId)
+                  appendLiveTimelineEvent({
+                    text: '确认提交失败，Agent 暂未收到决策',
+                    eventType: 'interaction_submit_error',
+                    level: 'error',
+                  })
+                }
+              },
+              onCancel: async () => {
+                try {
+                  await respondAgentRunInteraction(
+                    {
+                      workspaceId: snap.workspaceId,
+                      runId: asyncResult.runId,
+                      interactionId,
+                      decision: 'reject',
+                      note: 'user_rejected_from_modal',
+                    },
+                    { loading: false, errorToast: false },
+                  )
+                  appendLiveTimelineEvent({
+                    text: targetPath ? `你已拒绝危险操作：${targetPath}` : '你已拒绝危险操作',
+                    eventType: 'interaction_user_rejected',
+                    level: 'info',
+                  })
+                  setLiveAgentStatus('已取消危险操作，Agent 将继续分析...')
+                } catch (error) {
+                  console.warn('Failed to submit rejection decision', error)
+                  message.error('提交取消失败，请重试')
+                  handledInteractionIdsRef.current.delete(interactionId)
+                  appendLiveTimelineEvent({
+                    text: '取消提交失败，Agent 暂未收到决策',
+                    eventType: 'interaction_submit_error',
+                    level: 'error',
+                  })
+                }
+              },
+            })
+          } catch (error) {
+            console.warn('Failed to handle interaction_required event', error)
+          }
+        }
+        source.addEventListener('interaction_required', handleInteractionRequired)
+        // Backward-compatible listener for old backend event name.
+        source.addEventListener('confirmation_required', handleInteractionRequired)
+
+        const handleInteractionResolved = (event: Event) => {
+          try {
+            const messageEvent = event as MessageEvent<string>
+            const payload = JSON.parse(messageEvent.data || '{}')
+            const meta = parseLiveEventMeta(messageEvent, payload)
+            const decision = String(payload?.decision || '').toLowerCase()
+            const text = decision === 'approve'
+              ? '交互结果：已批准危险操作'
+              : decision === 'reject'
+                ? '交互结果：已拒绝危险操作'
+                : `交互结果：${decision || 'unknown'}`
+            appendLiveTimelineEvent({
+              text,
+              eventType: 'interaction_resolved',
+              level: decision === 'approve' ? 'warning' : 'info',
+              eventId: meta.eventId,
+              sequence: meta.sequence,
+              timestamp: meta.timestamp,
+            })
+          } catch (error) {
+            console.warn('Failed to parse interaction_resolved event', error)
+          }
+        }
+        source.addEventListener('interaction_resolved', handleInteractionResolved)
+        // Backward-compatible listener for old backend event name.
+        source.addEventListener('confirmation_resolved', handleInteractionResolved)
+        source.addEventListener('cancelled', (event) => {
+          try {
+            const messageEvent = event as MessageEvent<string>
+            const payload = JSON.parse(messageEvent.data || '{}')
+            const meta = parseLiveEventMeta(messageEvent, payload)
+            const reason = String(payload?.reason || 'cancelled_by_user')
+            const text = `任务已取消 · ${reason}`
+            setLiveAgentStatus('任务已取消')
+            appendLiveTimelineEvent({
+              text,
+              eventType: 'cancelled',
+              level: 'warning',
+              eventId: meta.eventId,
+              sequence: meta.sequence,
+              timestamp: meta.timestamp,
+            })
+            asyncRunResolvedRef.current = true
+            activeRunIdRef.current = null
+            pendingSendRef.current = null
+            setChatLoading(false)
+            closeAsyncStream()
+          } catch (error) {
+            console.warn('Failed to parse cancelled event', error)
+          }
+        })
         source.addEventListener('finish', (event) => {
           try {
-            const payload = JSON.parse((event as MessageEvent<string>).data || '{}')
+            const messageEvent = event as MessageEvent<string>
+            const payload = JSON.parse(messageEvent.data || '{}')
+            const meta = parseLiveEventMeta(messageEvent, payload)
+            setLiveAgentStatus('正在生成最终回答...')
+            appendLiveTimelineEvent({
+              text: '正在生成最终回答...',
+              eventType: 'finish',
+              level: 'info',
+              eventId: meta.eventId,
+              sequence: meta.sequence,
+              timestamp: meta.timestamp,
+            })
             if (payload?.plan) {
               const current = docStudioState.agentStatus
               docStudioActions.setAgentStatus({
@@ -2963,31 +6029,133 @@ const LatexEditorPage = () => {
         })
         source.addEventListener('result', async (event) => {
           try {
-            const payload = JSON.parse((event as MessageEvent<string>).data || '{}')
+            asyncRunResolvedRef.current = true
+            const messageEvent = event as MessageEvent<string>
+            const payload = JSON.parse(messageEvent.data || '{}')
+            const meta = parseLiveEventMeta(messageEvent, payload)
+            pendingSendRef.current = null
             if (payload?.result) {
+              setLiveAgentStatus('结果已生成，正在应用变更...')
+              appendLiveTimelineEvent({
+                text: '结果已生成，正在应用变更...',
+                eventType: 'result',
+                level: 'info',
+                eventId: meta.eventId,
+                sequence: meta.sequence,
+                timestamp: meta.timestamp,
+              })
               await handleAgentResponse(payload.result, traceId)
             }
-            setAsyncRunStatus('succeeded')
           } catch (error) {
-            message.error('解析异步结果失败')
+            message.error('解析结果失败')
           } finally {
             closeAsyncStream()
           }
         })
         source.addEventListener('run_error', (event) => {
           try {
-            const payload = JSON.parse((event as MessageEvent<string>).data || '{}')
-            message.error(payload?.error || '异步任务失败')
+            asyncRunResolvedRef.current = true
+            const messageEvent = event as MessageEvent<string>
+            const payload = JSON.parse(messageEvent.data || '{}')
+            const meta = parseLiveEventMeta(messageEvent, payload)
+            const errorText = String(payload?.error || '执行失败')
+            message.error(errorText)
+            setLiveAgentStatus('任务执行失败')
+            appendLiveTimelineEvent({
+              text: `执行失败 · ${errorText}`,
+              eventType: 'run_error',
+              level: 'error',
+              eventId: meta.eventId,
+              sequence: meta.sequence,
+              timestamp: meta.timestamp,
+            })
           } catch (error) {
-            message.error('异步任务失败')
+            message.error('执行失败')
           } finally {
-            setAsyncRunStatus('failed')
+            activeRunIdRef.current = null
+            pendingSendRef.current = null
             setChatLoading(false)
             closeAsyncStream()
           }
         })
-        source.onerror = () => {
-          setAsyncRunStatus('failed')
+        source.onerror = async () => {
+          if (asyncRunResolvedRef.current) {
+            closeAsyncStream()
+            return
+          }
+          setLiveAgentStatus('流式连接中断，正在恢复结果...')
+          appendLiveTimelineEvent({
+            text: '流式连接中断，尝试恢复运行结果...',
+            eventType: 'sse_error',
+            level: 'warning',
+          })
+          try {
+            for (let attempt = 0; attempt < 10; attempt += 1) {
+              // SSE 断连后，短轮询补偿最终结果，避免用户误以为“卡住”
+              const snapshot = await fetchAgentRunStatus(
+                {
+                  workspaceId: snap.workspaceId,
+                  runId: asyncResult.runId,
+                },
+                {
+                  loading: false,
+                  errorToast: false,
+                },
+              )
+              if (snapshot?.status === 'succeeded' && snapshot?.result) {
+                asyncRunResolvedRef.current = true
+                appendLiveTimelineEvent({
+                  text: '恢复成功，正在应用结果...',
+                  eventType: 'recovery_succeeded',
+                  level: 'info',
+                })
+                await handleAgentResponse(snapshot.result, traceId)
+                closeAsyncStream()
+                return
+              }
+              if (snapshot?.status === 'cancelled') {
+                asyncRunResolvedRef.current = true
+                setLiveAgentStatus('任务已取消')
+                appendLiveTimelineEvent({
+                  text: '任务已取消',
+                  eventType: 'cancelled',
+                  level: 'warning',
+                })
+                activeRunIdRef.current = null
+                pendingSendRef.current = null
+                setChatLoading(false)
+                closeAsyncStream()
+                return
+              }
+              if (snapshot?.status === 'failed') {
+                asyncRunResolvedRef.current = true
+                const errorText = snapshot?.error || '执行失败'
+                message.error(errorText)
+                setLiveAgentStatus('任务执行失败')
+                appendLiveTimelineEvent({
+                  text: `执行失败 · ${errorText}`,
+                  eventType: 'recovery_failed',
+                  level: 'error',
+                })
+                activeRunIdRef.current = null
+                pendingSendRef.current = null
+                setChatLoading(false)
+                closeAsyncStream()
+                return
+              }
+              await new Promise((resolve) => window.setTimeout(resolve, 1200))
+            }
+          } catch (error) {
+            console.warn('Failed to recover async run result', error)
+          }
+          setLiveAgentStatus('连接恢复失败，请重试')
+          appendLiveTimelineEvent({
+            text: '连接恢复失败，请重试',
+            eventType: 'recovery_timeout',
+            level: 'error',
+          })
+          activeRunIdRef.current = null
+          pendingSendRef.current = null
           setChatLoading(false)
           closeAsyncStream()
         }
@@ -3001,32 +6169,387 @@ const LatexEditorPage = () => {
           context: Object.keys(contextPayload).length ? contextPayload : undefined,
           knowledgeBaseId,
           knowledgeBaseName,
-          options: Object.keys(llmOptions).length ? llmOptions : undefined,
+          options: Object.keys(effectiveLlmOptions).length ? effectiveLlmOptions : undefined,
         },
-        { headers: { 'X-Trace-Id': traceId } },
+        {
+          headers: { 'X-Trace-Id': traceId },
+          loading: false,
+          errorToast: false,
+        },
       )
       await handleAgentResponse(response, traceId)
     } catch (error) {
-      message.error(getErrorMessage(error))
+      if (stopRequestedRef.current) {
+        rollbackPendingSendToComposer()
+      } else {
+        showRequestError(error)
+      }
+      if (!stopRequestedRef.current) {
+        pendingSendRef.current = null
+      }
+      resetLiveAgentPreview()
+      setChatLoading(false)
     } finally {
-      setPrompt('')
-      setSelections([])
+      const skipComposerClear = skipNextComposerClearRef.current
+      if (skipComposerClear) {
+        skipNextComposerClearRef.current = false
+      }
+      if (clearComposer && !skipComposerClear) {
+        setPrompt('')
+        setSelections([])
+        setFileMentions([])
+        clearFileMentionSuggest()
+        setChatImageAttachments([])
+      }
       if (!asyncMode) {
         setChatLoading(false)
       }
+      stopRequestedRef.current = false
     }
   }
+
+  const contextMenuActions: ContextMenuAction[] = (() => {
+    const closeContextMenu = () => setContextMenuVisible(false)
+    const isProtectedDirectory =
+      contextMenuType === 'directory' &&
+      isNotebookSystemPath(contextMenuPath, { protectParents: true })
+    const isProtectedFile =
+      contextMenuType === 'file' &&
+      isNotebookSystemPath(contextMenuPath)
+
+    const confirmDeleteDirectory = () => {
+      closeContextMenu()
+      Modal.confirm({
+        title: '确认删除文件夹？',
+        content: `确定删除文件夹 "${contextMenuPath}" 及其所有内容？`,
+        okText: '删除',
+        okType: 'danger',
+        cancelText: '取消',
+        onOk: () => handleDeleteFromTree(contextMenuPath, 'directory'),
+      })
+    }
+
+    const confirmDeleteFile = () => {
+      closeContextMenu()
+      Modal.confirm({
+        title: '确认删除文件？',
+        content: `确定删除文件 "${contextMenuPath}"？`,
+        okText: '删除',
+        okType: 'danger',
+        cancelText: '取消',
+        onOk: () => handleDeleteFromTree(contextMenuPath, 'file'),
+      })
+    }
+
+    if (contextMenuType === 'workspace') {
+      return [
+        {
+          key: 'workspace-new-file',
+          label: '新建文件',
+          icon: <FileAddOutlined />,
+          onClick: () => {
+            closeContextMenu()
+            openCreateModalAtPath('file')
+          },
+        },
+        {
+          key: 'workspace-new-folder',
+          label: '新建文件夹',
+          icon: <FolderAddOutlined />,
+          onClick: () => {
+            closeContextMenu()
+            openCreateModalAtPath('directory')
+          },
+        },
+        {
+          key: 'workspace-upload',
+          label: '上传文件',
+          icon: <UploadOutlined />,
+          onClick: () => {
+            closeContextMenu()
+            handleWorkspaceUploadClick()
+          },
+        },
+        {
+          key: 'workspace-refresh',
+          label: '刷新文件树',
+          icon: <ReloadOutlined />,
+          onClick: () => {
+            closeContextMenu()
+            void refreshFileTree(true)
+          },
+        },
+      ]
+    }
+
+    if (contextMenuType === 'directory') {
+      if (isProtectedDirectory) {
+        return [
+          {
+            key: 'directory-readonly',
+            label: '系统目录（结构保护）',
+            icon: <FolderOpenOutlined />,
+            disabled: true,
+            onClick: closeContextMenu,
+          },
+          {
+            key: 'directory-refresh',
+            label: '刷新文件树',
+            icon: <ReloadOutlined />,
+            onClick: () => {
+              closeContextMenu()
+              void refreshFileTree(true)
+            },
+          },
+        ]
+      }
+      return [
+        {
+          key: 'directory-rename',
+          label: '重命名',
+          icon: <EditOutlined />,
+          onClick: () => {
+            closeContextMenu()
+            openRenameModal(contextMenuPath, 'directory')
+          },
+        },
+        {
+          key: 'directory-new-file',
+          label: '新建文件',
+          icon: <FileAddOutlined />,
+          onClick: () => {
+            closeContextMenu()
+            handleCreateFileInDirectory(contextMenuPath)
+          },
+        },
+        {
+          key: 'directory-new-folder',
+          label: '新建文件夹',
+          icon: <FolderAddOutlined />,
+          onClick: () => {
+            closeContextMenu()
+            handleCreateFolderInDirectory(contextMenuPath)
+          },
+        },
+        {
+          key: 'directory-upload',
+          label: '上传文件',
+          icon: <UploadOutlined />,
+          onClick: () => {
+            closeContextMenu()
+            handleUploadToDirectory(contextMenuPath)
+          },
+        },
+        {
+          key: 'directory-delete',
+          label: '删除文件夹',
+          icon: <DeleteOutlined />,
+          danger: true,
+          separated: true,
+          onClick: confirmDeleteDirectory,
+        },
+      ]
+    }
+
+    if (isProtectedFile) {
+      return [
+        {
+          key: 'file-download',
+          label: '下载文件',
+          icon: <DownloadOutlined />,
+          onClick: () => {
+            closeContextMenu()
+            void handleDownloadFileAtPath(contextMenuPath)
+          },
+        },
+        {
+          key: 'file-delete',
+          label: '删除文件',
+          icon: <DeleteOutlined />,
+          danger: true,
+          separated: true,
+          onClick: confirmDeleteFile,
+        },
+      ]
+    }
+
+    return [
+      {
+        key: 'file-rename',
+        label: '重命名',
+        icon: <EditOutlined />,
+        onClick: () => {
+          closeContextMenu()
+          openRenameModal(contextMenuPath, 'file')
+        },
+      },
+      {
+        key: 'file-download',
+        label: '下载文件',
+        icon: <DownloadOutlined />,
+        onClick: () => {
+          closeContextMenu()
+          void handleDownloadFileAtPath(contextMenuPath)
+        },
+      },
+      {
+        key: 'file-delete',
+        label: '删除文件',
+        icon: <DeleteOutlined />,
+        danger: true,
+        separated: true,
+        onClick: confirmDeleteFile,
+      },
+    ]
+  })()
+
+  const headerOverflowMenuItems = useMemo<MenuProps['items']>(() => {
+    const items: MenuProps['items'] = [
+      {
+        key: 'download',
+        label: '下载当前文件',
+        icon: <DownloadOutlined />,
+        disabled: !snap.activeFilePath,
+      },
+      {
+        key: 'delete',
+        label: '删除当前文件',
+        icon: <DeleteOutlined />,
+        disabled: !snap.activeFilePath,
+        danger: true,
+      },
+    ]
+    if (lastOperationId && !undoingLastApply) {
+      items.push({
+        key: 'undo',
+        label: '撤销应用',
+        icon: <SyncOutlined />,
+      })
+    }
+    items.push({
+      key: 'history',
+      label: '文件时间线',
+      icon: <HistoryOutlined />,
+    })
+    return items
+  }, [lastOperationId, snap.activeFilePath, undoingLastApply])
+
+  const handleHeaderOverflowMenuClick = useCallback<NonNullable<MenuProps['onClick']>>(
+    ({ key }) => {
+      if (key === 'download') {
+        void handleDownloadCurrentFile()
+        return
+      }
+      if (key === 'delete') {
+        if (snap.activeFilePath) {
+          showDeleteConfirm(snap.activeFilePath, 'file')
+        }
+        return
+      }
+      if (key === 'undo') {
+        void handleUndoLastApply()
+        return
+      }
+      if (key === 'history') {
+        setRightTab('history')
+      }
+    },
+    [handleDownloadCurrentFile, handleUndoLastApply, showDeleteConfirm, snap.activeFilePath],
+  )
+
+  const renderTreeNodeTitle = useCallback(
+    (node: ReadonlyFileNode) => {
+      const isHovered = hoveredTreePath === node.path
+      const deleteLabel = node.type === 'directory' ? '删除文件夹' : '删除文件'
+      const isProtectedDirectory =
+        node.type === 'directory' && isNotebookSystemPath(node.path, { protectParents: true })
+      const isProtectedFile = node.type === 'file' && isNotebookSystemPath(node.path)
+      return (
+        <span
+          className="doc-studio__tree-node"
+          onMouseEnter={() => setHoveredTreePath(node.path)}
+          onMouseLeave={() => {
+            setHoveredTreePath((prev) => (prev === node.path ? '' : prev))
+          }}
+        >
+          <span className="doc-studio__tree-node-main">
+            {node.type === 'directory' ? (
+              <FolderOpenOutlined className="doc-studio__tree-node-icon doc-studio__tree-node-icon--directory" />
+            ) : (
+              <FileTextOutlined className="doc-studio__tree-node-icon doc-studio__tree-node-icon--file" />
+            )}
+            <span className="doc-studio__tree-node-name" title={node.name}>
+              {node.name}
+            </span>
+          </span>
+          {isHovered && !isProtectedDirectory && (
+            <span className="doc-studio__tree-node-actions">
+              {!isProtectedFile && (
+                <Tooltip title="重命名（F2）">
+                  <Button
+                    type="text"
+                    className="doc-studio__tree-action-btn"
+                    icon={<EditOutlined />}
+                    onMouseDown={(event) => {
+                      event.preventDefault()
+                      event.stopPropagation()
+                    }}
+                    onClick={(event) => {
+                      event.preventDefault()
+                      event.stopPropagation()
+                      openRenameModal(node.path, node.type)
+                    }}
+                  />
+                </Tooltip>
+              )}
+              <Tooltip title={deleteLabel}>
+                <Button
+                  type="text"
+                  className="doc-studio__tree-action-btn doc-studio__tree-action-btn--danger"
+                  icon={<DeleteOutlined />}
+                  onMouseDown={(event) => {
+                    event.preventDefault()
+                    event.stopPropagation()
+                  }}
+                  onClick={(event) => {
+                    event.preventDefault()
+                    event.stopPropagation()
+                    showDeleteConfirm(node.path, node.type)
+                  }}
+                />
+              </Tooltip>
+            </span>
+          )}
+        </span>
+      )
+    },
+    [hoveredTreePath, isNotebookSystemPath, openRenameModal, showDeleteConfirm],
+  )
+
+  const treeData = useMemo(
+    () => buildTreeData(cloneFileNodes(snap.fileTree), renderTreeNodeTitle),
+    [renderTreeNodeTitle, snap.fileTree],
+  )
+
+  const isAgentDiffReviewActive =
+    agentDiffReviewOpen && diffModalContext === 'agent' && allFileDiffs.length > 0
+  const hasPendingAgentReview =
+    diffModalContext === 'agent' && allFileDiffs.length > 0
+  const currentReviewDiff = isAgentDiffReviewActive ? allFileDiffs[currentDiffIndex] : undefined
 
   return (
     <>
     <div className="doc-studio-page">
-        <Layout className="doc-studio">
-          <Sider width={leftSiderWidth} className="doc-studio__sider">
+        <Layout className={`doc-studio ${isDraggingLeft || isDraggingRight ? 'doc-studio--resizing' : ''}`}>
+          <Sider
+            width={leftPanelClosed ? 0 : leftSiderWidth}
+            className={`doc-studio__sider ${leftPanelClosed ? 'doc-studio__sider--collapsed' : ''}`}
+          >
             <div className="doc-studio__workspace">
               <Select
                 value={snap.workspaceId || undefined}
                 className="doc-studio__workspace-select"
-                placeholder="选择工作�?
+                placeholder="选择工作区"
                 options={workspaceOptions}
                 loading={snap.workspaceLoading}
                 onChange={handleWorkspaceChange}
@@ -3044,168 +6567,70 @@ const LatexEditorPage = () => {
                 />
               </Space>
             </div>
-            <div className="doc-studio__knowledge">
-              <Select
-                value={selectedKnowledgeBaseId ?? undefined}
-                className="doc-studio__knowledge-select"
-                placeholder="选择知识�?
-                options={knowledgeBaseOptions}
-                loading={knowledgeLoading}
-                onChange={handleKnowledgeBaseChange}
-                disabled={knowledgeLoading}
-                allowClear
-                showSearch
-                optionFilterProp="label"
-                notFoundContent={
-                  knowledgeLoading ? (
-                    <Spin size="small" />
-                  ) : (
-                    <span>暂无知识�?/span>
-                  )
-                }
-              />
-              <Button
-                icon={<ReloadOutlined />}
-                size="small"
-                loading={knowledgeLoading}
-                onClick={loadKnowledgeBases}
-              />
+            <div className="doc-studio__explorer-header" onContextMenu={handleExplorerContextMenu}>
+              <span className="doc-studio__explorer-name" title={activeWorkspaceName}>
+                {explorerTitle}
+              </span>
+              <div className="doc-studio__explorer-actions">
+                <Tooltip title="新建文件">
+                  <Button
+                    type="text"
+                    className="doc-studio__explorer-action-btn"
+                    icon={<FileAddOutlined />}
+                    onClick={() => openFileModal('file')}
+                    disabled={!snap.workspaceId}
+                  />
+                </Tooltip>
+                <Tooltip title="新建文件夹">
+                  <Button
+                    type="text"
+                    className="doc-studio__explorer-action-btn"
+                    icon={<FolderAddOutlined />}
+                    onClick={() => openFileModal('directory')}
+                    disabled={!snap.workspaceId}
+                  />
+                </Tooltip>
+                <Tooltip title="上传文件">
+                  <Button
+                    type="text"
+                    className="doc-studio__explorer-action-btn"
+                    icon={<UploadOutlined />}
+                    loading={uploading}
+                    onClick={handleWorkspaceUploadClick}
+                    disabled={!snap.workspaceId}
+                  />
+                </Tooltip>
+                <Tooltip title="刷新文件树">
+                  <Button
+                    type="text"
+                    className="doc-studio__explorer-action-btn"
+                    icon={<ReloadOutlined />}
+                    disabled={!snap.workspaceId}
+                    onClick={() => refreshFileTree(true)}
+                  />
+                </Tooltip>
+                <Tooltip title="折叠文件栏 (Ctrl+B)">
+                  <Button
+                    type="text"
+                    className="doc-studio__explorer-action-btn"
+                    icon={<MenuFoldOutlined />}
+                    onClick={() => setLeftPanelClosed(true)}
+                  />
+                </Tooltip>
+              </div>
             </div>
-            <div className="doc-studio__session">
-              <Input
-                value={sessionBindValue}
-                className="doc-studio__session-input"
-                placeholder="绑定 Session ID（可选）"
-                onChange={(event) => setSessionBindValue(event.target.value)}
-              />
-              <Space size="small" className="doc-studio__session-actions">
-                <Button
-                  size="small"
-                  type="primary"
-                  ghost
-                  loading={sessionBindLoading}
-                  onClick={() => handleBindSession(false)}
-                >
-                  绑定
-                </Button>
-                <Button
-                  size="small"
-                  loading={sessionBindLoading}
-                  onClick={() => handleBindSession(true)}
-                >
-                  解绑
-                </Button>
-              </Space>
-            </div>
-            <div className="doc-studio__web-search">
-              <Switch
-                checked={webSearchEnabled}
-                loading={webSearchSaving}
-                onChange={(value) => setWebSearchEnabled(value)}
-              />
-              <Text type="secondary">Web 搜索</Text>
-              <Tooltip title="需要配�?WEB_SEARCH_API_KEY 才能生效">
-                <Tag color={webSearchEnabled ? 'green' : 'default'}>
-                  {webSearchEnabled ? '已启�? : '未启�?}
-                </Tag>
-              </Tooltip>
-            </div>
-            <div className="doc-studio__model">
-              <Select
-                value={llmProvider}
-                className="doc-studio__model-select"
-                placeholder="模型提供�?
-                options={[
-                  { label: '自动选择', value: 'auto' },
-                  { label: 'DashScope', value: 'dashscope' },
-                  { label: 'OpenAI', value: 'openai' },
-                ]}
-                onChange={(value) => setLlmProvider(value)}
-              />
-              <Input
-                value={llmModel}
-                className="doc-studio__model-input"
-                placeholder="模型名称（留�?默认�?
-                onChange={(event) => setLlmModel(event.target.value)}
-              />
-            </div>
-            <div className="doc-studio__model-advanced">
-              <InputNumber
-                value={llmTemperature ?? undefined}
-                min={0}
-                max={2}
-                step={0.1}
-                placeholder="温度(可�?"
-                onChange={(value) => setLlmTemperature(typeof value === 'number' ? value : null)}
-              />
-              <InputNumber
-                value={llmMaxTokens ?? undefined}
-                min={128}
-                max={16384}
-                step={256}
-                placeholder="Max tokens(可�?"
-                onChange={(value) => setLlmMaxTokens(typeof value === 'number' ? value : null)}
-              />
-            </div>
-            <div className="doc-studio__file-actions">
-              <Button
-                icon={<FileAddOutlined />}
-                block
-                size="small"
-                onClick={() => openFileModal('file')}
-              >
-                新建文件
-              </Button>
-              <Button
-                icon={<FolderAddOutlined />}
-                block
-                size="small"
-                onClick={() => openFileModal('directory')}
-              >
-                新建文件�?
-              </Button>
-              <Button
-                icon={<UploadOutlined />}
-                block
-                size="small"
-                loading={uploading}
-                onClick={handleUploadClick}
-              >
-                上传文件
-              </Button>
-              <Button
-                icon={<ReloadOutlined />}
-                block
-                size="small"
-                onClick={async () => {
-                  if (!snap.workspaceId) return
-                  await loadWorkspaceFiles(snap.workspaceId, false)
-                  message.success('文件树已刷新')
-                }}
-              >
-                刷新文件�?
-              </Button>
-              <input
-                ref={fileInputRef}
-                type="file"
-                style={{ display: 'none' }}
-                onChange={handleFileInputChange}
-              />
-              <input
-                ref={presetFileInputRef}
-                type="file"
-                accept="application/json"
-                style={{ display: 'none' }}
-                onChange={handlePresetFileChange}
-              />
-            </div>
-            <div className="doc-studio__tree-wrapper">
+            <input
+              ref={fileInputRef}
+              type="file"
+              style={{ display: 'none' }}
+              onChange={handleFileInputChange}
+            />
+            <div className="doc-studio__tree-wrapper" onContextMenu={handleExplorerContextMenu}>
               {treeData.length ? (
                 <Tree
                   selectedKeys={snap.activeFilePath ? [snap.activeFilePath] : []}
                   expandedKeys={expandedKeys}
                   onExpand={(keys) => setExpandedKeys(keys)}
-                  showIcon
                   treeData={treeData}
                   onSelect={handleTreeSelect}
                   onRightClick={handleRightClick}
@@ -3218,149 +6643,231 @@ const LatexEditorPage = () => {
               )}
             </div>
           </Sider>
-          {/* 左侧分割�?*/}
+          {!leftPanelClosed && (
           <div
             className={`doc-studio__resizer doc-studio__resizer--left ${isDraggingLeft ? 'doc-studio__resizer--dragging' : ''}`}
             onMouseDown={handleLeftResizeStart}
           />
-          <Layout>
+          )}
+          <Layout className="doc-studio__center">
             <Header className="doc-studio__header">
-              <div className="doc-studio__header-info">
-                <Text className="doc-studio__file-path" ellipsis>
-                  {snap.activeFilePath || '请选择文件'}
-                </Text>
-                {currentFileBuffer?.dirty && <Tag color="gold">未保�?/Tag>}
-              </div>
-              <Space>
-                <Button
-                  icon={<DownloadOutlined />}
-                  onClick={handleDownloadCurrentFile}
-                  disabled={!snap.activeFilePath}
-                >
-                  下载
-                </Button>
-                <Popconfirm
-                  title="确定删除当前文件�?
-                  onConfirm={handleDeleteCurrentFile}
-                  disabled={!snap.activeFilePath}
-                >
-                  <Button
-                    danger
-                    icon={<DeleteOutlined />}
-                    disabled={!snap.activeFilePath}
-                  >
-                    删除
-                  </Button>
-                </Popconfirm>
-                <Button
-                  type="default"
-                  icon={<SaveOutlined />}
-                  onClick={handleSave}
-                  disabled={!snap.activeFilePath || !currentFileBuffer?.dirty}
-                >
-                  保存
-                </Button>
-                <Button
-                  icon={<SyncOutlined />}
-                  onClick={handleUndoLastApply}
-                  disabled={!lastOperationId || undoingLastApply}
-                >
-                  撤销上次操作
-                </Button>
-                <Button icon={<HistoryOutlined />} onClick={() => setOperationHistoryOpen(true)}>
-                  操作历史
-                </Button>
-                <Button icon={<BarChartOutlined />} onClick={() => setSystemStatusOpen(true)}>
-                  系统状�?
-                </Button>
-                {isLatexWorkspace && (
-                  <Button
-                    type="primary"
-                    ghost
-                    icon={<PlayCircleOutlined />}
-                    onClick={handleCompile}
-                    disabled={!snap.workspaceId}
-                  >
-                    编译
-                  </Button>
-                )}
-              </Space>
-            </Header>
-            <Content className="doc-studio__content">
-              {snap.openedFiles.length ? (
-                <div className="doc-studio__editor-wrapper">
-                  <Tabs
-                    type="editable-card"
-                    hideAdd
-                    size="small"
-                    activeKey={snap.activeFilePath || undefined}
-                    onChange={handleTabChange}
-                    onEdit={handleTabEdit}
-                    items={snap.openedFiles.map((path) => ({
-                      key: path,
-                      label: (
-                        <span>
-                          {path.split('/').pop()}
-                          {snap.files[path]?.dirty ? '*' : ''}
-                        </span>
-                      ),
-                    }))}
-                  />
-                  <div style={{ flex: 1, overflow: 'hidden', minHeight: 0 }}>
-                  {snap.activeFilePath ? (
-                    <Editor
-                      key={snap.activeFilePath}
-                      theme="vs-dark"
-                      height="100%"
-                      language={resolveEditorLanguage(snap.activeFilePath)}
-                      loading={<Spin />}
-                      value={currentFileBuffer?.content || ''}
-                      onChange={handleEditorChange}
-                      onMount={handleEditorMount}
-                      options={{
-                        readOnly: currentFileBuffer?.loading,
-                        minimap: { enabled: false },
-                        fontSize: 14,
-                        wordWrap: 'on',
-                        automaticLayout: true,
-                        selectOnLineNumbers: true,
-                        scrollBeyondLastLine: false,
-                        // 确保所有标准编辑快捷键都启用（Ctrl+A, Ctrl+C, Ctrl+V, Ctrl+Z 等）
-                        // Monaco Editor 默认已启用这些快捷键，无需额外配置
-                      }}
+              <div className="doc-studio__header-main">
+                <div className="doc-studio__header-tabs-wrap">
+                  {snap.openedFiles.length ? (
+                    <Tabs
+                      className="doc-studio__header-tabs"
+                      type="editable-card"
+                      hideAdd
+                      size="small"
+                      activeKey={snap.activeFilePath || undefined}
+                      onChange={handleTabChange}
+                      onEdit={handleTabEdit}
+                      items={headerTabItems}
                     />
                   ) : (
-                    <Empty description="选择一个文件以开始编�? />
+                    <span className="doc-studio__header-empty">未打开文件</span>
                   )}
-                  </div>
+                </div>
+                <div className="doc-studio__header-bar">
+                  <Space size={6} className="doc-studio__header-actions">
+                    {leftPanelClosed && (
+                      <Tooltip title="展开文件栏 (Ctrl+B)">
+                        <Button
+                          type="text"
+                          className="doc-studio__header-icon-btn"
+                          icon={<MenuOutlined />}
+                          onClick={() => setLeftPanelClosed(false)}
+                        />
+                      </Tooltip>
+                    )}
+                    {rightPanelClosed && (
+                      <Tooltip title="展开对话 (Ctrl+L)">
+                        <Button
+                          type="text"
+                          className="doc-studio__header-icon-btn"
+                          icon={<MessageOutlined />}
+                          onClick={() => {
+                            setRightPanelClosed(false)
+                            setRightTab('chat')
+                          }}
+                        />
+                      </Tooltip>
+                    )}
+                    {supportsCompilePanel && (
+                      <Tooltip title={compileActionTitle}>
+                        <Button
+                          type="text"
+                          className="doc-studio__header-icon-btn doc-studio__header-icon-btn--primary"
+                          icon={<PlayCircleOutlined />}
+                          onClick={handleCompile}
+                          disabled={!snap.workspaceId || isPlaintextActiveFile}
+                        />
+                      </Tooltip>
+                    )}
+                    <Dropdown
+                      trigger={['click']}
+                      placement="bottomRight"
+                      menu={{
+                        items: headerOverflowMenuItems,
+                        onClick: handleHeaderOverflowMenuClick,
+                      }}
+                    >
+                      <Button
+                        type="text"
+                        className="doc-studio__header-overflow-btn"
+                        icon={<EllipsisOutlined />}
+                      />
+                    </Dropdown>
+                  </Space>
+                </div>
+              </div>
+            </Header>
+            <Content className="doc-studio__content">
+              {snap.openedFiles.length || isAgentDiffReviewActive ? (
+                <div className="doc-studio__editor-wrapper">
+                  {isAgentDiffReviewActive && currentReviewDiff ? (
+                    <div className="doc-studio__review-shell">
+                      <div className="doc-studio__review-toolbar">
+                        <Space size={8} wrap>
+                          <Tag color="blue">Agent 变更审阅</Tag>
+                          <Text type="secondary">{currentDiffIndex + 1} of {allFileDiffs.length} files</Text>
+                          <Text code className="doc-studio__review-file-tag">
+                            {currentReviewDiff.file_path || '-'}
+                          </Text>
+                          <Tag color="green">+{normalizeCount(currentReviewDiff.added_lines)}</Tag>
+                          <Tag color="volcano">-{normalizeCount(currentReviewDiff.removed_lines)}</Tag>
+                          {currentReviewDiff.is_truncated && <Tag color="orange">已截断</Tag>}
+                        </Space>
+                        <Space size={8} wrap>
+                          <Button
+                            size="small"
+                            disabled={currentDiffIndex === 0}
+                            onClick={() => setCurrentDiffIndex((index) => Math.max(index - 1, 0))}
+                          >
+                            上一文件
+                          </Button>
+                          <Button
+                            size="small"
+                            disabled={currentDiffIndex >= allFileDiffs.length - 1}
+                            onClick={() =>
+                              setCurrentDiffIndex((index) => Math.min(index + 1, allFileDiffs.length - 1))
+                            }
+                          >
+                            下一文件
+                          </Button>
+                          {lineChanges.length > 0 ? (
+                            <Tag>{lineChanges.length} 处修改点</Tag>
+                          ) : (
+                            <Tag>无修改点</Tag>
+                          )}
+                          <Button
+                            size="small"
+                            danger
+                            disabled={diffReverting}
+                            onClick={handleRejectCurrentDiff}
+                            title="Undo File (Ctrl/Cmd+N)"
+                          >
+                            Undo File
+                          </Button>
+                          <Button
+                            size="small"
+                            type="primary"
+                            onMouseDown={() => (document.activeElement as HTMLElement)?.blur?.()}
+                            onClick={() => handleKeepCurrentDiff()}
+                            title="Keep File (Ctrl/Cmd+Shift+Y)"
+                          >
+                            Keep File
+                          </Button>
+                        </Space>
+                      </div>
+                      <div className="doc-studio__review-main">
+                        <div className="doc-studio__review-content">
+                          <div className="doc-studio__review-diff">
+                              <AgentDiffReview
+                                ref={agentDiffReviewRef}
+                                key={`agent-review-${currentReviewDiff.file_path}-${currentDiffIndex}`}
+                                filePath={currentReviewDiff.file_path || ''}
+                                originalContent={resolvedOriginal || currentReviewDiff.original_content}
+                                modifiedContent={resolvedModified || currentReviewDiff.modified_content}
+                                diffReverting={diffReverting}
+                                currentHunkIndex={currentHunkIndex}
+                                onModifiedContentChange={(next) => setResolvedModified(next)}
+                                onHunkUndo={(idx) => void handleRejectLineChange(idx)}
+                                onHunkKeep={(idx) => handleKeepHunk(idx)}
+                                onLineChangesReady={(changes) => {
+                                  setLineChanges(changes)
+                                  setCurrentHunkIndex((prev) => Math.min(prev, Math.max(0, changes.length - 1)))
+                                }}
+                              />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+                  <div
+                    style={{
+                      flex: 1,
+                      overflow: 'hidden',
+                      minHeight: 0,
+                      display: isAgentDiffReviewActive && currentReviewDiff ? 'none' : 'block',
+                    }}
+                  >
+                      {snap.activeFilePath ? (
+                        <Editor
+                          key={snap.activeFilePath}
+                          theme="vs-dark"
+                          height="100%"
+                          language={resolveEditorLanguage(snap.activeFilePath)}
+                          loading={<Spin />}
+                          value={currentFileBuffer?.content || ''}
+                          onChange={handleEditorChange}
+                          onMount={handleEditorMount}
+                          options={{
+                            readOnly: currentFileBuffer?.loading,
+                            minimap: { enabled: false },
+                            fontSize: 14,
+                            wordWrap: 'on',
+                            automaticLayout: true,
+                            selectOnLineNumbers: true,
+                            scrollBeyondLastLine: false,
+                            // ???????????????Ctrl+A, Ctrl+C, Ctrl+V, Ctrl+Z ??
+                            // Monaco Editor ?????????????????
+                          }}
+                        />
+                      ) : (
+                        <Empty description="请先选择文件" />
+                      )}
+                    </div>
                 </div>
               ) : (
-                <Empty description="选择一个文件以开始编�? />
+                <Empty description="请先选择工作区" />
               )}
             </Content>
           </Layout>
-          {/* 右侧分割�?*/}
+          {!rightPanelClosed && (
+            <>
           <div
             className={`doc-studio__resizer doc-studio__resizer--right ${isDraggingRight ? 'doc-studio__resizer--dragging' : ''}`}
             onMouseDown={handleRightResizeStart}
           />
           <Sider width={rightSiderWidth} className="doc-studio__right">
-            {/* 自定�?Tab 实现，解�?Ant Design Tabs 滚动问题 */}
+            <div className="doc-studio__right-inner">
+            {/* 右侧 Tab 导航（自定义样式，非 Ant Design Tabs） */}
             <div className="doc-studio__custom-tabs">
               <div className="doc-studio__custom-tabs-nav">
                 <button
                   className={`doc-studio__custom-tab ${rightTab === 'chat' ? 'doc-studio__custom-tab--active' : ''}`}
                   onClick={() => setRightTab('chat')}
                 >
-                  Agent 聊天
+                  Agent 对话
                 </button>
                 <button
                   className={`doc-studio__custom-tab ${rightTab === 'history' ? 'doc-studio__custom-tab--active' : ''}`}
                   onClick={() => setRightTab('history')}
                 >
-                  执行历史
+                  时间线
                 </button>
-                {isLatexWorkspace && (
+                {supportsCompilePanel && (
                   <button
                     className={`doc-studio__custom-tab ${rightTab === 'compile' ? 'doc-studio__custom-tab--active' : ''}`}
                     onClick={() => setRightTab('compile')}
@@ -3371,353 +6878,744 @@ const LatexEditorPage = () => {
               </div>
               <div className="doc-studio__custom-tabs-content">
                 {/* Chat Panel */}
-                <div className="doc-studio__chat-panel" style={{ display: rightTab === 'chat' ? 'flex' : 'none' }}>
-                      {/* 📊 Prompt 日志面板（调试用�?*/}
-                      {lastPromptLog && (
-                        <div className="doc-studio__prompt-log">
-                          <div 
-                            className="doc-studio__prompt-log-header"
-                            onClick={() => setShowPromptLog(!showPromptLog)}
-                            style={{ cursor: 'pointer', userSelect: 'none' }}
-                          >
-                            <span style={{ marginRight: 8 }}>
-                              {showPromptLog ? '�? : '�?}
-                            </span>
-                            <span style={{ fontWeight: 500 }}>
-                              📊 最后发送的 Prompt ({lastPromptLog.timestamp})
-                            </span>
-                            <span style={{ marginLeft: 'auto', fontSize: 12, opacity: 0.7 }}>
-                              {lastPromptLog.selectionsCount} 个片�?
-                            </span>
-                          </div>
-                          {showPromptLog && (
-                            <div className="doc-studio__prompt-log-content">
-                              <div style={{ marginBottom: 12 }}>
-                                <Text type="secondary" style={{ fontSize: 12 }}>原始 Prompt�?/Text>
-                                <div style={{ 
-                                  background: '#f5f5f5', 
-                                  padding: 8, 
-                                  borderRadius: 4, 
-                                  marginTop: 4,
-                                  fontSize: 13,
-                                  fontFamily: 'monospace',
-                                  whiteSpace: 'pre-wrap',
-                                  wordBreak: 'break-word'
-                                }}>
-                                  {lastPromptLog.original}
-                                </div>
+                {rightTab === 'chat' && (
+                <div className="doc-studio__chat-panel">
+                      {/* Cursor 风格对话顶部栏：+ 新建、对话标签、历史、更多、关闭 */}
+                      <div className="doc-studio__chat-header">
+                        <div className="doc-studio__chat-header-tabs">
+                          {chatSessionIds.map((sid) => {
+                            const isActive = currentChatSessionId === sid
+                            const rawTitle = String(sessionTitlesRef.current[sid] || '').trim()
+                            const title = rawTitle && !isPlaceholderSessionTitle(rawTitle) ? rawTitle : '新对话'
+                            return (
+                              <div
+                                key={sid}
+                                className={`doc-studio__chat-header-tab doc-studio__chat-header-tab--with-close ${isActive ? 'doc-studio__chat-header-tab--active' : ''}`}
+                                role="tab"
+                                aria-selected={isActive}
+                                onContextMenu={(event) => {
+                                  event.preventDefault()
+                                  event.stopPropagation()
+                                  handleRenameChatSession(sid, title)
+                                }}
+                              >
+                                <button
+                                  type="button"
+                                  className="doc-studio__chat-header-tab-label"
+                                  onClick={() => handleSwitchChatSession(sid)}
+                                  title={title}
+                                >
+                                  {title}
+                                </button>
+                                <Tooltip title="关闭（仍可从历史记录打开）">
+                                  <button
+                                    type="button"
+                                    className="doc-studio__chat-header-tab-close"
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      handleCloseChatSession(sid)
+                                    }}
+                                    aria-label="关闭对话"
+                                  >
+                                    <CloseOutlined />
+                                  </button>
+                                </Tooltip>
                               </div>
-                              <div>
-                                <Text type="secondary" style={{ fontSize: 12 }}>
-                                  替换�?Prompt（发�?Agent 的实际内容）�?
-                                </Text>
-                                <div style={{ 
-                                  background: '#e6f7ff', 
-                                  padding: 8, 
-                                  borderRadius: 4, 
-                                  marginTop: 4,
-                                  fontSize: 13,
-                                  fontFamily: 'monospace',
-                                  whiteSpace: 'pre-wrap',
-                                  wordBreak: 'break-word',
-                                  border: '1px solid #91d5ff'
-                                }}>
-                                  {lastPromptLog.final}
-                                </div>
-                              </div>
-                            </div>
+                            )
+                          })}
+                          {(!currentChatSessionId || hasNewConversationSlot) && (
+                            <button
+                              type="button"
+                              className={`doc-studio__chat-header-tab ${!currentChatSessionId ? 'doc-studio__chat-header-tab--active' : ''}`}
+                              onClick={async () => {
+                                if (!snap.workspaceId) return
+                                docStudioActions.setChatMessages([])
+                                try {
+                                  const detail = await bindWorkspaceSession(
+                                    { workspaceId: snap.workspaceId, sessionId: null },
+                                    { loading: false, errorToast: false },
+                                  )
+                                  docStudioActions.setWorkspaceConfig(detail.config)
+                                } catch {
+                                  docStudioActions.setWorkspaceConfig({
+                                    ...snap.workspaceConfig,
+                                    session_id: null,
+                                  })
+                                }
+                              }}
+                              title="新对话"
+                            >
+                              新对话
+                            </button>
                           )}
                         </div>
-                      )}
-                      <div className="doc-studio__mode-switch">
-                        <Text type="secondary" style={{ fontSize: 13 }}>不知道怎么问？试试这些示例�?/Text>
-                        <Space size="small" wrap>
-                          <Switch checked={asyncMode} onChange={setAsyncMode} />
-                          <Text type="secondary">异步模式（长任务可恢复）</Text>
-                          {asyncRunStatus !== 'idle' && (
-                            <Tag color={asyncRunStatus === 'running' ? 'blue' : asyncRunStatus === 'failed' ? 'red' : 'green'}>
-                              {asyncRunStatus === 'running' ? '进行�? : asyncRunStatus === 'failed' ? '失败' : '完成'}
-                            </Tag>
-                          )}
-                          {asyncRunId && (
-                            <Tag color="default">Run: {asyncRunId.slice(0, 8)}</Tag>
-                          )}
-                        </Space>
-                        <Segmented
-                          size="small"
-                          value={presetFilter}
-                          onChange={(value) => setPresetFilter(value as 'all' | PromptIntent)}
-                          options={[
-                            { label: '全部', value: 'all' },
-                            { label: '编辑', value: 'edit' },
-                            { label: '建议', value: 'suggest' },
-                            { label: '问答', value: 'qa' },
-                            { label: '引用', value: 'citation' },
-                            { label: '自定�?, value: 'custom' },
-                          ]}
-                        />
-                        <Space wrap size={[8, 8]} className="doc-studio__preset-actions">
-                          <Input
-                            allowClear
-                            value={presetSearch}
-                            placeholder="搜索模板"
-                            onChange={(event) => setPresetSearch(event.target.value)}
-                            style={{ width: 200 }}
-                          />
-                          <Button size="small" icon={<UploadOutlined />} onClick={handleImportPresets}>
-                            导入模板
-                          </Button>
-                          <Button
-                            size="small"
-                            icon={<DownloadOutlined />}
-                            disabled={!customPromptPresets.length}
-                            onClick={handleExportPresets}
-                          >
-                            导出模板
-                          </Button>
-                          <Text type="secondary" style={{ fontSize: 12 }}>
-                            �?{orderedPromptPresets.length} 个模�?
-                          </Text>
-                        </Space>
-                        <div className="doc-studio__prompt-groups">
-                          {groupedPromptPresets.map((group) => (
-                            <div key={group.intent} className="doc-studio__prompt-group">
-                              <div className="doc-studio__prompt-group-title">
-                                <Text strong>{intentTagMap[group.intent]?.label || '模板'}</Text>
-                                <Tag>{group.items.length}</Tag>
-                              </div>
-                              <Space wrap size={[8, 8]} className="doc-studio__quick-prompts">
-                                {group.items.map((preset) => {
-                                  const isEdit = preset.intent === 'edit' || preset.intent === 'citation'
-                                  const tooltipText =
-                                    preset.description ||
-                                    (preset.isCustom ? '自定义模�? : '')
-                                  const contentWarning = isEdit
-                                    ? '⚠️ 会直接修改文�?
-                                    : '💡 只给建议，不修改文件'
-                                  const button = (
-                                    <Button
+                        <div className="doc-studio__chat-header-actions">
+                          <Tooltip title="新建对话">
+                            <button
+                              type="button"
+                              className="doc-studio__chat-header-icon"
+                              onClick={handleNewChat}
+                              disabled={!snap.workspaceId}
+                            >
+                              <PlusOutlined />
+                            </button>
+                          </Tooltip>
+                          <Dropdown
+                            trigger={['click']}
+                            open={historyDropdownOpen}
+                            onOpenChange={(nextOpen) => setHistoryDropdownOpen(nextOpen)}
+                            overlayClassName="doc-studio__history-dropdown"
+                            placement="bottomRight"
+                            menu={{ items: [] }}
+                            dropdownRender={() => {
+                              const keyword = historySearchKeyword.trim().toLowerCase()
+                              const openRows = chatSessionIds
+                                .map((sid) => {
+                                  const isActive = currentChatSessionId === sid
+                                  const rawLabel = String(sessionTitlesRef.current[sid] || '').trim()
+                                  const label =
+                                    rawLabel && !isPlaceholderSessionTitle(rawLabel) ? rawLabel : '新对话'
+                                  return { sid, label, isActive }
+                                })
+                                .filter((item) => !keyword || item.label.toLowerCase().includes(keyword))
+                              const closedRows = closedSessionIds
+                                .map((sid) => ({
+                                  sid,
+                                  label: (() => {
+                                    const rawLabel = String(sessionTitlesRef.current[sid] || '').trim()
+                                    return rawLabel && !isPlaceholderSessionTitle(rawLabel) ? rawLabel : '新对话'
+                                  })(),
+                                }))
+                                .filter((item) => !keyword || item.label.toLowerCase().includes(keyword))
+
+                              const hasRows = openRows.length + closedRows.length > 0
+                              return (
+                                <div
+                                  className="doc-studio__history-dropdown-panel"
+                                  onClick={(event) => event.stopPropagation()}
+                                >
+                                  <div className="doc-studio__history-dropdown-search">
+                                    <Input
+                                      allowClear
                                       size="small"
-                                      type={isEdit ? 'primary' : 'default'}
-                                      onClick={() => handleQuickPromptApply(preset)}
-                                      style={{
-                                        fontSize: 13,
-                                        height: 28,
-                                        padding: '0 12px',
-                                      }}
-                                    >
-                                      {preset.label}
-                                    </Button>
-                                  )
-                                  return (
-                                    <span
-                                      key={preset.id || preset.label}
-                                      className="doc-studio__quick-prompt-item"
-                                    >
-                                      <Tooltip
-                                        title={
-                                          <div>
-                                            <div style={{ fontWeight: 500 }}>{tooltipText}</div>
-                                            <div style={{ fontSize: '11px', marginTop: 4, opacity: 0.85 }}>
-                                              {contentWarning}
-                                            </div>
-                                          </div>
-                                        }
-                                      >
-                                        {button}
-                                      </Tooltip>
-                                      <Tag color={intentTagMap[preset.intent]?.color || 'default'}>
-                                        {intentTagMap[preset.intent]?.label || '模板'}
-                                      </Tag>
-                                      {preset.isCustom && preset.id && (
-                                        <Button
-                                          size="small"
-                                          type={preset.pinned ? 'primary' : 'text'}
-                                          icon={preset.pinned ? <PushpinFilled /> : <PushpinOutlined />}
-                                          onClick={() => handleTogglePresetPin(preset.id!)}
-                                          className="doc-studio__quick-prompt-delete"
-                                        />
-                                      )}
-                                      {preset.isCustom && (
-                                        <Button
-                                          size="small"
-                                          type="text"
-                                          icon={<EditOutlined />}
-                                          onClick={() => handleOpenPresetModal(preset as CustomPromptPreset)}
-                                          className="doc-studio__quick-prompt-delete"
-                                        />
-                                      )}
-                                      {preset.isCustom && preset.id && (
-                                        <Popconfirm
-                                          title="确认删除该模板？"
-                                          onConfirm={() => handleDeletePreset(preset.id!)}
-                                        >
-                                          <Button
-                                            size="small"
-                                            type="text"
-                                            icon={<CloseOutlined />}
-                                            className="doc-studio__quick-prompt-delete"
-                                          />
-                                        </Popconfirm>
-                                      )}
-                                    </span>
-                                  )
-                                })}
-                              </Space>
-                            </div>
-                          ))}
+                                      value={historySearchKeyword}
+                                      placeholder="Search..."
+                                      prefix={<SearchOutlined />}
+                                      onChange={(event) => setHistorySearchKeyword(event.target.value)}
+                                      onKeyDown={(event) => event.stopPropagation()}
+                                    />
+                                  </div>
+                                  {openRows.length > 0 && (
+                                    <div className="doc-studio__history-dropdown-section">
+                                      <div className="doc-studio__history-dropdown-section-title">Today</div>
+                                      <div className="doc-studio__history-dropdown-list">
+                                        {openRows.map((item) => (
+                                          <button
+                                            key={`history-open-${item.sid}`}
+                                            type="button"
+                                            className={`doc-studio__history-dropdown-row ${
+                                              item.isActive ? 'doc-studio__history-dropdown-row--active' : ''
+                                            }`}
+                                            onClick={() => {
+                                              void handleSwitchChatSession(item.sid).finally(() => {
+                                                setHistoryDropdownOpen(false)
+                                              })
+                                            }}
+                                          >
+                                            <span className="doc-studio__history-dropdown-row-left">
+                                              <span className="doc-studio__history-dropdown-row-check">
+                                                {item.isActive ? <CheckOutlined /> : null}
+                                              </span>
+                                              <span
+                                                className="doc-studio__history-dropdown-row-label"
+                                                title={item.label}
+                                              >
+                                                {item.label}
+                                              </span>
+                                            </span>
+                                            <span
+                                              className="doc-studio__history-dropdown-row-actions"
+                                              onClick={(event) => event.stopPropagation()}
+                                            >
+                                              <button
+                                                type="button"
+                                                className="doc-studio__history-dropdown-icon-btn"
+                                                title="重命名对话"
+                                                onClick={() => {
+                                                  handleRenameChatSession(item.sid, item.label)
+                                                }}
+                                              >
+                                                <EditOutlined />
+                                              </button>
+                                              <button
+                                                type="button"
+                                                className="doc-studio__history-dropdown-icon-btn doc-studio__history-dropdown-icon-btn--danger"
+                                                title="删除对话"
+                                                onClick={() => {
+                                                  Modal.confirm({
+                                                    title: '删除对话',
+                                                    content: '确定彻底删除此对话？此操作不可恢复。',
+                                                    okText: '删除',
+                                                    okType: 'danger',
+                                                    cancelText: '取消',
+                                                    onOk: () => handleDeleteChatSession(item.sid),
+                                                  })
+                                                }}
+                                              >
+                                                <DeleteOutlined />
+                                              </button>
+                                            </span>
+                                          </button>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
+                                  {closedRows.length > 0 && (
+                                    <div className="doc-studio__history-dropdown-section">
+                                      <div className="doc-studio__history-dropdown-section-title">History</div>
+                                      <div className="doc-studio__history-dropdown-list">
+                                        {closedRows.map((item) => (
+                                          <button
+                                            key={`history-closed-${item.sid}`}
+                                            type="button"
+                                            className="doc-studio__history-dropdown-row doc-studio__history-dropdown-row--closed"
+                                            onClick={() => {
+                                              void handleReopenChatSession(item.sid).finally(() => {
+                                                setHistoryDropdownOpen(false)
+                                              })
+                                            }}
+                                          >
+                                            <span className="doc-studio__history-dropdown-row-left">
+                                              <span className="doc-studio__history-dropdown-row-check" />
+                                              <span
+                                                className="doc-studio__history-dropdown-row-label"
+                                                title={item.label}
+                                              >
+                                                {item.label}
+                                              </span>
+                                            </span>
+                                            <span
+                                              className="doc-studio__history-dropdown-row-actions"
+                                              onClick={(event) => event.stopPropagation()}
+                                            >
+                                              <button
+                                                type="button"
+                                                className="doc-studio__history-dropdown-icon-btn"
+                                                title="重命名对话"
+                                                onClick={() => {
+                                                  handleRenameChatSession(item.sid, item.label)
+                                                }}
+                                              >
+                                                <EditOutlined />
+                                              </button>
+                                              <button
+                                                type="button"
+                                                className="doc-studio__history-dropdown-icon-btn doc-studio__history-dropdown-icon-btn--danger"
+                                                title="删除对话"
+                                                onClick={() => {
+                                                  Modal.confirm({
+                                                    title: '删除对话',
+                                                    content: '确定彻底删除此对话？此操作不可恢复。',
+                                                    okText: '删除',
+                                                    okType: 'danger',
+                                                    cancelText: '取消',
+                                                    onOk: () => handleDeleteChatSession(item.sid),
+                                                  })
+                                                }}
+                                              >
+                                                <DeleteOutlined />
+                                              </button>
+                                            </span>
+                                          </button>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  )}
+                                  {!hasRows && (
+                                    <div className="doc-studio__history-dropdown-empty">暂无历史对话</div>
+                                  )}
+                                </div>
+                              )
+                            }}
+                          >
+                            <button
+                              type="button"
+                              className="doc-studio__chat-header-icon"
+                              aria-label="历史对话列表"
+                            >
+                              <HistoryOutlined />
+                            </button>
+                          </Dropdown>
+                          {currentChatSessionId && (
+                            <Dropdown
+                              trigger={['click']}
+                              menu={{
+                                items: [
+                                  {
+                                    key: 'debug',
+                                    icon: <BarChartOutlined />,
+                                    label: '调试: 查看原始输出',
+                                    onClick: async () => {
+                                      if (!snap.workspaceId) return
+                                      try {
+                                        const data = await getWorkspaceMessagesDebug({
+                                          workspaceId: snap.workspaceId,
+                                          sessionId: currentChatSessionId,
+                                        }, { loading: false, errorToast: false })
+                                        setDebugData(data)
+                                        setDebugModalOpen(true)
+                                      } catch (e) {
+                                        message.error('获取调试数据失败')
+                                      }
+                                    },
+                                  },
+                                  {
+                                    key: 'delete',
+                                    danger: true,
+                                    icon: <DeleteOutlined />,
+                                    label: '删除当前对话',
+                                    onClick: () => {
+                                      Modal.confirm({
+                                        title: '删除对话',
+                                        content: '确定删除当前对话？此操作不可恢复。',
+                                        okText: '删除',
+                                        okType: 'danger',
+                                        cancelText: '取消',
+                                        onOk: () => handleDeleteChatSession(currentChatSessionId),
+                                      })
+                                    },
+                                  },
+                                ],
+                              }}
+                            >
+                              <button type="button" className="doc-studio__chat-header-icon">
+                                <EllipsisOutlined />
+                              </button>
+                            </Dropdown>
+                          )}
+                          <Tooltip title="关闭右侧栏 (Ctrl+L 可重新打开)">
+                            <button
+                              type="button"
+                              className="doc-studio__chat-header-icon"
+                              onClick={() => setRightPanelClosed(true)}
+                            >
+                              <CloseOutlined />
+                            </button>
+                          </Tooltip>
                         </div>
                       </div>
-                      {(intentStatus || planTotalSteps > 0) && (
-                        <div className="doc-studio__agent-status">
-                          <div className="doc-studio__agent-status-tags">
-                            {intentStatus && (
-                              <Tag color={intentTagMap[intentStatus]?.color ?? 'blue'}>
-                                {intentTagMap[intentStatus]?.label ?? intentStatus.toUpperCase()}
-                              </Tag>
-                            )}
-                            {typeof snap.agentStatus.intentConfidence === 'number' && (
-                              <Tag color="gold">
-                                置信�?{(snap.agentStatus.intentConfidence * 100).toFixed(0)}%
-                              </Tag>
-                            )}
-                            {planTotalSteps > 0 && (
-                              <Tag color="geekblue">
-                                计划进度 {planCompletedSteps}/{planTotalSteps}
-                              </Tag>
-                            )}
-                            {snap.agentStatus.traceId && (
-                              <Tag color="default">Trace ID: {snap.agentStatus.traceId}</Tag>
-                            )}
-                            {snap.agentStatus.operationId && (
-                              <Tag color="default">Op: {snap.agentStatus.operationId.slice(0, 8)}</Tag>
-                            )}
-                          </div>
-                          {planTotalSteps > 0 && (
-                            <div className="doc-studio__agent-plan">
-                              <Progress percent={planPercent} size="small" showInfo={false} />
-                              <Text type="secondary">
-                                {planCompletedSteps >= planTotalSteps
-                                  ? '计划已完成，准备总结'
-                                  : `下一步：${planNextStep}`}
-                              </Text>
-                            </div>
-                          )}
-                          {planStatus?.notes && (
-                            <Text type="secondary">{planStatus.notes}</Text>
-                          )}
-                        </div>
-                      )}
+                      {agentWarnings.length > 0 && (
+                        <div className="doc-studio__chat-warnings">
                       {agentWarnings.map((warning, index) => (
                         <Alert
                           key={`agent-warning-${index}`}
                           type="warning"
                           showIcon
-                          message="Agent 提示"
+                          message="Agent 警告"
                           description={warning}
                           style={{ marginBottom: 8 }}
                         />
-                      ))}
-                      <div className="doc-studio__chat-messages">
+                                ))}
+                              </div>
+                            )}
+                      <div ref={chatMessagesContainerRef} className="doc-studio__chat-messages">
                         {snap.chatMessages.length ? (
                           <>
-                            {snap.chatMessages.map((msg) => (
+                            {snap.chatMessages.map((msg, msgIndex) => {
+                              const isReEditing = msg.role === 'user' && reEditDraft?.messageId === msg.id
+                              const messageImages = Array.isArray(msg.meta?.images) ? msg.meta.images : []
+                              const messageSelections = normalizeSelectionFragments(msg.meta?.selections)
+                              const messageFileMentions = normalizeFileMentionFragments(
+                                msg.meta?.fileMentions ?? msg.meta?.file_mentions,
+                              )
+                              const editingImages = isReEditing ? (reEditDraft?.images || []) : []
+                              const displayImages = isReEditing ? editingImages : messageImages
+                              const hasImages = displayImages.length > 0
+                              let displayContent = msg.role === 'user' && hasImages
+                                ? (msg.content || '').replace(/\n*\[已附带图片\s*\d+\s*张\]\s*/g, '').trim()
+                                : msg.content
+                              // 归一化：将 3 个及以上连续换行压缩为 2 个，避免产生空段落和过大间距
+                              if (msg.role === 'agent' && typeof displayContent === 'string') {
+                                displayContent = displayContent.replace(/\n{3,}/g, '\n\n')
+                              }
+                              const renderedUserContent = renderPromptWithMentionTags(
+                                String(displayContent || ''),
+                                messageSelections,
+                                messageFileMentions,
+                                handleMentionTagClick,
+                              )
+                              return (
                             <div
                               key={msg.id}
                               className={`doc-studio__chat-message doc-studio__chat-message--${msg.role}`}
                             >
-                              <div className="doc-studio__chat-meta">
-                                <Text strong>{msg.role === 'user' ? '�? : 'Agent'}</Text>
-                                <Text type="secondary">
-                                  {new Date(msg.createdAt).toLocaleTimeString()}
-                                </Text>
-                              </div>
-                                <div className="doc-studio__chat-content">
-                                  {msg.role === 'agent' ? (
-                                    <ReactMarkdown
-                                      remarkPlugins={[remarkGfm, remarkMath]}
-                                      rehypePlugins={[rehypeKatex, rehypeRaw]}
-                                    >
-                                      {msg.content}
-                                    </ReactMarkdown>
-                                  ) : (
-                                    msg.content
-                                  )}
-                            </div>
-                              {msg.role === 'agent' && msg.meta?.traceId && (
-                                <div className="doc-studio__chat-feedback">
-                                  <Tooltip title="这个回答有帮�?>
-                                    <Button
-                                      size="small"
-                                      type={msg.meta?.feedback === 'thumbs_up' ? 'primary' : 'default'}
-                                      icon={<LikeOutlined />}
-                                      onClick={() =>
-                                        handleFeedbackSubmit(msg.id, msg.meta?.traceId, 'thumbs_up')
-                                      }
-                                      loading={!!feedbackSubmitting[msg.id]}
-                                    />
-                                  </Tooltip>
-                                  <Tooltip title="这个回答没有帮助">
-                                    <Button
-                                      size="small"
-                                      type={msg.meta?.feedback === 'thumbs_down' ? 'primary' : 'default'}
-                                      icon={<DislikeOutlined />}
-                                      onClick={() =>
-                                        handleFeedbackSubmit(msg.id, msg.meta?.traceId, 'thumbs_down')
-                                      }
-                                      loading={!!feedbackSubmitting[msg.id]}
-                                    />
-                                  </Tooltip>
+                              {msg.role === 'user' ? (
+                                <div className="doc-studio__chat-message-user-inner">
+                                  <div className="doc-studio__chat-message-user-body">
+                                    <div className="doc-studio__chat-message-user-content">
+                                      {hasImages && !isReEditing && (
+                                        <div className="doc-studio__chat-thumbnails">
+                                          <Image.PreviewGroup>
+                                            {displayImages.map((item: any, index: number) => {
+                                              const url =
+                                                typeof item?.dataUrl === 'string'
+                                                  ? item.dataUrl
+                                                  : typeof item?.data_url === 'string'
+                                                    ? item.data_url
+                                                    : ''
+                                    if (!url) return null
+                                              const name =
+                                                typeof item?.name === 'string'
+                                                  ? item.name
+                                                  : `image-${index + 1}`
+                                    return (
+                                                <Image
+                                        key={`${msg.id}-img-${index}`}
+                                                  src={url}
+                                                  alt={name}
+                                                  width={36}
+                                                  height={36}
+                                                  rootClassName="doc-studio__chat-thumbnail-wrap"
+                                                  preview={{ mask: '预览' }}
+                                                />
+                                              )
+                                            })}
+                                          </Image.PreviewGroup>
                                 </div>
                               )}
+                                      {isReEditing ? (
+                                        <div
+                                          className="doc-studio__chat-message-editor-wrap"
+                                          ref={isReEditing ? reEditContainerRef : undefined}
+                                        >
+                                          {editingImages.length > 0 && (
+                                            <div className="doc-studio__image-attachments doc-studio__chat-message-editor-images">
+                                              <Space wrap size={[8, 8]}>
+                                                {editingImages.map((item) => (
+                                                  <span key={item.id} className="doc-studio__image-chip">
+                                                    <Image
+                                                      src={item.dataUrl}
+                                                      alt={item.name}
+                                                      width={36}
+                                                      height={36}
+                                                      className="doc-studio__image-chip-thumb"
+                                                      preview={{ mask: false }}
+                                                    />
+                                                    <button
+                                                      type="button"
+                                                      className="doc-studio__image-chip-remove"
+                                                      onClick={(e) => {
+                                                        e.stopPropagation()
+                                                        e.preventDefault()
+                                                        removeReEditImageAttachment(item.id)
+                                                      }}
+                                                      title="移除图片"
+                                                    >
+                                                      ×
+                                                    </button>
+                                                  </span>
+                                                ))}
+                                              </Space>
+                                            </div>
+                                          )}
+                                          <Input.TextArea
+                                            autoSize={{ minRows: 2, maxRows: 8 }}
+                                            className="doc-studio__chat-message-editor"
+                                            placeholder="可编辑提示词，Ctrl+V 可粘贴图片（最多 4 张）"
+                                            value={reEditDraft?.prompt || ''}
+                                            onChange={(event) => {
+                                              const nextPrompt = event.target.value
+                                              setReEditDraft((prev) => {
+                                                if (!prev || prev.messageId !== msg.id) return prev
+                                                return { ...prev, prompt: nextPrompt }
+                                              })
+                                            }}
+                                            onPaste={handleReEditPromptPaste}
+                                            disabled={reEditSubmitting}
+                                          />
+                                          <div className="doc-studio__chat-message-editor-actions">
+                                            <Button size="small" onClick={handleCancelReEdit} disabled={reEditSubmitting}>
+                                              取消
+                                            </Button>
+                                            <Tooltip
+                                              title="清理该消息后的对话，文件保持当前状态不回退"
+                                              mouseEnterDelay={0.45}
+                                            >
+                                              <span>
+                                                <Button
+                                                  size="small"
+                                                  onClick={() => {
+                                                    void handleSubmitReEdit(false)
+                                                  }}
+                                                  disabled={reEditSubmitting}
+                                                  loading={reEditSubmitting}
+                                                >
+                                                  继续但不恢复
+                                                </Button>
+                                              </span>
+                                            </Tooltip>
+                                            <Tooltip
+                                              title={
+                                                reEditDraft?.runId
+                                                  ? '清理后续对话，并将文件回退到该消息发送前的 checkpoint'
+                                                  : '当前消息无 checkpoint，将自动降级为仅清理后续对话'
+                                              }
+                                              mouseEnterDelay={0.45}
+                                            >
+                                              <span>
+                                                <Button
+                                                  size="small"
+                                                  type="primary"
+                                                  onClick={() => {
+                                                    void handleSubmitReEdit(true)
+                                                  }}
+                                                  disabled={reEditSubmitting}
+                                                  loading={reEditSubmitting}
+                                                >
+                                                  继续并恢复
+                                                </Button>
+                                              </span>
+                                            </Tooltip>
+                                          </div>
+                                        </div>
+                                      ) : (
+                                        <div
+                                          className="doc-studio__chat-content doc-studio__chat-content--editable"
+                                          role="button"
+                                          tabIndex={0}
+                                          onClick={() => handleReEditMessage(msg, msgIndex)}
+                                          onKeyDown={(event) => {
+                                            if (event.key === 'Enter' || event.key === ' ') {
+                                              event.preventDefault()
+                                              handleReEditMessage(msg, msgIndex)
+                                            }
+                                          }}
+                                        >
+                                          {renderedUserContent}
+                                        </div>
+                                      )}
+                                    </div>
+                                    {!isReEditing && (
+                                      <Tooltip title="直接编辑并继续">
+                                        <button
+                                          type="button"
+                                          className="doc-studio__chat-message-reset"
+                                          onClick={() => handleReEditMessage(msg, msgIndex)}
+                                          aria-label="重新编辑"
+                                        >
+                                          <RollbackOutlined />
+                                        </button>
+                                      </Tooltip>
+                                    )}
+                                  </div>
+                                </div>
+                              ) : (
+                                <>
+                                  <div className="doc-studio__chat-content doc-studio__chat-content--markdown">
+                                    <ChatMarkdown>{displayContent}</ChatMarkdown>
+                                  </div>
+                                  <div className="doc-studio__chat-feedback">
+                                    <Tooltip title="复制回答">
+                                      <Button
+                                        size="small"
+                                        icon={<CopyOutlined />}
+                                        onClick={() => {
+                                          const text = String(displayContent || '')
+                                          if (!text.trim()) {
+                                            message.warning('暂无可复制内容')
+                                            return
+                                          }
+                                          copyTextToClipboard(text)
+                                            .then(() => message.success('回答已复制'))
+                                            .catch(() => message.error('复制失败，请手动复制'))
+                                        }}
+                                      />
+                                    </Tooltip>
+                                    <Dropdown
+                                      menu={{
+                                        items: [
+                                          {
+                                            key: 'export-txt',
+                                            label: '导出为 TXT',
+                                            onClick: () => {
+                                              const text = String(displayContent || '')
+                                              if (!text.trim()) {
+                                                message.warning('暂无可导出内容')
+                                                return
+                                              }
+                                              downloadTextAsFile(
+                                                text,
+                                                `doc-studio-reply-${Date.now()}.txt`,
+                                              )
+                                            },
+                                          },
+                                        ],
+                                      }}
+                                      trigger={['click']}
+                                    >
+                                      <Button size="small" icon={<ShareAltOutlined />} />
+                                    </Dropdown>
+                                    {msg.meta?.traceId && (
+                                      <>
+                                        <Tooltip title="有帮助">
+                                          <Button
+                                            size="small"
+                                            type={msg.meta?.feedback === 'thumbs_up' ? 'primary' : 'default'}
+                                            icon={<LikeOutlined />}
+                                            onClick={() =>
+                                              handleFeedbackSubmit(msg.id, msg.meta?.traceId, 'thumbs_up')
+                                            }
+                                            loading={!!feedbackSubmitting[msg.id]}
+                                          />
+                                        </Tooltip>
+                                        <Tooltip title="无帮助">
+                                          <Button
+                                            size="small"
+                                            type={msg.meta?.feedback === 'thumbs_down' ? 'primary' : 'default'}
+                                            icon={<DislikeOutlined />}
+                                            onClick={() =>
+                                              handleFeedbackSubmit(msg.id, msg.meta?.traceId, 'thumbs_down')
+                                            }
+                                            loading={!!feedbackSubmitting[msg.id]}
+                                          />
+                                        </Tooltip>
+                                      </>
+                                    )}
+                                  </div>
+                                </>
+                              )}
+                            </div>
+                            )
+                            })}
+                            {chatLoading && (
+                              <div className="doc-studio__chat-live">
+                                <div className="doc-studio__chat-live-head">
+                                  <Spin size="small" />
+                                  <span>{liveAgentStatus || '任务执行中...'}</span>
+                                  <span className="doc-studio__chat-live-time">{liveAgentElapsedSec}s</span>
+                                  {liveDeltaCharCount > 0 && (
+                                    <span className="doc-studio__chat-live-counter">
+                                      {liveDeltaCharCount} chars
+                                    </span>
+                                  )}
+                                </div>
+                                {liveDeltaStartedRef.current && (
+                                  <div ref={liveOutputRef} className="doc-studio__chat-live-output">
+                                    {livePreviewLines.map((line, lineIndex) => (
+                                      <div
+                                        key={`live-preview-${lineIndex}`}
+                                        className="doc-studio__chat-live-output-line"
+                                      >
+                                        {line}
                               </div>
                             ))}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                            <div ref={chatMessagesEndRef} />
+                          </>
+                        ) : chatLoading ? (
+                          <>
+                            <div className="doc-studio__chat-live">
+                              <div className="doc-studio__chat-live-head">
+                                <Spin size="small" />
+                                <span>{liveAgentStatus || '任务执行中...'}</span>
+                                <span className="doc-studio__chat-live-time">{liveAgentElapsedSec}s</span>
+                                {liveDeltaCharCount > 0 && (
+                                  <span className="doc-studio__chat-live-counter">
+                                    {liveDeltaCharCount} chars
+                                  </span>
+                                )}
+                              </div>
+                              {liveDeltaStartedRef.current && (
+                                <div ref={liveOutputRef} className="doc-studio__chat-live-output">
+                                  {livePreviewLines.map((line, lineIndex) => (
+                                    <div
+                                      key={`live-preview-empty-${lineIndex}`}
+                                      className="doc-studio__chat-live-output-line"
+                                    >
+                                      {line}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
                             <div ref={chatMessagesEndRef} />
                           </>
                         ) : (
-                          <Empty
-                            description="暂无对话"
-                            image={Empty.PRESENTED_IMAGE_SIMPLE}
-                          />
-                        )}
-                      </div>
-                      <div className="doc-studio__chat-input">
-                        {selections.length > 0 && (
-                          <div className="doc-studio__selection-preview">
-                            <Text type="secondary" style={{ fontSize: 12 }}>
-                              已选中 {selections.length} 个片段（�?{totalSelectionChars} 个字符）
-                            </Text>
-                            <div className="doc-studio__selection-preview-list">
-                              {selections.map((sel) => (
-                                <div key={sel.id} className="doc-studio__selection-preview-item">
-                                  <div className="doc-studio__selection-preview-item-head">
-                                    <Tag
-                                      color="blue"
-                                      closable
-                                      onClose={(event) => {
-                                        event.preventDefault()
-                                        removeSelectionSnippet(sel.placeholder)
-                                      }}
-                                    >
-                                      {sel.placeholder}
-                                    </Tag>
-                                    <Text type="secondary" style={{ fontSize: 11 }}>
-                                      {sel.text.length} 字符
-                                    </Text>
-                                  </div>
-                                  <Text code style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
-                                    {sel.text.slice(0, 80)}
-                                    {sel.text.length > 80 && '...'}
-                                  </Text>
-                                </div>
-                              ))}
-                            </div>
-                            <Text type="secondary" style={{ fontSize: 11, marginTop: 4, display: 'block', color: '#999' }}>
-                              💡 prompt 中的 @selection1、@selection2 会引用对应片段，内容会自动通过上下文发�?
-                            </Text>
+                          <div className="doc-studio__chat-empty">
+                            <Empty
+                              description="暂无对话"
+                              image={Empty.PRESENTED_IMAGE_SIMPLE}
+                            />
                           </div>
                         )}
-                        <div className="doc-studio__prompt-wrapper">
+                      </div>
+                      {hasPendingAgentReview && (
+                        <div className="doc-studio__chat-review-actions">
+                          <Button
+                            type="text"
+                            danger
+                            size="small"
+                            disabled={diffReverting}
+                            onClick={() => {
+                              void handleRejectAllDiffs()
+                            }}
+                          >
+                            Undo All
+                          </Button>
+                          <Button
+                            type="text"
+                            size="small"
+                            onClick={handleKeepAllDiffs}
+                          >
+                            Keep All
+                          </Button>
+                          <Button
+                            size="small"
+                            type={isAgentDiffReviewActive ? 'default' : 'primary'}
+                            onClick={() => {
+                              setAgentDiffReviewOpen(true)
+                              setDiffModalContext('agent')
+                            }}
+                          >
+                            Review
+                          </Button>
+                        </div>
+                      )}
+                      <div ref={chatInputContainerRef} className="doc-studio__chat-input">
+                        {chatImageAttachments.length > 0 && (
+                          <div className="doc-studio__image-attachments">
+                            <Space wrap size={[8, 8]}>
+                              {chatImageAttachments.map((item) => (
+                                <span key={item.id} className="doc-studio__image-chip">
+                                  <Image
+                                    src={item.dataUrl}
+                                    alt={item.name}
+                                    width={36}
+                                    height={36}
+                                    className="doc-studio__image-chip-thumb"
+                                    preview={{ mask: false }}
+                                  />
+                                  <button
+                                    type="button"
+                                    className="doc-studio__image-chip-remove"
+                                    onClick={(e) => {
+                                      e.stopPropagation()
+                                      e.preventDefault()
+                                      removeChatImageAttachment(item.id)
+                                    }}
+                                    title="移除图片"
+                                  >
+                                    ×
+                                  </button>
+                                </span>
+                              ))}
+                            </Space>
+                          </div>
+                        )}
+                        <div className="doc-studio__prompt-wrapper" ref={promptWrapperRef}>
                           <div
                             ref={(el) => {
                               if (el) {
@@ -3733,9 +7631,9 @@ const LatexEditorPage = () => {
                             contentEditable
                             suppressContentEditableWarning
                             data-placeholder={
-                              selections.length
-                                ? `输入指令，已选中 ${selections.length} 个片段（自动随上下文发送）`
-                                : '输入指令，Ctrl+Enter 发�?
+                              selections.length || fileMentions.length
+                                ? `已选 ${selections.length} 段，已引 ${fileMentions.length} 个文件，输入 @ 可引用文件`
+                                : '输入指令，Ctrl+V 粘贴图片，Ctrl+L 引用选区，Enter 发送，Shift+Enter 换行'
                             }
                             onInput={(e) => {
                               const target = e.currentTarget
@@ -3744,18 +7642,56 @@ const LatexEditorPage = () => {
                             }}
                             onClick={(e) => {
                               const target = e.target as HTMLElement
-                              if (target.classList.contains('prompt-tag-close')) {
-                                const placeholder = target.getAttribute('data-action')?.replace('remove-', '')
+                              const closeNode = target.closest('.prompt-tag-close') as HTMLElement | null
+                              if (closeNode) {
+                                const placeholder = closeNode.getAttribute('data-action')?.replace('remove-', '')
                                 if (placeholder) {
-                                  removeSelectionSnippet(placeholder)
+                                  removeComposerMentionToken(placeholder)
                                 }
                               }
                             }}
+                            onPaste={handlePromptPaste}
                             onKeyDown={(event) => {
                               const lowerKey = event.key.toLowerCase()
-                              if ((event.ctrlKey || event.metaKey) && lowerKey === 'enter') {
+                              if (fileMentionDropdownOpen) {
+                                if (lowerKey === 'arrowdown') {
+                                  event.preventDefault()
+                                  setFileMentionActiveIndex((prev) =>
+                                    Math.min(prev + 1, fileMentionCandidates.length - 1),
+                                  )
+                                  return
+                                }
+                                if (lowerKey === 'arrowup') {
+                                  event.preventDefault()
+                                  setFileMentionActiveIndex((prev) => Math.max(prev - 1, 0))
+                                  return
+                                }
+                                if (lowerKey === 'escape') {
+                                  event.preventDefault()
+                                  clearFileMentionSuggest()
+                                  return
+                                }
+                                if (lowerKey === 'enter') {
+                                  event.preventDefault()
+                                  const targetPath = fileMentionCandidates[fileMentionActiveIndex]
+                                  if (targetPath) {
+                                    addFileMentionFromCandidate(targetPath)
+                                  }
+                                  return
+                                }
+                              }
+                              if (lowerKey === 'enter') {
+                                if (event.shiftKey) {
+                                  // Shift+Enter：换行
+                                  return
+                                }
+                                // Enter / Ctrl+Enter：发送
                                 event.preventDefault()
-                                handleSend()
+                                if (chatLoading) {
+                                  void handleStopSending()
+                                } else {
+                                  handleSend()
+                                }
                                 return
                               }
                               if ((event.ctrlKey || event.metaKey) && lowerKey === 'l') {
@@ -3764,296 +7700,521 @@ const LatexEditorPage = () => {
                               }
                             }}
                           />
-                        </div>
-                        <div className="doc-studio__chat-actions">
-                          <Button
-                            icon={<PlusOutlined />}
-                            onClick={addSelectionSnippet}
-                            title="或使�?Ctrl+L 快捷�?
-                          >
-                            添加选中文本
-                          </Button>
-                          <Button
-                            icon={<FileTextOutlined />}
-                            disabled={selections.length === 0}
-                            onClick={() => {
-                              if (!selections.length) return
-                              const missingPlaceholders = selections
-                                .map((item, idx) => item.placeholder || `@selection${idx + 1}`)
-                                .filter((token) => !prompt.includes(token))
-                              if (!missingPlaceholders.length) return
-                              const placeholders = missingPlaceholders.join(' ')
-                              // 始终在末尾追加所有缺失占位符
-                              setPrompt((prev) => (prev ? `${prev} ${placeholders}` : placeholders))
-                            }}
-                            title={`在输入框中插�?${selections.length} 个片段的引用占位符`}
-                          >
-                            引用片段 ({selections.length})
-                          </Button>
-                          <Button
-                            icon={<SaveOutlined />}
-                            disabled={!prompt.trim()}
-                            onClick={() => handleOpenPresetModal()}
-                          >
-                            保存模板
-                          </Button>
-                          <Button
-                            type="primary"
-                            icon={<SendOutlined />}
-                            onClick={handleSend}
-                            loading={chatLoading}
-                            disabled={!snap.workspaceId || !prompt.trim()}
-                          >
-                            发�?
-                          </Button>
-                        </div>
-                      </div>
-                    </div>
-                {/* History Panel */}
-                <div className="doc-studio__history" style={{ display: rightTab === 'history' ? 'block' : 'none' }}>
-                      {historyItems.length ? (
-                        <Timeline className="doc-studio__history-timeline" mode="left" items={historyItems} />
-                      ) : (
-                        <Empty
-                          description="暂无执行记录"
-                          image={Empty.PRESENTED_IMAGE_SIMPLE}
-                        />
-                      )}
-                    </div>
-                {/* Compile Panel */}
-                {isLatexWorkspace && (
-                  <div className="doc-studio__compile" style={{ display: rightTab === 'compile' ? 'block' : 'none' }}>
-                      {snap.compileResult ? (
-                        <>
-                          <Text type={snap.compileResult.success ? 'success' : 'danger'}>
-                            {snap.compileResult.summary || (snap.compileResult.success ? '编译成功' : '编译失败')}
-                          </Text>
-                          {!snap.compileResult.success && snap.compileResult.error ? (
-                            <Alert
-                              type="error"
-                              showIcon
-                              message="编译错误"
-                              description={snap.compileResult.error}
-                            />
-                          ) : null}
-                          <div className="doc-studio__compile-actions">
-                            <Button
-                              type="primary"
-                              icon={<EyeOutlined />}
-                              size="small"
-                              onClick={handlePreviewPdf}
-                              disabled={!snap.compileResult.data?.pdf_path && !snap.compileResult.success}
-                            >
-                              预览 PDF
-                            </Button>
-                            <Button
-                              icon={<DownloadOutlined />}
-                              size="small"
-                              onClick={handleDownloadPdf}
-                              disabled={!snap.compileResult.data?.pdf_path && !snap.compileResult.success}
-                            >
-                              下载 PDF
-                            </Button>
-                            <Button
-                              icon={<SyncOutlined />}
-                              size="small"
-                              onClick={async () => {
-                                if (!snap.workspaceId) return
-                                const status = await fetchCompileStatus({ workspaceId: snap.workspaceId })
-                                if (status?.result) {
-                                  docStudioActions.setCompileResult({
-                                    success: status.result.success,
-                                    data: status.result.data,
-                                    error: status.result.error ?? undefined,
-                                    summary: status.result.summary ?? undefined,
-                                  })
-                                  setRightTab('compile')
-                                } else {
-                                  message.info('暂无编译状�?)
-                                }
-                              }}
-                            >
-                              刷新状�?
-                            </Button>
-                          </div>
-                          {snap.compileResult.data?.pdf_path && (
-                            <div>
-                              <Text type="secondary">PDF 路径�?/Text>
-                              <Text code>{snap.compileResult.data.pdf_path}</Text>
-                            </div>
-                          )}
-                          {snap.compileResult.data?.warnings?.length ? (
-                            <div className="doc-studio__compile-section">
-                              <Text type="warning">警告�?/Text>
-                              <ul>
-                                {snap.compileResult.data.warnings.map((warning, idx) => (
-                                  <li key={`warning-${idx}`}>{warning}</li>
-                                ))}
-                              </ul>
-                            </div>
-                          ) : null}
-                          {snap.compileResult.data?.errors?.length ? (
-                            <div className="doc-studio__compile-section">
-                              <Text type="danger">错误�?/Text>
-                              <ul>
-                                {snap.compileResult.data.errors.map((errorMsg, idx) => (
-                                  <li key={`error-${idx}`}>{errorMsg}</li>
-                                ))}
-                              </ul>
-                            </div>
-                          ) : null}
-                          {snap.compileResult.data?.logs?.length ? (
-                            <div className="doc-studio__compile-section doc-studio__compile-logs">
-                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                                <Text strong style={{ fontSize: 14 }}>编译日志�?/Text>
-                                <Button
-                                  size="small"
-                                  onClick={async () => {
-                                    const allLogs =
-                                      snap.compileResult?.data?.logs
-                                        ?.map((log) =>
-                                          `=== ${log.command} (退出码: ${log.returncode}) ===\n${log.log || '(无日志输�?'}`
-                                        )
-                                        .join('\n\n') || ''
-                                    if (!allLogs) {
-                                      message.info('当前没有可复制的编译日志')
-                                      return
-                                    }
-                                    try {
-                                      await copyTextToClipboard(allLogs)
-                                      message.success('日志已复制到剪贴�?)
-                                    } catch (error) {
-                                      // 某些环境可能不支�?Clipboard API
-                                      // 降级方案已经�?copyTextToClipboard 中处理，这里只提示用�?
-                                      message.error('复制失败，请手动选择日志内容复制')
-                                    }
+                          {fileMentionDropdownOpen && (
+                            <div className="doc-studio__mention-dropdown" role="listbox" aria-label="文件引用候选列表">
+                              <div className="doc-studio__mention-dropdown-header">
+                                <span>Files &amp; Folders</span>
+                                <span className="doc-studio__mention-dropdown-hint">Enter 选择 · Esc 关闭</span>
+                              </div>
+                              {fileMentionCandidates.map((item, index) => (
+                                <button
+                                  key={item}
+                                  type="button"
+                                  className={`doc-studio__mention-dropdown-item ${
+                                    index === fileMentionActiveIndex
+                                      ? 'doc-studio__mention-dropdown-item--active'
+                                      : ''
+                                  }`}
+                                  onMouseDown={(event) => {
+                                    event.preventDefault()
+                                    addFileMentionFromCandidate(item)
                                   }}
                                 >
-                                  复制全部日志
-                                </Button>
-                              </div>
-                              {snap.compileResult.data.logs.map((log, idx) => {
-                                const logLines = (log.log || '').split('\n')
-                                // 解析命令名称（从完整命令中提取）
-                                const commandName = log.command.split(' ')[0] || 'unknown'
-                                const stepName = idx === 0 ? '第一次编�? : 
-                                                commandName.includes('bibtex') ? 'BibTeX 处理参考文�? :
-                                                '重新编译（更新引用）'
-                                return (
-                                  <div key={`log-${idx}`} className="doc-studio__compile-log-block">
-                                    <div className="doc-studio__compile-log-header">
-                                      <Tag color={log.returncode === 0 ? 'green' : 'red'}>
-                                        退出码 {log.returncode}
-                                      </Tag>
-                                      <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
-                                        {stepName}
-                                      </Text>
-                                      <Text type="secondary" code style={{ flex: 1, marginLeft: 8, fontSize: 11 }}>
-                                        {log.command}
-                                      </Text>
-                                    </div>
-                                    <div className="doc-studio__compile-log">
-                                      {logLines.length > 0 ? (
-                                        logLines.map((line, lineIdx) => {
-                                          const trimmedLine = line.trim()
-                                          const isError = trimmedLine.startsWith('!') || 
-                                                         trimmedLine.includes('Error') || 
-                                                         trimmedLine.includes('Fatal error') ||
-                                                         trimmedLine.includes('Missing character')
-                                          const isWarning = trimmedLine.includes('Warning') || 
-                                                           trimmedLine.includes('LaTeX Warning')
-                                          const isInfo = trimmedLine.includes('Output written') ||
-                                                        trimmedLine.includes('Transcript written') ||
-                                                        trimmedLine.includes('This is')
-                                          
-                                          let className = ''
-                                          if (isError) className = 'doc-studio__compile-log-line--error'
-                                          else if (isWarning) className = 'doc-studio__compile-log-line--warning'
-                                          else if (isInfo) className = 'doc-studio__compile-log-line--info'
-                                          
-                                          return (
-                                            <div 
-                                              key={`line-${lineIdx}`} 
-                                              className={className}
-                                              style={{ 
-                                                padding: '2px 0',
-                                                fontFamily: 'SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace',
-                                                fontSize: '12px',
-                                                lineHeight: '1.5'
-                                              }}
-                                            >
-                                              {line || '\u00A0'}
-                                            </div>
-                                          )
-                                        })
-                                      ) : (
-                                        <div style={{ color: '#888', fontStyle: 'italic' }}>(无日志输�?</div>
-                                      )}
-                                    </div>
-                                  </div>
+                                  <span className="doc-studio__mention-dropdown-item-icon" aria-hidden>
+                                    <FileTextOutlined />
+                                  </span>
+                                  <span className="doc-studio__mention-dropdown-item-main">
+                                    <span className="doc-studio__mention-dropdown-item-name">
+                                      {item.split('/').pop()}
+                                    </span>
+                                    <span className="doc-studio__mention-dropdown-item-path">
+                                      {item}
+                                    </span>
+                                  </span>
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                        <div className="doc-studio__chat-toolbar">
+                          <Select
+                            size="small"
+                            className="doc-studio__chat-mode-select"
+                            popupMatchSelectWidth={false}
+                            style={{ width: modeSelectWidth }}
+                            value={interactionMode}
+                            options={[
+                              { label: 'Ask', value: 'ask' },
+                              { label: 'Agent', value: 'agent' },
+                            ]}
+                            onChange={(value) => setInteractionMode(value as InteractionMode)}
+                          />
+                          <Select
+                            size="small"
+                            className="doc-studio__chat-model-select"
+                            popupMatchSelectWidth={false}
+                            style={{ width: modelSelectWidth }}
+                            value={llmModel}
+                            options={LLM_MODEL_OPTIONS.map((item) => ({
+                              label: item.label,
+                              value: item.value,
+                            }))}
+                            onChange={(value) => setLlmModel(normalizeLlmModel(value))}
+                          />
+                          {!chatToolbarCompact && ragEnabled && (
+                            <Select
+                              size="small"
+                              value={selectedKnowledgeBaseId ?? undefined}
+                              className="doc-studio__chat-rag-select"
+                              popupMatchSelectWidth={false}
+                              style={{ width: ragSelectWidth }}
+                              placeholder="知识库"
+                              options={knowledgeBaseOptions}
+                              loading={knowledgeLoading}
+                              onChange={handleKnowledgeBaseChange}
+                              disabled={knowledgeLoading}
+                              allowClear
+                              showSearch
+                              optionFilterProp="label"
+                              notFoundContent={
+                                knowledgeLoading ? (
+                                  <Spin size="small" />
+                                ) : (
+                                  <span>暂无知识库</span>
                                 )
-                              })}
+                              }
+                            />
+                          )}
+                          {chatToolbarCompact && (
+                            <Dropdown
+                              trigger={['click']}
+                              menu={{
+                                items: [
+                                  {
+                                    key: 'rag-toggle',
+                                    label: ragEnabled ? '关闭 RAG 检索' : '开启 RAG 检索',
+                                    icon: <DatabaseOutlined />,
+                                    onClick: handleToggleRagEnabled,
+                                  },
+                                  { key: 'web', label: 'Web 搜索', icon: <GlobalOutlined />, disabled: true },
+                                  {
+                                    key: 'image',
+                                    label: '添加图片',
+                                    icon: <PictureOutlined />,
+                                    onClick: () => chatImageInputRef.current?.click(),
+                                  },
+                                  {
+                                    key: 'status',
+                                    label: '系统状态',
+                                    icon: <BarChartOutlined />,
+                                    onClick: () => setSystemStatusOpen(true),
+                                  },
+                                ],
+                              }}
+                            >
+                              <button type="button" className="doc-studio__chat-toolbar-more-btn" title="更多选项">
+                                <EllipsisOutlined />
+                              </button>
+                            </Dropdown>
+                          )}
+                          <div className="doc-studio__chat-toolbar-actions">
+                            {!chatToolbarCompact && (
+                            <div className="doc-studio__chat-icon-cluster">
+                              <Tooltip title={ragEnabled ? '关闭 RAG 检索' : '开启 RAG 检索'}>
+                                <Button
+                                  type="text"
+                                  className={`doc-studio__toolbar-icon-btn ${
+                                    ragEnabled ? 'doc-studio__toolbar-icon-btn--active' : ''
+                                  }`}
+                                  icon={<DatabaseOutlined />}
+                                  onClick={handleToggleRagEnabled}
+                                />
+                              </Tooltip>
+                              <Tooltip title="Web 搜索默认开启">
+                                <Button
+                                  type="text"
+                                  className="doc-studio__toolbar-icon-btn doc-studio__toolbar-icon-btn--active"
+                                  icon={<GlobalOutlined />}
+                                />
+                              </Tooltip>
+                              <Tooltip title="添加图片">
+                                <Button
+                                  type="text"
+                                  className="doc-studio__toolbar-icon-btn"
+                                  icon={<PictureOutlined />}
+                                  onClick={handleChatImagePickerClick}
+                                  loading={chatImageProcessing}
+                                  disabled={!snap.workspaceId}
+                                />
+                              </Tooltip>
+                              <Tooltip title="系统状态">
+                                <Button
+                                  type="text"
+                                  className="doc-studio__toolbar-icon-btn"
+                                  icon={<BarChartOutlined />}
+                                  onClick={() => setSystemStatusOpen(true)}
+                                />
+                              </Tooltip>
                             </div>
-                          ) : null}
-                          {/* 错误和警告摘�?*/}
-                          {snap.compileResult.data?.errors?.length ? (
-                            <div className="doc-studio__compile-section" style={{ marginTop: 16 }}>
-                              <Text type="danger" strong>错误摘要�?/Text>
-                              <ul style={{ marginTop: 8, marginBottom: 0 }}>
-                                {snap.compileResult.data.errors.map((errorMsg, idx) => (
-                                  <li key={`error-${idx}`} style={{ marginBottom: 4 }}>
-                                    <Text type="danger">{errorMsg}</Text>
-                                  </li>
-                                ))}
-                              </ul>
+                            )}
+                            <Tooltip title="语音输入">
+                              <Recorder
+                                buttonClassName="doc-studio__voice-btn"
+                                activeButtonClassName="doc-studio__voice-btn--recording"
+                                disabled={!snap.workspaceId}
+                                onMessage={(text) => {
+                                  setPrompt(String(text || ''))
+                                  setTimeout(() => {
+                                    promptInputDivRef.current?.focus()
+                                  }, 0)
+                                }}
+                              />
+                            </Tooltip>
+                            <Button
+                              type="primary"
+                              icon={
+                                chatLoading ? (
+                                  <span className="doc-studio__send-stop-icon" />
+                                ) : (
+                                  <ArrowUpOutlined />
+                                )
+                              }
+                              className="doc-studio__send-btn"
+                              title={chatLoading ? '中断' : '发送（Ctrl+Enter）'}
+                              onClick={chatLoading ? handleStopSending : () => void handleSend()}
+                              disabled={
+                                !snap.workspaceId ||
+                                (!chatLoading && !prompt.trim() && chatImageAttachments.length === 0)
+                              }
+                            />
+                          </div>
+                        </div>
+                        <input
+                          ref={chatImageInputRef}
+                          type="file"
+                          accept="image/*"
+                          multiple
+                          style={{ display: 'none' }}
+                          onChange={handleChatImageInputChange}
+                        />
+                      </div>
+                    </div>
+                )}
+                {/* History Panel */}
+                {rightTab === 'history' && (
+                <div className="doc-studio__history">
+                  <div className="doc-studio__timeline-toolbar">
+                    <Text strong>文件时间线</Text>
+                    <Space size={8} wrap>
+                      {snap.activeFilePath && (
+                        <Text code className="doc-studio__timeline-file-tag">
+                          {snap.activeFilePath}
+                        </Text>
+                      )}
+                      <Button
+                        size="small"
+                        icon={<ReloadOutlined />}
+                        loading={operationHistoryLoading}
+                        onClick={() => {
+                          void loadOperationHistory()
+                        }}
+                        disabled={!snap.workspaceId}
+                      >
+                        刷新
+                      </Button>
+                    </Space>
+                  </div>
+                  {!snap.activeFilePath ? (
+                    <Empty description="请先在左侧选择文件" image={Empty.PRESENTED_IMAGE_SIMPLE} />
+                  ) : operationHistoryLoading && !activeFileTimeline.length ? (
+                    <div style={{ padding: '18px 0', textAlign: 'center' }}>
+                      <Spin size="small" />
+                    </div>
+                  ) : activeFileTimeline.length ? (
+                    <Timeline
+                      className="doc-studio__history-timeline"
+                      mode="left"
+                      items={activeFileTimeline.map((item) => {
+                        const modifiedCount = item.modified_files?.length || 0
+                        const timestamp = item.timestamp
+                          ? new Date(item.timestamp).toLocaleString()
+                          : '未知时间'
+                        return {
+                          color: item.success ? 'blue' : 'red',
+                          children: (
+                            <div className="doc-studio__timeline-card">
+                              <div className="doc-studio__timeline-head">
+                                <Text strong>{item.user_intent || '未命名操作'}</Text>
+                                <Tag color={item.success ? 'green' : 'red'}>
+                                  {item.success ? '成功' : '失败'}
+                                </Tag>
+                                {item.intent_type ? <Tag>{item.intent_type}</Tag> : null}
+                              </div>
+                              <Space size="small" wrap>
+                                <Text type="secondary">{timestamp}</Text>
+                                <Text type="secondary">改动文件: {modifiedCount}</Text>
+                                <Text type="secondary">Op: {item.operation_id.slice(0, 8)}</Text>
+                              </Space>
+                              <div className="doc-studio__timeline-actions">
+                                <Button
+                                  size="small"
+                                  icon={<EyeOutlined />}
+                                  onClick={() =>
+                                    openTimelineDiffPreview(item.operation_id, snap.activeFilePath)
+                                  }
+                                >
+                                  预览差异
+                                </Button>
+                                <Popconfirm
+                                  title="恢复当前文件到该时间点？"
+                                  onConfirm={() =>
+                                    handleRevertOperation(
+                                      item.operation_id,
+                                      snap.activeFilePath
+                                        ? [normalizeWorkspacePath(snap.activeFilePath)]
+                                        : undefined,
+                                    )
+                                  }
+                                >
+                                  <Button
+                                    size="small"
+                                    loading={revertingOperationId === item.operation_id}
+                                  >
+                                    恢复此版本
+                                  </Button>
+                                </Popconfirm>
+                              </div>
                             </div>
-                          ) : null}
-                          {snap.compileResult.data?.warnings?.length ? (
-                            <div className="doc-studio__compile-section" style={{ marginTop: 12 }}>
-                              <Text type="warning" strong>警告摘要�?/Text>
-                              <ul style={{ marginTop: 8, marginBottom: 0 }}>
-                                {snap.compileResult.data.warnings.map((warning, idx) => (
-                                  <li key={`warning-${idx}`} style={{ marginBottom: 4 }}>
-                                    <Text type="warning">{warning}</Text>
-                                  </li>
-                                ))}
-                              </ul>
+                          ),
+                        }
+                      })}
+                    />
+                  ) : (
+                    <Empty
+                      description="当前文件暂无时间线记录"
+                      image={Empty.PRESENTED_IMAGE_SIMPLE}
+                    />
+                  )}
+                </div>
+                )}
+                {/* Compile Panel */}
+                {supportsCompilePanel && rightTab === 'compile' && (
+                  <div className="doc-studio__compile">
+                      {snap.compileResult ? (
+                        compileFormat === 'markdown' ? (
+                          markdownCompilePreviewContent ? (
+                            <div className="doc-studio__compile-markdown-preview doc-studio__compile-markdown-preview--full">
+                              <ChatMarkdown>{markdownCompilePreviewContent}</ChatMarkdown>
                             </div>
-                          ) : null}
-                        </>
+                          ) : (
+                            <Empty
+                              description="暂无可渲染的 Markdown 内容"
+                              image={Empty.PRESENTED_IMAGE_SIMPLE}
+                            />
+                          )
+                        ) : (
+                          <>
+                            <Text type={snap.compileResult.success ? 'success' : 'danger'}>
+                              {snap.compileResult.summary || (snap.compileResult.success ? '编译成功' : '编译失败')}
+                            </Text>
+                            {!snap.compileResult.success && snap.compileResult.error ? (
+                              <Alert
+                                type="error"
+                                showIcon
+                                message="编译错误"
+                                description={snap.compileResult.error}
+                              />
+                            ) : null}
+                            <div className="doc-studio__compile-actions">
+                              <Button
+                                type="primary"
+                                icon={<EyeOutlined />}
+                                size="small"
+                                onClick={handlePreviewPdf}
+                                disabled={!snap.compileResult.data?.pdf_path}
+                              >
+                                预览 PDF
+                              </Button>
+                              <Button
+                                icon={<DownloadOutlined />}
+                                size="small"
+                                onClick={handleDownloadPdf}
+                                disabled={!snap.compileResult.data?.pdf_path}
+                              >
+                                下载 PDF
+                              </Button>
+                              <Button
+                                icon={<SyncOutlined />}
+                                size="small"
+                                onClick={async () => {
+                                  if (!snap.workspaceId) return
+                                  const status = await fetchCompileStatus({ workspaceId: snap.workspaceId })
+                                  if (status?.result) {
+                                    docStudioActions.setCompileResult({
+                                      success: status.result.success,
+                                      data: status.result.data,
+                                      error: status.result.error ?? undefined,
+                                      summary: status.result.summary ?? undefined,
+                                    })
+                                    setRightTab('compile')
+                                  } else {
+                                    message.info('暂无编译结果')
+                                  }
+                                }}
+                              >
+                                刷新状态
+                              </Button>
+                            </div>
+                            {snap.compileResult.data?.pdf_path && (
+                              <div>
+                                <Text type="secondary">PDF 路径</Text>
+                                <Text code>{snap.compileResult.data.pdf_path}</Text>
+                              </div>
+                            )}
+                            {snap.compileResult.data?.warnings?.length ? (
+                              <div className="doc-studio__compile-section">
+                                <Text type="warning">警告</Text>
+                                <ul>
+                                  {snap.compileResult.data.warnings.map((warning, idx) => (
+                                    <li key={`warning-${idx}`}>{warning}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                            ) : null}
+                            {snap.compileResult.data?.errors?.length ? (
+                              <div className="doc-studio__compile-section">
+                                <Text type="danger">错误</Text>
+                                <ul>
+                                  {snap.compileResult.data.errors.map((errorMsg, idx) => (
+                                    <li key={`error-${idx}`}>{errorMsg}</li>
+                                  ))}
+                                </ul>
+                              </div>
+                            ) : null}
+                            {snap.compileResult.data?.logs?.length ? (
+                              <div className="doc-studio__compile-section doc-studio__compile-logs">
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                                  <Text strong style={{ fontSize: 14 }}>编译日志</Text>
+                                  <Button
+                                    size="small"
+                                    onClick={async () => {
+                                      const allLogs =
+                                        compileLogGroups
+                                          ?.map((log) =>
+                                            `=== ${log.command} (返回码: ${log.returncode}${
+                                              log.count > 1 ? `, 重复 ${log.count} 次` : ''
+                                            }) ===\n${log.log || '(无日志)'}`
+                                          )
+                                          .join('\n\n') || ''
+                                      if (!allLogs) {
+                                        message.info('没有可复制的日志')
+                                        return
+                                      }
+                                      try {
+                                        await copyTextToClipboard(allLogs)
+                                        message.success('日志已复制')
+                                      } catch (error) {
+                                        // ??????????Clipboard API
+                                        // ????????copyTextToClipboard ????????????
+                                        message.error('复制失败，请手动选择')
+                                      }
+                                    }}
+                                  >
+                                    复制日志
+                                  </Button>
+                                </div>
+                                {compileLogGroups.map((log, idx) => {
+                                  const logLines = (log.log || '').split('\n')
+                                  // ????????????????
+                                  const commandName = log.command.split(' ')[0] || 'unknown'
+                                  const stepName =
+                                    log.firstIndex === 0
+                                      ? '编译引擎'
+                                      : commandName.includes('bibtex')
+                                        ? 'BibTeX 处理'
+                                        : '后续编译'
+                                  return (
+                                    <div key={`log-${idx}`} className="doc-studio__compile-log-block">
+                                      <div className="doc-studio__compile-log-header">
+                                        <Tag color={log.returncode === 0 ? 'green' : 'red'}>
+                                          返回码 {log.returncode}
+                                        </Tag>
+                                        <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
+                                          {stepName}
+                                        </Text>
+                                        {log.count > 1 && (
+                                          <Tag color="blue" style={{ marginLeft: 8 }}>
+                                            重复 x{log.count}
+                                          </Tag>
+                                        )}
+                                        <Text type="secondary" code style={{ flex: 1, marginLeft: 8, fontSize: 11 }}>
+                                          {log.command}
+                                        </Text>
+                                      </div>
+                                      <div className="doc-studio__compile-log">
+                                        {logLines.length > 0 ? (
+                                          logLines.map((line, lineIdx) => {
+                                            const trimmedLine = line.trim()
+                                            const isError = trimmedLine.startsWith('!') ||
+                                                           trimmedLine.includes('Error') ||
+                                                           trimmedLine.includes('Fatal error') ||
+                                                           trimmedLine.includes('Missing character')
+                                            const isWarning = trimmedLine.includes('Warning') ||
+                                                             trimmedLine.includes('LaTeX Warning')
+                                            const isInfo = trimmedLine.includes('Output written') ||
+                                                          trimmedLine.includes('Transcript written') ||
+                                                          trimmedLine.includes('This is')
+
+                                            let className = ''
+                                            if (isError) className = 'doc-studio__compile-log-line--error'
+                                            else if (isWarning) className = 'doc-studio__compile-log-line--warning'
+                                            else if (isInfo) className = 'doc-studio__compile-log-line--info'
+
+                                            return (
+                                              <div
+                                                key={`line-${lineIdx}`}
+                                                className={className}
+                                                style={{
+                                                  padding: '2px 0',
+                                                  fontFamily: 'SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace',
+                                                  fontSize: '12px',
+                                                  lineHeight: '1.5'
+                                                }}
+                                              >
+                                                {line || '\u00A0'}
+                                              </div>
+                                            )
+                                          })
+                                        ) : (
+                                          <div style={{ color: '#888', fontStyle: 'italic' }}>(无日志)</div>
+                                        )}
+                                      </div>
+                                    </div>
+                                  )
+                                })}
+                              </div>
+                            ) : null}
+                          </>
+                        )
                       ) : (
                         <Empty
-                          description="尚未编译"
+                          description="暂无编译结果"
                           image={Empty.PRESENTED_IMAGE_SIMPLE}
                         />
                       )}
                     </div>
                 )}
               </div>
+              </div>
             </div>
           </Sider>
+            </>
+          )}
+          {(isDraggingLeft || isDraggingRight) && <div className="doc-studio__drag-mask" />}
         </Layout>
       </div>
-
-      {snap.workspaceLoading && (
-        <div style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          background: 'rgba(255, 255, 255, 0.8)',
-          zIndex: 1000
-        }}>
-          <Spin size="large" />
-        </div>
-      )}
-
       <Modal
-        title="新建工作�?
+        title="创建工作区"
         open={workspaceModalOpen}
         onOk={handleCreateWorkspace}
         onCancel={() => {
@@ -4063,17 +8224,17 @@ const LatexEditorPage = () => {
         confirmLoading={workspaceSubmitting}
       >
         <Form layout="vertical">
-          <Form.Item label="工作区类�?>
+          <Form.Item label="工作区类型">
             <Select
               value={newWorkspaceType}
               onChange={(value) => setNewWorkspaceType(value)}
               options={[
-                { label: 'LaTeX 论文工作�?, value: 'latex' },
-                { label: 'Markdown/学习笔记', value: 'markdown' },
+                { label: 'LaTeX 文档', value: 'latex' },
+                { label: 'Markdown/纯文本', value: 'markdown' },
               ]}
             />
           </Form.Item>
-          <Form.Item label="工作区名�?>
+          <Form.Item label="工作区名称">
             <Input
               placeholder="例如: paper-demo"
               value={newWorkspaceName}
@@ -4083,14 +8244,14 @@ const LatexEditorPage = () => {
         </Form>
       </Modal>
       <Modal
-        title={fileModalType === 'file' ? '新建文件' : '新建文件�?}
+        title={fileModalType === 'file' ? '新建文件' : '新建文件夹'}
         open={fileModalOpen}
         onOk={handleCreateFile}
         onCancel={() => setFileModalOpen(false)}
         confirmLoading={fileSubmitting}
       >
         <Form layout="vertical">
-          <Form.Item label="路径">
+          <Form.Item label={fileModalType === 'file' ? '文件路径（含文件名）' : '目录路径'}>
             <Input
               placeholder={fileModalType === 'file' ? 'sections/intro.tex' : 'sections'}
               value={fileModalPath}
@@ -4098,9 +8259,10 @@ const LatexEditorPage = () => {
             />
           </Form.Item>
           {fileModalType === 'file' && (
-            <Form.Item label="初始内容">
+            <Form.Item label="文件初始内容（可选）">
               <Input.TextArea
                 rows={4}
+                placeholder="可留空；这里填写文件正文，不是文件名"
                 value={fileModalContent}
                 onChange={(event) => setFileModalContent(event.target.value)}
               />
@@ -4109,211 +8271,80 @@ const LatexEditorPage = () => {
         </Form>
       </Modal>
       <Modal
-        title={presetEditingId ? '编辑模板' : '保存模板'}
-        open={presetModalOpen}
-        onOk={handleSavePreset}
-        onCancel={() => setPresetModalOpen(false)}
+        title={renameSourceType === 'directory' ? '重命名文件夹' : '重命名文件'}
+        open={renameModalOpen}
+        onOk={handleRenamePath}
+        onCancel={() => {
+          setRenameModalOpen(false)
+          setRenameNameInput('')
+          setRenameSourcePath('')
+        }}
+        confirmLoading={renameSubmitting}
       >
         <Form layout="vertical">
-          <Form.Item label="模板名称">
+          <Form.Item label="新名称">
             <Input
-              placeholder="例如：方法调研模�?
-              value={presetName}
-              onChange={(event) => setPresetName(event.target.value)}
+              autoFocus
+              value={renameNameInput}
+              placeholder={renameSourceType === 'directory' ? '例如: sections' : '例如: intro.tex'}
+              onChange={(event) => setRenameNameInput(event.target.value)}
+              onPressEnter={() => {
+                void handleRenamePath()
+              }}
             />
           </Form.Item>
-          <Form.Item label="模板类型">
-            <Select
-              value={presetIntent}
-              onChange={(value) => setPresetIntent(value)}
-              options={[
-                { label: '编辑/写作', value: 'edit' },
-                { label: '建议/评审', value: 'suggest' },
-                { label: '问答/解释', value: 'qa' },
-                { label: '引用/文献', value: 'citation' },
-              ]}
-            />
-          </Form.Item>
-          <Form.Item label="模板内容">
-            <Input.TextArea
-              rows={6}
-              value={presetPrompt}
-              onChange={(event) => setPresetPrompt(event.target.value)}
-            />
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              支持使用 @selection1、@selection2 引用选中片段
-            </Text>
-          </Form.Item>
-          <Form.Item label="绑定当前模型设置">
-            <Space align="center">
-              <Switch checked={presetBindModel} onChange={setPresetBindModel} />
-              <Text type="secondary">将当前模�?温度/Max tokens 写入模板</Text>
-            </Space>
-          </Form.Item>
-          {presetBindModel && (
-            <Form.Item label="当前模型配置">
-              <Text type="secondary">
-                {llmProvider === 'auto' ? '自动选择' : llmProvider} / {llmModel || '默认模型'}
-                {typeof llmTemperature === 'number' ? ` / temp=${llmTemperature}` : ''}
-                {typeof llmMaxTokens === 'number' ? ` / max=${llmMaxTokens}` : ''}
-              </Text>
-            </Form.Item>
-          )}
         </Form>
       </Modal>
-
-      {/* Agent 修改预览 Modal */}
+      {/* Agent ???? Modal */}
       <Modal
-        title={
-          allFileDiffs.length > 0 ? (
-            <Space>
-              <span>预览修改 - {allFileDiffs[currentDiffIndex]?.file_path || ''}</span>
-              <Tag color="blue">
-                {currentDiffIndex + 1} / {allFileDiffs.length}
-              </Tag>
-            </Space>
-          ) : (
-            '预览修改'
-          )
-        }
-        open={diffModalOpen}
+        title={`版本对比 - ${allFileDiffs[currentDiffIndex]?.file_path || ''}`}
+        open={diffModalOpen && diffModalContext === 'timeline'}
         onCancel={() => {
-          if (acceptedDiffs.size < allFileDiffs.length) {
-            const rejectedCount = allFileDiffs.length - acceptedDiffs.size
-            Modal.confirm({
-              title: '关闭预览�?,
-              content: `你已拒绝或未确认 ${rejectedCount} 个文件的修改，关闭后这些修改仍会保留。是否撤销未接受的修改？`,
-              okText: '撤销未接�?,
-              cancelText: '保留修改',
-              onOk: () => {
-                handleFinalizeDiffs()
-              },
-              onCancel: () => {
-                setDiffModalOpen(false)
-                setAllFileDiffs([])
-                setCurrentDiffIndex(0)
-                setAcceptedDiffs(new Set())
-                setDiffOperationId(null)
-              },
-            })
-          } else {
-            setDiffModalOpen(false)
-            setAllFileDiffs([])
-            setCurrentDiffIndex(0)
-            setAcceptedDiffs(new Set())
-            setDiffOperationId(null)
-          }
+          closeDiffModal(allFileDiffs.map((d) => d.file_path).filter((p): p is string => Boolean(p)))
         }}
         width="90%"
         style={{ top: 20 }}
         footer={
-          <Space style={{ width: '100%', justifyContent: 'space-between' }}>
-            <Space>
-              <Button
-                disabled={currentDiffIndex === 0}
-                onClick={() => setCurrentDiffIndex(currentDiffIndex - 1)}
-              >
-                上一�?
-              </Button>
-              <Button
-                disabled={currentDiffIndex === allFileDiffs.length - 1}
-                onClick={() => setCurrentDiffIndex(currentDiffIndex + 1)}
-              >
-                下一�?
-              </Button>
-            </Space>
-            <Space>
-              <Button
-                icon={<CloseOutlined />}
-                disabled={diffReverting}
-                onClick={handleRejectCurrentDiff}
-              >
-                回滚此文�?
-              </Button>
+          <Space style={{ width: '100%', justifyContent: 'flex-end' }}>
+            <Button
+              onClick={() =>
+                closeDiffModal(allFileDiffs.map((d) => d.file_path).filter((p): p is string => Boolean(p)))
+              }
+            >
+              关闭
+            </Button>
+            <Popconfirm
+              title="恢复当前文件到该时间点？"
+              onConfirm={() => {
+                if (!diffOperationId) return
+                return handleRevertOperation(
+                  diffOperationId,
+                  allFileDiffs[currentDiffIndex]?.file_path
+                    ? [allFileDiffs[currentDiffIndex].file_path]
+                    : undefined,
+                )
+              }}
+            >
               <Button
                 type="primary"
-                icon={<CheckOutlined />}
-                onClick={handleKeepCurrentDiff}
+                loading={!!(diffOperationId && revertingOperationId === diffOperationId)}
+                disabled={!diffOperationId || !allFileDiffs[currentDiffIndex]?.file_path}
               >
-                保留此文�?
+                恢复此版本
               </Button>
-              <Button
-                type="primary"
-                icon={<CheckOutlined />}
-                loading={diffReverting}
-                disabled={diffReverting || allFileDiffs.length === acceptedDiffs.size}
-                onClick={handleFinalizeDiffs}
-              >
-                撤销未接受修�?({allFileDiffs.length - acceptedDiffs.size})
-              </Button>
-            </Space>
+            </Popconfirm>
           </Space>
         }
       >
-        <div className="doc-studio__diff-toolbar">
-          <Segmented
-            value={diffViewMode}
-            size="small"
-            onChange={(value) => setDiffViewMode(value as 'split' | 'inline')}
-            options={[
-              { label: '并排', value: 'split' },
-              { label: '逐行', value: 'inline' },
-            ]}
-          />
-    </div>
-        <div className="doc-studio__diff-wrapper">
-          <div className="doc-studio__diff-files">
-            <List
-              size="small"
-              dataSource={allFileDiffs}
-              renderItem={(diff, idx) => (
-                <List.Item
-                  key={`${diff.file_path}-${idx}`}
-                  className={`doc-studio__diff-file ${
-                    currentDiffIndex === idx ? 'doc-studio__diff-file--active' : ''
-                  }`}
-                  onClick={() => setCurrentDiffIndex(idx)}
-                >
-                  <Tooltip title={diff.file_path}>
-                    <span className="doc-studio__diff-file-name">
-                      {diff.file_path}
-                    </span>
-                  </Tooltip>
-                  {diff.is_truncated && (
-                    <Tag color="orange" style={{ marginLeft: 4 }}>
-                      片段
-                    </Tag>
-                  )}
-                  {acceptedDiffs.has(idx) && (
-                    <Tag color="green" style={{ marginLeft: 8 }}>
-                      已接�?
-                    </Tag>
-                  )}
-                </List.Item>
-              )}
-            />
-          </div>
+        <div className="doc-studio__diff-wrapper doc-studio__diff-wrapper--timeline">
           <div className="doc-studio__diff-view">
             {allFileDiffs.length > 0 && allFileDiffs[currentDiffIndex] && (
-              <DiffEditor
-                key={currentDiffIndex}
-                height="100%"
-                theme="vs-dark"
-                language={resolveEditorLanguage(allFileDiffs[currentDiffIndex]?.file_path)}
-                original={resolvedOriginal || allFileDiffs[currentDiffIndex].original_content}
-                modified={resolvedModified || allFileDiffs[currentDiffIndex].modified_content}
-                options={{
-                  readOnly: true,
-                  renderSideBySide: diffViewMode === 'split',
-                  minimap: { enabled: false },
-                  fontSize: 14,
-                  wordWrap: 'on',
-                  automaticLayout: true,
-                }}
-                onMount={(editor: any) => {
-                  diffEditorRef.current = editor
-                  refreshLineChanges()
-                }}
+              <AgentDiffReview
+                key={`timeline-${currentDiffIndex}-${allFileDiffs[currentDiffIndex]?.file_path}`}
+                filePath={allFileDiffs[currentDiffIndex].file_path || ''}
+                originalContent={resolvedOriginal || allFileDiffs[currentDiffIndex].original_content}
+                modifiedContent={resolvedModified || allFileDiffs[currentDiffIndex].modified_content}
+                readOnly
               />
             )}
             {allFileDiffs[currentDiffIndex]?.is_truncated && (
@@ -4321,139 +8352,16 @@ const LatexEditorPage = () => {
                 style={{ marginTop: 12 }}
                 type="info"
                 showIcon
-                message="仅展示增量片�?
-                description="为提升性能，已只展示与本次改动相关的上下文。接受后会自动重新加载完整文件�?
+                message="内容已截断"
+                description="由于内容过长已截断显示，如需完整内容请下载文件查看。"
               />
-            )}
-            {diffContentLoading && (
-              <div style={{ marginTop: 12 }}>
-                <Spin size="small" />
-                <Text type="secondary" style={{ marginLeft: 8 }}>
-                  正在加载完整内容...
-                </Text>
-              </div>
-            )}
-            {lineChanges.length > 0 && (
-              <div style={{ marginTop: 16 }}>
-                <Text type="secondary">逐处修改</Text>
-                <List
-                  size="small"
-                  dataSource={lineChanges}
-                  renderItem={(change: any, idx) => {
-                    const oStart = Number(change?.originalStartLineNumber || 0)
-                    const oEnd = Number(change?.originalEndLineNumber || 0)
-                    const mStart = Number(change?.modifiedStartLineNumber || 0)
-                    const mEnd = Number(change?.modifiedEndLineNumber || 0)
-                    const label = `�?${oStart}-${oEnd} �?�?${mStart}-${mEnd}`
-                    const accepted = acceptedLineChanges.has(idx)
-                    return (
-                      <List.Item
-                        actions={[
-                          <Button
-                            key="accept"
-                            size="small"
-                            disabled={accepted}
-                            onClick={() => handleAcceptLineChange(idx)}
-                          >
-                            {accepted ? '已接�? : '接受此处'}
-                          </Button>,
-                          <Button
-                            key="reject"
-                            size="small"
-                            danger
-                            loading={diffReverting}
-                            onClick={() => handleRejectLineChange(idx)}
-                          >
-                            回滚此处
-                          </Button>,
-                        ]}
-                      >
-                        <Text type="secondary">{label}</Text>
-                      </List.Item>
-                    )
-                  }}
-                />
-              </div>
             )}
           </div>
         </div>
-        <div style={{ marginTop: 16, padding: 12, background: '#f0f0f0', borderRadius: 4 }}>
-          <Text type="secondary">
-            <strong>说明�?/strong>
-            左侧为原始内容，右侧为修改后的内容。红色表示删除，绿色表示新增�?
-            {allFileDiffs.length > 1 && (
-              <span> 当前文件：{allFileDiffs[currentDiffIndex]?.file_path}</span>
-            )}
-            {acceptedDiffs.size > 0 && (
-              <Tag color="green" style={{ marginLeft: 8 }}>
-                已接�?{acceptedDiffs.size} / {allFileDiffs.length}
-              </Tag>
-            )}
-          </Text>
-        </div>
       </Modal>
 
       <Modal
-        title="操作历史"
-        open={operationHistoryOpen}
-        onCancel={() => setOperationHistoryOpen(false)}
-        footer={null}
-        width={720}
-      >
-        <List
-          loading={operationHistoryLoading}
-          dataSource={operationHistory}
-          locale={{ emptyText: '暂无操作记录' }}
-          renderItem={(item) => {
-            const modifiedCount = item.modified_files?.length || 0
-            const timestamp = item.timestamp ? new Date(item.timestamp).toLocaleString() : '未知时间'
-            return (
-              <List.Item
-                actions={[
-                  <Popconfirm
-                    key="revert"
-                    title="确认回滚该操作？"
-                    onConfirm={() => handleRevertOperation(item.operation_id)}
-                  >
-                    <Button
-                      size="small"
-                      loading={revertingOperationId === item.operation_id}
-                      disabled={!modifiedCount}
-                    >
-                      回滚
-                    </Button>
-                  </Popconfirm>,
-                ]}
-              >
-                <List.Item.Meta
-                  title={
-                    <Space>
-                      <Text strong>{item.user_intent || '操作'}</Text>
-                      <Tag color={item.success ? 'green' : 'red'}>
-                        {item.success ? '成功' : '失败'}
-                      </Tag>
-                      {item.intent_type && <Tag>{item.intent_type}</Tag>}
-                    </Space>
-                  }
-                  description={
-                    <Space size="middle" wrap>
-                      <Text type="secondary">{timestamp}</Text>
-                      <Text type="secondary">文件数：{modifiedCount}</Text>
-                      {item.trace_id && (
-                        <Text type="secondary">Trace: {item.trace_id.slice(0, 8)}</Text>
-                      )}
-                      <Text type="secondary">Op: {item.operation_id.slice(0, 8)}</Text>
-                    </Space>
-                  }
-                />
-              </List.Item>
-            )
-          }}
-        />
-      </Modal>
-
-      <Modal
-        title="系统状�?
+        title="系统状态"
         open={systemStatusOpen}
         onCancel={() => setSystemStatusOpen(false)}
         footer={null}
@@ -4469,12 +8377,12 @@ const LatexEditorPage = () => {
             刷新
           </Button>
           {llmHealth?.preferred_provider && (
-            <Tag color="blue">首选：{llmHealth.preferred_provider}</Tag>
+            <Tag color="blue">推荐: {llmHealth.preferred_provider}</Tag>
           )}
         </Space>
         {llmHealth?.providers?.length ? (
           <div style={{ marginBottom: 12 }}>
-            <Text type="secondary">Provider 健康</Text>
+            <Text type="secondary">Provider 状态</Text>
             <Space wrap style={{ marginTop: 6 }}>
               {llmHealth.providers.map((provider) => {
                 const inCooldown = provider.in_cooldown
@@ -4487,8 +8395,8 @@ const LatexEditorPage = () => {
                 const tooltipText = provider.last_error
                   ? `失败 ${provider.failures || 0} 次：${provider.last_error}`
                   : inCooldown
-                    ? `冷却中（剩余 ${cooldown}s）`
-                    : '健康'
+                    ? `冷却中剩余 ${cooldown}s`
+                    : '正常'
                 return (
                   <Tooltip key={provider.provider} title={tooltipText}>
                     <Tag color={color}>
@@ -4504,13 +8412,13 @@ const LatexEditorPage = () => {
         <div style={{ marginBottom: 12 }}>
           <Text type="secondary">Token / 成本</Text>
           <Space wrap style={{ marginTop: 6 }}>
-            <Tag color="geekblue">Tokens 总计：{llmTotals.tokens.toLocaleString()}</Tag>
-            <Tag color="purple">估算成本：{llmTotals.cost.toFixed(6)}</Tag>
+            <Tag color="geekblue">Tokens 总计: {llmTotals.tokens.toLocaleString()}</Tag>
+            <Tag color="purple">费用总计: {llmTotals.cost.toFixed(6)}</Tag>
           </Space>
         </div>
         {llmMetricEntries.length > 0 && (
           <div>
-            <Text type="secondary">模型调用概况</Text>
+            <Text type="secondary">模型统计</Text>
             <Space wrap style={{ marginTop: 6 }}>
               {llmMetricEntries.map((entry) => (
                 <Tooltip
@@ -4527,122 +8435,66 @@ const LatexEditorPage = () => {
         )}
       </Modal>
       
-      {/* 文件树右键菜�?*/}
       {contextMenuVisible && (
         <div
+          className="doc-studio__context-menu"
           style={{
-            position: 'fixed',
             left: contextMenuPosition.x,
             top: contextMenuPosition.y,
-            zIndex: 10000,
-            background: '#fff',
-            border: '1px solid #d9d9d9',
-            borderRadius: '4px',
-            boxShadow: '0 2px 8px rgba(0, 0, 0, 0.15)',
-            minWidth: '160px',
           }}
           onClick={(e) => e.stopPropagation()}
         >
-          {contextMenuType === 'directory' && (
-            <>
-              <div
-                style={{
-                  padding: '8px 16px',
-                  cursor: 'pointer',
-                  transition: 'background 0.3s',
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = '#f5f5f5'
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = 'transparent'
-                }}
-                onClick={() => handleUploadToDirectory(contextMenuPath)}
-              >
-                <UploadOutlined style={{ marginRight: '8px' }} />
-                上传文件到此目录
-              </div>
-              <div
-                style={{
-                  padding: '8px 16px',
-                  cursor: 'pointer',
-                  transition: 'background 0.3s',
-                  borderTop: '1px solid #f0f0f0',
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = '#f5f5f5'
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = 'transparent'
-                }}
-                onClick={() => handleCreateFileInDirectory(contextMenuPath)}
-              >
-                <FileAddOutlined style={{ marginRight: '8px' }} />
-                创建文本文件
-              </div>
-              <div
-                style={{
-                  padding: '8px 16px',
-                  cursor: 'pointer',
-                  transition: 'background 0.3s',
-                  borderTop: '1px solid #f0f0f0',
-                  color: '#ff4d4f',
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = '#fff1f0'
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = 'transparent'
-                }}
-                onClick={() => {
-                  setContextMenuVisible(false)
-                  Modal.confirm({
-                    title: '确认删除文件�?,
-                    content: `确定要删除文件夹 "${contextMenuPath}" 吗？此操作将删除文件夹及其所有内容，且无法恢复。`,
-                    okText: '删除',
-                    okType: 'danger',
-                    cancelText: '取消',
-                    onOk: () => handleDeleteFromTree(contextMenuPath, 'directory'),
-                  })
-                }}
-              >
-                <DeleteOutlined style={{ marginRight: '8px' }} />
-                删除文件�?
-              </div>
-            </>
-          )}
-          {contextMenuType === 'file' && (
-            <div
-              style={{
-                padding: '8px 16px',
-                cursor: 'pointer',
-                transition: 'background 0.3s',
-                color: '#ff4d4f',
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = '#fff1f0'
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = 'transparent'
-              }}
+          {contextMenuActions.map((action) => (
+            <button
+              key={action.key}
+              type="button"
+              className={`doc-studio__context-menu-item ${
+                action.danger ? 'doc-studio__context-menu-item--danger' : ''
+              } ${action.separated ? 'doc-studio__context-menu-item--separated' : ''}`}
+              disabled={action.disabled}
               onClick={() => {
-                setContextMenuVisible(false)
-                Modal.confirm({
-                  title: '确认删除文件',
-                  content: `确定要删除文�?"${contextMenuPath}" 吗？此操作无法恢复。`,
-                  okText: '删除',
-                  okType: 'danger',
-                  cancelText: '取消',
-                  onOk: () => handleDeleteFromTree(contextMenuPath, 'file'),
-                })
+                if (action.disabled) return
+                action.onClick()
               }}
             >
-              <DeleteOutlined style={{ marginRight: '8px' }} />
-              删除文件
-            </div>
-          )}
+              <span className="doc-studio__context-menu-icon">{action.icon}</span>
+              <span className="doc-studio__context-menu-label">{action.label}</span>
+            </button>
+          ))}
         </div>
       )}
+
+      <Modal
+        title="Agent 消息原始输出调试"
+        open={debugModalOpen}
+        onCancel={() => setDebugModalOpen(false)}
+        footer={null}
+        width={720}
+      >
+        {debugData?.error ? (
+          <Text type="danger">{debugData.error}</Text>
+        ) : debugData?.items?.length ? (
+          <div style={{ maxHeight: 400, overflow: 'auto' }}>
+            {debugData.items.map((item, i) => (
+              <div key={item.message_id || i} style={{ marginBottom: 16, padding: 12, background: '#fafafa', borderRadius: 8 }}>
+                <Space size={[8, 8]} wrap>
+                  <Tag>消息 {i + 1}</Tag>
+                  <Tag>长度 {item.content_length}</Tag>
+                  <Tag color="blue">\\n × {item.newline_count}</Tag>
+                  <Tag color="green">\\n\\n × {item.double_newline_count}</Tag>
+                  <Tag color={item.triple_plus_newline_count > 0 ? 'red' : 'default'}>3+换行 × {item.triple_plus_newline_count}</Tag>
+                </Space>
+                <pre style={{ marginTop: 8, fontSize: 12, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
+                  {item.raw_with_markers}
+                </pre>
+                <Text type="secondary" style={{ fontSize: 11 }}>repr 样本: {item.raw_repr_sample}</Text>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <Text type="secondary">暂无 Agent 消息或加载失败</Text>
+        )}
+      </Modal>
     </>
   )
 }

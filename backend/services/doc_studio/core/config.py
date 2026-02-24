@@ -19,13 +19,14 @@ class Settings(BaseSettings):
     # LLM 配置（使用和主API服务相同的环境变量名）
     DASHSCOPE_API_KEY: Optional[str] = None  # 从 .env 加载
     DASHSCOPE_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    DASHSCOPE_MODEL_NAME: str = "qwen-plus"  # 基础模型（API 调用）
+    DASHSCOPE_MODEL_NAME: str = "qwen3-max"  # 基础模型（API 调用）
+    DASHSCOPE_VISION_MODEL_NAME: str = "qwen-vl-max"  # 图片问答默认模型
     OPENAI_API_KEY: Optional[str] = None  # 可选：OpenAI API Key
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
-    OPENAI_MODEL_NAME: str = "gpt-4o"
+    OPENAI_MODEL_NAME: str = "gpt-5.2"
 
     # LLM 请求超时与健康策略
-    LLM_REQUEST_TIMEOUT: int = 60
+    LLM_REQUEST_TIMEOUT: int = 75
     LLM_FALLBACK_ENABLED: bool = True
     LLM_FALLBACK_ALLOW_EXPLICIT_PROVIDER: bool = True
     LLM_HEALTH_FAILURE_THRESHOLD: int = 3
@@ -36,8 +37,8 @@ class Settings(BaseSettings):
     RL_MODEL_PATH: Optional[str] = None  # RL 训练模型的本地路径
     RL_MODEL_BASE: str = "qwen-7b"  # RL 训练的基础模型（Qwen-7B/LLaMA-2-7B）
 
-    LLM_TEMPERATURE: float = 0.3
-    LLM_MAX_TOKENS: int = 4096
+    LLM_TEMPERATURE: float = 0.2
+    LLM_MAX_TOKENS: int = 3072
 
     # LLM 成本统计（默认 0，按需在环境变量配置）
     # LLM_COST_CONFIG 示例：
@@ -57,16 +58,37 @@ class Settings(BaseSettings):
     AGENT_TIMEOUT: int = 300  # 秒
     AGENT_WORKSPACE_CACHE_TTL: int = 60  # 秒
     AGENT_WORKSPACE_CACHE_SIZE: int = 16  # 缓存条目数
-    AGENT_HISTORY_MAX_ENTRIES: int = 500  # 历史记录最大条数（0 表示不限制）
-    AGENT_HISTORY_MAX_BYTES: int = 0  # 历史记录最大磁盘占用（0 表示不限制）
+    AGENT_HISTORY_MAX_ENTRIES: int = 300  # 历史记录最大条数（0 表示不限制）
+    AGENT_HISTORY_MAX_BYTES: int = 268435456  # 历史记录最大磁盘占用（默认 256MB，0 表示不限制）
+    AGENT_HISTORY_MAX_ENTRIES_PER_FILE: int = 80  # 单文件最大版本条数（0 表示不限制）
+    AGENT_HISTORY_RECORD_EMPTY_OPS: bool = False  # 无文件变更的操作是否记录到历史
+    AGENT_HISTORY_PERSIST_AFTER_SNAPSHOT: bool = False  # 是否保存 after 快照（默认关闭，节省空间）
+    AGENT_MANUAL_HISTORY_MIN_INTERVAL_SECONDS: int = 45  # 手动编辑最小入库间隔
+    AGENT_MANUAL_HISTORY_FORCE_INTERVAL_SECONDS: int = 300  # 手动编辑强制入库间隔
     AGENT_WORKSPACE_LOCK_TTL: int = 600  # 工作区锁最大持续时间（秒）
 
+    # 语义检索（embedding 索引）配置
+    SEMANTIC_SEARCH_ENABLED: bool = True
+    SEMANTIC_SEARCH_EMBED_PROVIDER: str = "auto"  # auto|dashscope|openai
+    SEMANTIC_SEARCH_EMBED_MODEL: str = ""  # 为空时：dashscope->text-embedding-v3, openai->text-embedding-3-small
+    SEMANTIC_SEARCH_EMBED_BATCH_SIZE: int = 24
+    SEMANTIC_SEARCH_INDEX_TTL_SECONDS: int = 900  # 内存索引空闲 TTL
+    SEMANTIC_SEARCH_INDEX_PERSIST_ENABLED: bool = True
+    SEMANTIC_SEARCH_INDEX_DIR: str = "/tmp/doc_studio_semantic_index"
+    SEMANTIC_SEARCH_INDEX_PERSIST_MIN_INTERVAL_SECONDS: int = 30
+    SEMANTIC_SEARCH_MAX_FILE_BYTES: int = 786432  # 单文件参与索引最大字节数（默认 768KB）
+    SEMANTIC_SEARCH_MAX_CHUNKS_PER_FILE: int = 120
+    SEMANTIC_SEARCH_CHUNK_LINES: int = 36
+    SEMANTIC_SEARCH_CHUNK_OVERLAP_LINES: int = 8
+    SEMANTIC_SEARCH_COLD_START_PREWARM_ENABLED: bool = True
+    SEMANTIC_SEARCH_COLD_START_PREWARM_MAX_FILES: int = 120
+
     # Web Search 配置
-    ENABLE_WEB_SEARCH: bool = False
+    ENABLE_WEB_SEARCH: bool = True
     WEB_SEARCH_PROVIDER: str = "tavily"
     WEB_SEARCH_API_KEY: Optional[str] = None
     WEB_SEARCH_BASE_URL: str = "https://api.tavily.com/search"
-    WEB_SEARCH_MAX_RESULTS: int = 5
+    WEB_SEARCH_MAX_RESULTS: int = 8
     WEB_SEARCH_TIMEOUT: int = 20
 
     # 工作区配置

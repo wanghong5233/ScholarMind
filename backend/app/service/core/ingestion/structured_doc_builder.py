@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from difflib import SequenceMatcher
 import itertools
 import re
 from dataclasses import dataclass, field
@@ -117,7 +118,10 @@ class StructuredDocumentBuilder:
 
         annotated = self._attach_layout(blocks, mineru_blocks)
         annotated = self._label_reference_blocks(annotated)
-        annotated = self._absorb_equations(annotated)
+        if getattr(settings, "SM_EQUATION_STANDALONE", True):
+            annotated = self._expand_equation_blocks(annotated)
+        else:
+            annotated = self._absorb_equations(annotated)
         annotated = self._merge_short_text_blocks(annotated)
         return StructuredDocument(blocks=annotated)
 
@@ -358,7 +362,7 @@ class StructuredDocumentBuilder:
         if not snippet:
             return None
 
-        short_snippet = snippet[:120]
+        short_snippet = snippet[:160]
         for idx, block in enumerate(mineru_blocks):
             block_text = _normalize_for_match(block.text or "")
             if not block_text:
@@ -368,23 +372,86 @@ class StructuredDocumentBuilder:
             # 如果 Grobid 文本比 MinerU 块短，也尝试包含判断
             if block_text and block_text in snippet:
                 return idx
+
+        best_idx: Optional[int] = None
+        best_score = 0.0
+        compare_len = max(len(short_snippet), 240)
+        for idx, block in enumerate(mineru_blocks):
+            block_text = _normalize_for_match(block.text or "")
+            if not block_text:
+                continue
+            next_text = ""
+            if idx + 1 < len(mineru_blocks):
+                next_text = _normalize_for_match(mineru_blocks[idx + 1].text or "")
+            merged_text = f"{block_text} {next_text}".strip() if next_text else block_text
+            single_score = (
+                0.7 * self._sequence_ratio(short_snippet, block_text[:compare_len])
+                + 0.3 * self._token_overlap_ratio(short_snippet, block_text)
+            )
+            merged_score = (
+                0.65 * self._sequence_ratio(short_snippet, merged_text[: compare_len + 120])
+                + 0.35 * self._token_overlap_ratio(short_snippet, merged_text)
+            )
+            score = max(single_score, merged_score * 0.98)
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+        if best_idx is not None and best_score >= 0.42:
+            return best_idx
         return None
 
     def _collect_indices(self, start_idx: int, normalized_target: str, mineru_blocks: List[ParsedBlock]) -> List[int]:
         collected: List[int] = []
-        combined = ""
-        target_len = len(normalized_target)
+        combined_parts: List[str] = []
+        target_len = max(len(normalized_target), 1)
+        miss_budget = 2
 
         for idx in range(start_idx, len(mineru_blocks)):
             text_norm = _normalize_for_match(mineru_blocks[idx].text or "")
             if not text_norm:
                 continue
             collected.append(idx)
-            combined += " " + text_norm
-            if len(combined) >= target_len * 0.85:
+            combined_parts.append(text_norm)
+            combined = " ".join(combined_parts).strip()
+            coverage = len(combined) / target_len
+            target_prefix_len = min(len(normalized_target), len(combined))
+            target_prefix = normalized_target[:target_prefix_len]
+            combined_prefix = combined[:target_prefix_len]
+            align_score = (
+                0.7 * self._sequence_ratio(target_prefix, combined_prefix)
+                + 0.3 * self._token_overlap_ratio(target_prefix, combined_prefix)
+            )
+            if coverage >= 0.9 and align_score >= 0.45:
                 break
+            if coverage >= 1.15 and align_score < 0.32:
+                miss_budget -= 1
+                if miss_budget <= 0:
+                    break
+            elif align_score >= 0.4:
+                miss_budget = 2
 
         return collected
+
+    def _sequence_ratio(self, left: str, right: str) -> float:
+        if not left or not right:
+            return 0.0
+        try:
+            return float(SequenceMatcher(None, left, right).ratio())
+        except Exception:
+            return 0.0
+
+    def _token_overlap_ratio(self, left: str, right: str) -> float:
+        if not left or not right:
+            return 0.0
+        left_tokens = {tok for tok in re.split(r"[^a-z0-9]+", left.lower()) if len(tok) >= 2}
+        right_tokens = {tok for tok in re.split(r"[^a-z0-9]+", right.lower()) if len(tok) >= 2}
+        if not left_tokens or not right_tokens:
+            return 0.0
+        inter = len(left_tokens & right_tokens)
+        union = len(left_tokens | right_tokens)
+        if union <= 0:
+            return 0.0
+        return inter / union
 
     # --- Fallback ------------------------------------------------------------
 
@@ -609,6 +676,53 @@ class StructuredDocumentBuilder:
             _attach_to(last_text_block, pending_equations)
 
         return merged
+
+    def _expand_equation_blocks(self, blocks: List[StructuredBlock]) -> List[StructuredBlock]:
+        """
+        将结构块中的 equation_latex 元数据拆为独立公式块，便于检索与上下文扩展。
+        """
+        expanded: List[StructuredBlock] = []
+        for blk in blocks:
+            expanded.append(blk)
+            if self._look_like_equation(blk):
+                continue
+            meta = blk.metadata or {}
+            equations = meta.get("equation_latex")
+            if not equations:
+                continue
+            eq_list = equations if isinstance(equations, list) else [equations]
+            eq_list = [str(item).strip() for item in eq_list if item and str(item).strip()]
+            if not eq_list:
+                continue
+            # 从父块移除 equation_latex，避免重复入库
+            try:
+                if isinstance(blk.metadata, dict):
+                    blk.metadata.pop("equation_latex", None)
+            except Exception:
+                pass
+            base_meta = dict(meta)
+            for idx, eq in enumerate(eq_list, start=1):
+                eq_meta = dict(base_meta)
+                eq_meta["element_type"] = "equation_latex"
+                eq_meta["logical_type"] = "equation_latex"
+                eq_meta["equation_latex"] = eq
+                eq_meta["parent_block_id"] = blk.block_id
+                eq_meta["equation_index"] = idx
+                eq_meta.setdefault("structure_title", "Equation")
+                eq_block_id = f"{blk.block_id}.equation.{idx}"
+                eq_path = f"{blk.structure_path}.equation.{idx}"
+                expanded.append(
+                    StructuredBlock(
+                        block_id=eq_block_id,
+                        logical_type="equation_latex",
+                        title=f"Equation {idx}",
+                        text=eq,
+                        level=max(int(blk.level or 0), 0),
+                        structure_path=eq_path,
+                        metadata=eq_meta,
+                    )
+                )
+        return expanded
 
     def _merge_short_text_blocks(self, blocks: List[StructuredBlock]) -> List[StructuredBlock]:
         """

@@ -48,6 +48,8 @@ class RAGAPIClient:
         subject = {
             "user_id": user_id,
             "user_name": f"doc-studio-{user_id}",
+            "service_name": "doc_studio",
+            "token_use": "internal_service",
             "salting": secrets.token_hex(8),
         }
         
@@ -272,6 +274,43 @@ class RAGAPIClient:
             logger.error(f"RAG API context error: {e}", exc_info=True)
             raise
 
+    async def get_session_detail(
+        self,
+        session_id: str,
+        user_id: int,
+    ) -> Dict[str, Any]:
+        """获取会话详情（用于校验 Doc Studio 会话 surface）。"""
+        headers = self._build_headers(user_id)
+        url = f"{self.base_url}/api/sessions/{session_id}"
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                logger.debug("Calling RAG API: %s for session detail", url)
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+                data = response.json()
+                if not isinstance(data, dict):
+                    logger.warning("Unexpected session detail response format: %s", data)
+                    raise ValueError("会话详情数据格式异常")
+                return data
+
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                "RAG API get_session_detail failed: %s %s",
+                e.response.status_code,
+                e.response.text,
+                exc_info=True,
+            )
+            raise
+
+        except httpx.TimeoutException as e:
+            logger.error("RAG API get_session_detail timeout: %s", e, exc_info=True)
+            raise
+
+        except Exception as e:
+            logger.error("RAG API get_session_detail error: %s", e, exc_info=True)
+            raise
+
     async def append_message(
         self,
         session_id: str,
@@ -319,6 +358,79 @@ class RAGAPIClient:
 
         except Exception as e:
             logger.error(f"RAG API append_message error: {e}", exc_info=True)
+            raise
+
+    async def list_messages(
+        self,
+        session_id: str,
+        user_id: int,
+        page: int = 1,
+        page_size: int = 200,
+    ) -> Dict[str, Any]:
+        """内部服务获取会话消息列表（用于 Doc Studio 加载对话历史）"""
+        headers = self._build_headers(user_id)
+        url = f"{self.base_url}/api/internal/sessions/{session_id}/messages"
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.get(
+                    url,
+                    headers=headers,
+                    params={"page": page, "page_size": page_size},
+                )
+                response.raise_for_status()
+                return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                "RAG API list_messages failed: %s %s",
+                e.response.status_code,
+                e.response.text,
+                exc_info=True,
+            )
+            raise
+        except Exception as e:
+            logger.error("RAG API list_messages error: %s", e, exc_info=True)
+            raise
+
+    async def rewind_messages(
+        self,
+        session_id: str,
+        user_id: int,
+        keep_messages: Optional[int] = None,
+        before_message_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Rewind a session to the first N messages (internal service call)."""
+        headers = self._build_headers(user_id)
+        url = f"{self.base_url}/api/internal/sessions/{session_id}/rewind"
+        payload: Dict[str, Any] = {}
+        if before_message_id:
+            payload["before_message_id"] = str(before_message_id)
+        elif keep_messages is not None:
+            payload["keep_messages"] = max(int(keep_messages or 0), 0)
+        else:
+            payload["keep_messages"] = 0
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                logger.info(
+                    "Calling RAG API rewind_messages: session_id=%s keep_messages=%s before_message_id=%s",
+                    session_id,
+                    payload.get("keep_messages"),
+                    payload.get("before_message_id"),
+                )
+                response = await client.post(url, headers=headers, json=payload)
+                response.raise_for_status()
+                result = response.json()
+                logger.info("RAG API rewind_messages success: session_id=%s result=%s", session_id, result)
+                return result
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                "RAG API rewind_messages failed: %s %s",
+                e.response.status_code,
+                e.response.text,
+                exc_info=True,
+            )
+            raise
+        except Exception as e:
+            logger.error("RAG API rewind_messages error: %s", e, exc_info=True)
             raise
 
 

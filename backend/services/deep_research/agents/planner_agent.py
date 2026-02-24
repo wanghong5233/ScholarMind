@@ -1,7 +1,7 @@
 """Planner agent for generating topic queues."""
 
 from dataclasses import dataclass
-from typing import Any, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from utils.language import guess_language
 from utils.json_utils import ensure_json_list, extract_json_from_text
@@ -34,36 +34,13 @@ class PlannerAgent:
         self.language = language
 
     def plan(self, topic: str) -> List[PlanItem]:
-        """Generate plan items for the given topic.
+        """Template planning is disabled for DeepResearch.
 
-        Args:
-            topic (str): Research topic.
-
-        Returns:
-            List[PlanItem]: Planned items derived from templates.
+        DeepResearch planning must go through LLM-based planner execution.
         """
 
-        language = self.language or guess_language(topic)
-        level_one = self._level_one_templates(topic, language)
-        items: List[PlanItem] = []
-
-        for title in level_one[: self.breadth]:
-            items.append(PlanItem(title=title, question=title, depth=1))
-
-        if self.depth <= 1:
-            return items
-
-        for parent in level_one[: self.breadth]:
-            for subtopic in self._level_two_templates(parent, language):
-                items.append(
-                    PlanItem(
-                        title=subtopic,
-                        question=subtopic,
-                        depth=2,
-                        parent_title=parent,
-                    )
-                )
-        return items
+        _ = topic
+        raise RuntimeError("Template planner is disabled. Use LLM planning only.")
 
     async def plan_with_rag(
         self,
@@ -73,6 +50,9 @@ class PlannerAgent:
         user_id: int,
         top_k: Optional[int] = None,
         index_mode: Optional[str] = None,
+        llm_provider: Optional[str] = None,
+        llm_model: Optional[str] = None,
+        progress_observer: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     ) -> List[PlanItem]:
         """Generate plan items using ScholarMind RAG.
 
@@ -83,24 +63,56 @@ class PlannerAgent:
             user_id (int): ScholarMind user id.
             top_k (Optional[int]): Retrieval top_k override.
             index_mode (Optional[str]): Retrieval index mode.
+            llm_provider (Optional[str]): Optional ask-level provider override.
+            llm_model (Optional[str]): Optional ask-level model override.
+            progress_observer (Optional[Callable[[str, Dict[str, Any]], None]]):
+                Optional callback for intermediate planning progress.
 
         Returns:
             List[PlanItem]: Planned items from the LLM response.
         """
 
         prompt = self._build_prompt(topic)
+        self._notify_progress(
+            progress_observer,
+            "Planner prompt prepared",
+            {"depth": self.depth, "breadth": self.breadth},
+        )
+        self._notify_progress(
+            progress_observer,
+            "Requesting plan from RAG",
+            {"session_id": session_id, "index_mode": index_mode or ""},
+        )
         answer = await rag_client.ask(
             session_id=session_id,
             question=prompt,
             user_id=user_id,
             top_k=top_k,
             index_mode=index_mode,
+            llm_provider=llm_provider,
+            llm_model=llm_model,
+            persist_history=False,
         )
         raw_answer = answer.answer or ""
+        self._notify_progress(
+            progress_observer,
+            "RAG response received",
+            {"chars": len(raw_answer)},
+        )
         items = self._parse_plan_items(raw_answer)
         if items:
+            self._notify_progress(
+                progress_observer,
+                "RAG plan parsed",
+                {"items": len(items)},
+            )
             return items
         if raw_answer:
+            self._notify_progress(
+                progress_observer,
+                "Primary parse failed, trying JSON repair",
+                {},
+            )
             repair_prompt = self._build_repair_prompt(topic, raw_answer)
             repaired = await rag_client.ask(
                 session_id=session_id,
@@ -108,61 +120,45 @@ class PlannerAgent:
                 user_id=user_id,
                 top_k=top_k,
                 index_mode=index_mode,
+                llm_provider=llm_provider,
+                llm_model=llm_model,
+                persist_history=False,
             )
-            repaired_items = self._parse_plan_items(repaired.answer or "")
+            repaired_answer = repaired.answer or ""
+            self._notify_progress(
+                progress_observer,
+                "Repair response received",
+                {"chars": len(repaired_answer)},
+            )
+            repaired_items = self._parse_plan_items(repaired_answer)
             if repaired_items:
+                self._notify_progress(
+                    progress_observer,
+                    "Repair parse succeeded",
+                    {"items": len(repaired_items)},
+                )
                 return repaired_items
-        return self.plan(topic)
+        self._notify_progress(
+            progress_observer,
+            "Planner output invalid after repair",
+            {"reason": "empty_or_invalid_rag_output"},
+        )
+        raise ValueError("Planner output invalid after primary+repair passes")
 
-    def _level_one_templates(self, topic: str, language: str) -> List[str]:
-        """Generate level-one planning items.
+    @staticmethod
+    def _notify_progress(
+        observer: Optional[Callable[[str, Dict[str, Any]], None]],
+        message: str,
+        payload: Dict[str, Any],
+    ) -> None:
+        """Notify optional progress observer safely."""
 
-        Args:
-            topic (str): Research topic.
-            language (str): Output language code.
-
-        Returns:
-            List[str]: Level-one plan titles.
-        """
-
-        if language == "zh":
-            return [
-                f"{topic} 的背景与核心定义",
-                f"{topic} 的关键方法与核心机制",
-                f"{topic} 的代表性论文与最新进展",
-                f"{topic} 的数据集与评测基准",
-                f"{topic} 的应用场景与落地实践",
-                f"{topic} 的主要挑战与未来方向",
-            ]
-        return [
-            f"Background and core definitions of {topic}",
-            f"Key methods and mechanisms for {topic}",
-            f"Representative papers and recent advances on {topic}",
-            f"Datasets and benchmarks for {topic}",
-            f"Applications and real-world use cases of {topic}",
-            f"Challenges and future directions for {topic}",
-        ]
-
-    def _level_two_templates(self, parent: str, language: str) -> List[str]:
-        """Generate level-two planning items.
-
-        Args:
-            parent (str): Parent topic.
-            language (str): Output language code.
-
-        Returns:
-            List[str]: Level-two plan titles.
-        """
-
-        if language == "zh":
-            return [
-                f"{parent} 的关键证据与引用依据",
-                f"{parent} 的局限性与改进空间",
-            ]
-        return [
-            f"Evidence and supporting citations for {parent}",
-            f"Limitations and improvement opportunities for {parent}",
-        ]
+        if observer is None:
+            return
+        try:
+            observer(message, payload)
+        except Exception:
+            return
 
     def _build_prompt(self, topic: str) -> str:
         """Build the planning prompt.
@@ -183,6 +179,10 @@ class PlannerAgent:
                 f"要求：1) 深度最多 {max_depth}；2) 一级子话题最多 {max_level_one} 个；"
                 "3) 输出 JSON 数组，每项包含 title, question, depth, parent_title；"
                 "4) depth=1 的 parent_title 为空；5) 只输出 JSON，不要包含其它文字或代码块。\n"
+                "6) ★ title 字段供用户阅读，可用中文；"
+                "question 字段是发往 Semantic Scholar / arXiv 等英文学术数据库的检索关键词，"
+                "必须用英文学术关键词写成（如 'GNN DRL edge computing offloading'），"
+                "不得使用中文，否则检索结果为零。\n"
                 "覆盖维度建议：背景定义/核心机制/代表性论文/数据集基准/应用场景/局限与未来。\n"
                 f"话题：{topic}"
             )
@@ -210,17 +210,29 @@ class PlannerAgent:
         if payload is None:
             return []
         items: List[PlanItem] = []
+        seen_keys: set[tuple[int, str, str, Optional[str]]] = set()
         for item in payload:
             if not isinstance(item, dict):
                 continue
-            title = str(item.get("title", "")).strip()
-            question = str(item.get("question", "")).strip() or title
+            title = self._compact_plan_text(str(item.get("title", "")), max_chars=140)
+            question = self._compact_plan_text(
+                str(item.get("question", "")) or title,
+                max_chars=260,
+            ) or title
             depth = int(item.get("depth", 1) or 1)
             parent_title = item.get("parent_title")
+            if isinstance(parent_title, str):
+                parent_title = self._compact_plan_text(parent_title, max_chars=140)
+            elif parent_title is not None:
+                parent_title = self._compact_plan_text(str(parent_title), max_chars=140)
             if not title or depth < 1:
                 continue
             if depth > 1 and not parent_title:
                 parent_title = None
+            dedupe_key = (depth, title, question, parent_title if parent_title else None)
+            if dedupe_key in seen_keys:
+                continue
+            seen_keys.add(dedupe_key)
             items.append(
                 PlanItem(
                     title=title,
@@ -265,6 +277,17 @@ class PlannerAgent:
         if not text:
             return None
         return extract_json_from_text(text)
+
+    @staticmethod
+    def _compact_plan_text(text: str, *, max_chars: int) -> str:
+        """Normalize and cap a plan text field."""
+
+        normalized = " ".join(str(text or "").split()).strip()
+        if not normalized:
+            return ""
+        if len(normalized) <= max_chars:
+            return normalized
+        return normalized[: max_chars - 3].rstrip() + "..."
 
     def _build_repair_prompt(self, topic: str, raw_output: str) -> str:
         """Build a repair prompt for malformed JSON output."""

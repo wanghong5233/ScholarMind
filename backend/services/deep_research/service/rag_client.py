@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import timedelta
 import logging
@@ -46,6 +47,10 @@ class RAGClient:
                 access_expires_delta=timedelta(days=settings.JWT_ACCESS_TOKEN_EXPIRE_DAYS),
             )
         else:
+            if getattr(settings, "STRICT_FAIL_FAST", False):
+                raise RuntimeError(
+                    "JWT_SECRET_KEY is required for DeepResearch internal service calls in STRICT_FAIL_FAST mode."
+                )
             logger.warning("JWT_SECRET_KEY not configured; service JWT will be disabled.")
 
     async def __aenter__(self) -> "RAGClient":
@@ -83,16 +88,22 @@ class RAGClient:
             Optional[str]: Encoded JWT, or None if unavailable.
         """
         if not self._jwt_helper:
+            if getattr(settings, "STRICT_FAIL_FAST", False):
+                raise RuntimeError("Service JWT helper is unavailable in STRICT_FAIL_FAST mode.")
             return None
         subject = {
             "user_id": user_id,
             "user_name": f"deep-research-{user_id}",
+            "service_name": "deep_research",
+            "token_use": "internal_service",
             "salting": secrets.token_hex(8),
         }
         try:
             return self._jwt_helper.create_access_token(subject=subject)
         except Exception as exc:
             logger.error("Failed to create service JWT: %s", exc, exc_info=True)
+            if getattr(settings, "STRICT_FAIL_FAST", False):
+                raise RuntimeError(f"Failed to create service JWT: {exc}") from exc
             return None
 
     def _build_headers(self, user_id: int) -> Dict[str, str]:
@@ -103,6 +114,12 @@ class RAGClient:
             headers["Authorization"] = f"Bearer {service_token}"
         return headers
 
+    @staticmethod
+    def _is_retryable_status(status_code: Optional[int]) -> bool:
+        """Return True when HTTP status is likely transient."""
+
+        return status_code in {429, 500, 502, 503, 504}
+
     async def ask(
         self,
         session_id: str,
@@ -110,6 +127,9 @@ class RAGClient:
         user_id: int,
         top_k: Optional[int] = None,
         index_mode: Optional[str] = None,
+        llm_provider: Optional[str] = None,
+        llm_model: Optional[str] = None,
+        persist_history: bool = True,
     ) -> RAGAnswer:
         """Call the base RAG ask endpoint.
 
@@ -119,30 +139,73 @@ class RAGClient:
             user_id (int): ScholarMind user id.
             top_k (Optional[int]): Retrieval top_k override.
             index_mode (Optional[str]): Retrieval index mode.
+            llm_provider (Optional[str]): Optional ask-level provider override.
+            llm_model (Optional[str]): Optional ask-level model override.
+            persist_history (bool): Whether to write this call into chat history.
 
         Returns:
             RAGAnswer: Normalized answer payload.
         """
 
         payload: Dict[str, Any] = {"question": question, "stream": False}
+        payload["persistHistory"] = bool(persist_history)
         if top_k is not None:
             payload["topK"] = top_k
         if index_mode:
             payload["indexMode"] = index_mode
+        provider_override = str(llm_provider or "").strip().lower()
+        if provider_override:
+            payload["llmProvider"] = provider_override
+        model_override = str(llm_model or "").strip()
+        if model_override:
+            payload["llmModel"] = model_override
         headers = self._build_headers(user_id)
-        response = await self._client.post(
-            f"/api/sessions/{session_id}/ask",
-            json=payload,
-            headers=headers,
-        )
-        response.raise_for_status()
-        data = response.json()
-        return RAGAnswer(
-            answer=data.get("answer", ""),
-            citations=data.get("citations", []),
-            chunks=data.get("chunks", []),
-            raw=data,
-        )
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = await self._client.post(
+                    f"/api/sessions/{session_id}/ask",
+                    json=payload,
+                    headers=headers,
+                )
+                response.raise_for_status()
+                data = response.json()
+                return RAGAnswer(
+                    answer=data.get("answer", ""),
+                    citations=data.get("citations", []),
+                    chunks=data.get("chunks", []),
+                    raw=data,
+                )
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code if exc.response else None
+                retryable = self._is_retryable_status(status_code)
+                if (not retryable) or attempt >= max_attempts:
+                    raise
+                wait_seconds = min(4.0, 0.8 * (2 ** (attempt - 1)))
+                logger.warning(
+                    "RAG ask transient HTTP error, retrying: session=%s status=%s attempt=%s/%s wait=%.1fs",
+                    session_id,
+                    status_code,
+                    attempt,
+                    max_attempts,
+                    wait_seconds,
+                )
+                await asyncio.sleep(wait_seconds)
+            except (httpx.TimeoutException, httpx.TransportError) as exc:
+                if attempt >= max_attempts:
+                    raise
+                wait_seconds = min(4.0, 0.8 * (2 ** (attempt - 1)))
+                logger.warning(
+                    "RAG ask transient transport error, retrying: session=%s err=%s attempt=%s/%s wait=%.1fs",
+                    session_id,
+                    exc,
+                    attempt,
+                    max_attempts,
+                    wait_seconds,
+                )
+                await asyncio.sleep(wait_seconds)
+
+        raise RuntimeError("RAG ask retries exhausted unexpectedly")
 
     async def compare(
         self,
@@ -262,6 +325,8 @@ class RAGClient:
         user_id: int,
         limit: int = 10,
         year: Optional[str] = None,
+        providers: Optional[list[str]] = None,
+        rank_by: Optional[str] = None,
     ) -> list[Dict[str, Any]]:
         """Search academic papers via Core API ingestion endpoints.
 
@@ -271,6 +336,8 @@ class RAGClient:
             user_id (int): ScholarMind user id.
             limit (int): Result limit.
             year (Optional[str]): Optional year filter.
+            providers (Optional[list[str]]): Provider list (e.g. semantic_scholar/arxiv).
+            rank_by (Optional[str]): Ranking strategy.
 
         Returns:
             list[Dict[str, Any]]: Paper metadata list.
@@ -278,8 +345,12 @@ class RAGClient:
 
         headers = self._build_headers(user_id)
         payload: Dict[str, Any] = {"query": query, "limit": limit, "year": year or ""}
+        if providers:
+            payload["providers"] = [str(item).strip() for item in providers if str(item).strip()]
+        if rank_by:
+            payload["rank_by"] = rank_by
         response = await self._client.post(
-            f"/api/document/ingest/search-online?kb_id={kb_id}",
+            f"/api/knowledgebases/{kb_id}/documents/ingest/search-online",
             json=payload,
             headers=headers,
         )

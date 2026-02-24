@@ -32,7 +32,7 @@ class ChatGenerationService:
             enable_citations=settings.SM_ENABLE_CITATIONS,
             max_context_chars=400000,
         )
-        self.llm = llm_client or LLMClient()
+        self.llm = llm_client or LLMClient(task="answer")
         self.logger = logging.getLogger("conversation.generation")
         self._last_usage: Dict[str, Any] | None = None
         self._last_history_debug: Dict[str, Any] | None = None
@@ -51,6 +51,10 @@ class ChatGenerationService:
         rolling_summary: Optional[str] = None,
         style: Optional[str] = None,
         extra_system: Optional[str] = None,
+        llm_model: Optional[str] = None,
+        llm_provider: Optional[str] = None,
+        image_attachments: Optional[List[Dict[str, Any]]] = None,
+        rag_mode: bool = True,
     ) -> Iterable[str] | str:
         """Generate a response from retrieved chunks and optional history.
 
@@ -65,6 +69,10 @@ class ChatGenerationService:
             rolling_summary (Optional[str]): Rolling summary text.
             style (Optional[str]): Style hints for output.
             extra_system (Optional[str]): Extra system-level instructions.
+            rag_mode (bool): When False, builds a plain chat prompt with no [Context]
+                block and no citation requirements.  Pass False when the user has
+                explicitly disabled KB retrieval so the LLM responds like a regular
+                conversational assistant instead of an evidence-grounding agent.
 
         Returns:
             Iterable[str] | str: Streamed tokens or final response text.
@@ -78,21 +86,20 @@ class ChatGenerationService:
 
         history_summary = None
         est_tokens = 0
-        budget_tokens = int(getattr(settings, "SM_HISTORY_MAX_TOKENS", 2048) or 2048)
+        history_cap_tokens = int(getattr(settings, "SM_HISTORY_MAX_TOKENS", 24000) or 24000)
+        context_cap_tokens = int(getattr(settings, "SM_CONTEXT_PACK_MAX_TOKENS", 4096) or 4096)
+        total_cap_tokens = max(2048, history_cap_tokens + context_cap_tokens)
+        budget_tokens = history_cap_tokens
         try:
             hs = history if isinstance(history, list) else None
             need_compact = bool(compress_history)
             if hs and not need_compact:
-                model_window = self._model_context_window()
+                model_window = self._model_context_window(llm_model)
                 headroom = int(getattr(settings, "SM_HISTORY_HEADROOM", 4096) or 4096)
-                budget_tokens = (
-                    max(
-                        (model_window - headroom),
-                        int(getattr(settings, "SM_HISTORY_MAX_TOKENS", 2048) or 2048),
-                    )
-                    if model_window
-                    else int(getattr(settings, "SM_HISTORY_MAX_TOKENS", 2048) or 2048)
-                )
+                model_budget = max(model_window - headroom, 2048) if model_window else history_cap_tokens
+                # Cap history budget by product settings instead of scaling linearly
+                # with very large context-window models (prevents latency spikes).
+                budget_tokens = max(512, min(model_budget, history_cap_tokens))
                 joined = "\n".join(
                     [f"{m.get('role','user')}: {str(m.get('content',''))}" for m in hs if isinstance(m, dict)]
                 )
@@ -125,7 +132,7 @@ class ChatGenerationService:
                 )
                 history_summary = ((rolling_summary + "\n") if rolling_summary else "") + recent_text
                 est_tokens = self._estimate_tokens(history_summary)
-                budget_tokens = int(getattr(settings, "SM_HISTORY_MAX_TOKENS", 2048) or 2048)
+                budget_tokens = history_cap_tokens
                 self._last_history_debug = {
                     "mode": "recent_tail",
                     "orig_turns": len(hs),
@@ -142,14 +149,14 @@ class ChatGenerationService:
             self._last_history_summary = None
 
         try:
-            model_window = self._model_context_window() or (
-                int(getattr(settings, "SM_HISTORY_MAX_TOKENS", 2048) or 2048)
-                + int(getattr(settings, "SM_HISTORY_HEADROOM", 4096) or 4096)
-            )
+            model_window = self._model_context_window(llm_model)
             headroom = int(getattr(settings, "SM_HISTORY_HEADROOM", 4096) or 4096)
-            total_ctx_budget = max(model_window - headroom, 2048)
-            history_budget = int(total_ctx_budget * 0.33)
-            context_budget = int(total_ctx_budget * 0.5)
+            model_total_budget = (
+                max(model_window - headroom, 2048) if model_window else total_cap_tokens
+            )
+            total_ctx_budget = min(model_total_budget, total_cap_tokens)
+            history_budget = max(512, min(int(total_ctx_budget * 0.33), history_cap_tokens))
+            context_budget = max(768, min(int(total_ctx_budget * 0.5), context_cap_tokens))
             if history_summary:
                 hist_tokens = self._estimate_tokens(history_summary)
                 if hist_tokens > history_budget:
@@ -167,8 +174,10 @@ class ChatGenerationService:
             history_summary=history_summary,
             style=style,
             extra_system=extra_system,
+            rag_mode=rag_mode,
         )
-        messages = [{"role": s.role, "content": s.content} for s in sections]
+        messages: List[Dict[str, Any]] = [{"role": s.role, "content": s.content} for s in sections]
+        messages = self._inject_multimodal_images(messages, image_attachments)
         temperature = settings.SM_TEMPERATURE if temperature is None else temperature
         max_tokens = settings.SM_MAX_TOKENS if max_tokens is None else max_tokens
         try:
@@ -177,24 +186,35 @@ class ChatGenerationService:
                 stream,
                 temperature,
                 max_tokens,
-                sum(len(m["content"]) for m in messages),
+                self._messages_text_chars(messages),
             )
         except Exception:
             pass
-        out = self.llm.generate(messages, temperature=temperature, max_tokens=max_tokens, stream=stream)
+        prompt_chars = self._messages_text_chars(messages)
+        out = self.llm.generate(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=stream,
+            model=llm_model,
+            provider=llm_provider,
+        )
         if not stream:
             try:
                 self.logger.info("Chat.generate done took_ms=%s", int((time.time() - t0) * 1000))
             except Exception:
                 pass
-            prompt_chars = sum(len(m["content"]) for m in messages)
             completion_chars = len(out or "")
-            ratio = 4 if self.prompt.language == "en" else 1
-            self._last_usage = {
-                "prompt_tokens": prompt_chars // ratio,
-                "completion_tokens": completion_chars // ratio,
-                "total_tokens": (prompt_chars + completion_chars) // ratio,
-            }
+            llm_usage = self.llm.get_last_usage()
+            if isinstance(llm_usage, dict):
+                self._last_usage = llm_usage
+            else:
+                ratio = 4 if self.prompt.language == "en" else 1
+                self._last_usage = {
+                    "prompt_tokens": prompt_chars // ratio,
+                    "completion_tokens": completion_chars // ratio,
+                    "total_tokens": (prompt_chars + completion_chars) // ratio,
+                }
             try:
                 out = self._normalize_citations(out)
             except Exception:
@@ -205,6 +225,8 @@ class ChatGenerationService:
                         messages=messages,
                         previous_answer=out,
                         max_tokens=max_tokens,
+                        llm_provider=llm_provider,
+                        llm_model=llm_model,
                     )
                     if repaired:
                         out = self._normalize_citations(repaired)
@@ -215,7 +237,65 @@ class ChatGenerationService:
             except Exception:
                 pass
             return out
-        return self._stream_with_citation_guard(out, has_context=bool(chunks))
+        return self._stream_with_citation_guard(
+            out,
+            has_context=bool(chunks),
+            prompt_chars=prompt_chars,
+        )
+
+    def _inject_multimodal_images(
+        self,
+        messages: List[Dict[str, Any]],
+        image_attachments: Optional[List[Dict[str, Any]]],
+    ) -> List[Dict[str, Any]]:
+        if not isinstance(messages, list) or not messages:
+            return messages
+        if not image_attachments:
+            return messages
+        user_idx = -1
+        for idx in range(len(messages) - 1, -1, -1):
+            role = str(messages[idx].get("role") or "").strip().lower()
+            if role == "user":
+                user_idx = idx
+                break
+        if user_idx < 0:
+            return messages
+        user_message = dict(messages[user_idx])
+        text_content = str(user_message.get("content") or "")
+        content_parts: List[Dict[str, Any]] = [{"type": "text", "text": text_content}]
+        for item in image_attachments[:4]:
+            if not isinstance(item, dict):
+                continue
+            data_url = str(item.get("data_url") or item.get("dataUrl") or "").strip()
+            if not data_url.startswith("data:image/"):
+                continue
+            content_parts.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": data_url},
+                }
+            )
+        if len(content_parts) <= 1:
+            return messages
+        user_message["content"] = content_parts
+        next_messages = list(messages)
+        next_messages[user_idx] = user_message
+        return next_messages
+
+    def _messages_text_chars(self, messages: List[Dict[str, Any]]) -> int:
+        total = 0
+        for msg in messages or []:
+            content = msg.get("content")
+            if isinstance(content, str):
+                total += len(content)
+                continue
+            if isinstance(content, list):
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    if str(part.get("type") or "").strip().lower() == "text":
+                        total += len(str(part.get("text") or ""))
+        return total
 
     def build_prompt_sections(
         self,
@@ -330,6 +410,8 @@ class ChatGenerationService:
         messages: List[Dict[str, str]],
         previous_answer: str,
         max_tokens: int | None,
+        llm_provider: Optional[str] = None,
+        llm_model: Optional[str] = None,
     ) -> str | None:
         if not previous_answer:
             return None
@@ -358,10 +440,16 @@ class ChatGenerationService:
             temperature=0.2,
             max_tokens=max_tokens or settings.SM_MAX_TOKENS,
             stream=False,
+            provider=llm_provider,
+            model=llm_model,
         )
 
     def _stream_with_citation_guard(
-        self, stream: Iterable[str], *, has_context: bool
+        self,
+        stream: Iterable[str],
+        *,
+        has_context: bool,
+        prompt_chars: int,
     ) -> Generator[str, None, None]:
         if not self.prompt.enable_citations or not has_context:
             for chunk in stream:
@@ -372,6 +460,17 @@ class ChatGenerationService:
             parts.append(chunk)
             yield chunk
         full = "".join(parts)
+        llm_usage = self.llm.get_last_usage()
+        if isinstance(llm_usage, dict):
+            self._last_usage = llm_usage
+        else:
+            ratio = 4 if self.prompt.language == "en" else 1
+            completion_chars = len(full or "")
+            self._last_usage = {
+                "prompt_tokens": prompt_chars // ratio,
+                "completion_tokens": completion_chars // ratio,
+                "total_tokens": (prompt_chars + completion_chars) // ratio,
+            }
         try:
             full = self._normalize_citations(full)
         except Exception:
@@ -433,21 +532,32 @@ class ChatGenerationService:
             en = len(text) - zh
             return zh + en // 4
 
-    def _model_context_window(self) -> int | None:
-        name = None
+    def _model_context_window(self, model_name: Optional[str] = None) -> int | None:
+        name = model_name
         try:
-            if getattr(settings, "SM_LLM_TYPE", "openai") == "openai":
-                name = getattr(settings, "OPENAI_MODEL_NAME", None)
-            elif getattr(settings, "SM_LLM_TYPE", "dashscope") == "dashscope":
-                name = getattr(settings, "DASHSCOPE_MODEL_NAME", None)
+            if not name:
+                if getattr(settings, "SM_LLM_TYPE", "openai") == "openai":
+                    name = getattr(settings, "OPENAI_MODEL_NAME", None)
+                elif getattr(settings, "SM_LLM_TYPE", "dashscope") == "dashscope":
+                    name = getattr(settings, "DASHSCOPE_MODEL_NAME", None)
         except Exception:
             name = None
         table = {
             "gpt-4o": 128000,
             "gpt-4o-mini": 128000,
+            "gpt-4.1": 1048576,
+            "gpt-5": 400000,
+            "gpt-5-mini": 400000,
+            "gpt-5.1": 400000,
+            "gpt-5.2": 400000,
             "gpt-3.5-turbo": 16000,
             "qwen-plus": 200000,
+            "qwen2.5-plus": 200000,
+            "qwen3-max": 200000,
             "qwen-max": 200000,
+            "qwen-turbo": 100000,
+            "qwen-vl-max": 32000,
+            "qwen-vl-plus": 32000,
             "deepseek-r1": 128000,
             "deepseek-chat": 128000,
         }

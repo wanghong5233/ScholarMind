@@ -7,13 +7,14 @@ from schemas.document import (
     DocumentUpdate,
     DocumentCreate,
     CriticalQuestionsResponse,
-    DocumentParsePreviewResponse,
 )
-from service.auth import get_current_user, get_current_user_optional_query_token
+from service.auth import (
+    get_current_user,
+    get_current_user_optional_query_token,
+)
 from service import document_service
 from service.core.ingestion.document_ingestion_orchestrator import DocumentIngestionOrchestrator
 from service.core.ingestion.document_preview_service import DocumentPreviewService
-from service.core.ingestion.parse_preview_service import ParsePreviewService
 from schemas.job import JobInDB
 from utils.database import get_db
 from exceptions.base import ResourceNotFoundException, PermissionDeniedException
@@ -224,22 +225,6 @@ def generate_critical_questions(
         doc_id=doc_id,
         top_n=top_n,
     )
-
-
-@router.get(
-    "/{doc_id}/parse-preview",
-    response_model=DocumentParsePreviewResponse,
-    summary="文档解析预览（测试用）",
-    description="运行解析管线并返回完整的解析块与统计信息，便于调试解析质量。"
-)
-def preview_document_parse(
-    kb_id: int,
-    doc_id: int,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    service = ParsePreviewService(db=db, current_user=current_user)
-    return service.build_preview(kb_id=kb_id, doc_id=doc_id)
 
 
 @router.get(

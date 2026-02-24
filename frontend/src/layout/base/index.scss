@@ -1,5 +1,10 @@
 .base-layout {
-  padding-left: 206px;
+  padding-left: 248px;
+  transition: padding-left 0.2s ease;
+
+  &--sidebar-collapsed {
+    padding-left: 48px;
+  }
 }
 
 .base-layout__sidebar {
@@ -8,87 +13,190 @@
   left: 0;
   top: 0;
   bottom: 0;
-  width: 206px;
-  background-color: #f7f8fa;
+  width: 248px;
+  background-color: #f7f7f8;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
+  transition: transform 0.2s ease;
+
+  .base-layout--sidebar-collapsed & {
+    transform: translateX(-100%);
+  }
 
   .base-layout__sidebar-main {
     flex-grow: 1;
-    overflow: auto;
+    min-height: 0;
+    overflow: hidden;
     display: flex;
     flex-direction: column;
-    padding-bottom: 18px;
+    padding-bottom: 12px;
   }
 
   .base-layout__sidebar-main-content {
     flex-grow: 1;
-    flex-shrink: 0;
-    overflow: auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    overflow-x: hidden;
+    scrollbar-width: none;
+
+    &::-webkit-scrollbar {
+      width: 0;
+      height: 0;
+    }
   }
 }
 
 .base-layout__logo {
-  padding: 10px 18px;
-  padding-top: 28px;
+  padding: 14px 14px 12px;
   display: flex;
   align-items: center;
-  gap: 6px;
-  
+  justify-content: space-between;
+  gap: 8px;
+
   .logo {
-    width: 38px;
-    height: 38px;
+    width: 30px;
+    height: 30px;
     flex-shrink: 0;
     cursor: pointer;
   }
   .title {
-    font-size: 17px;
+    font-size: 15px;
     font-weight: bold;
   }
 }
 
-.base-layout__nav-header {
-  flex-shrink: 0;
+.base-layout__logo-brand {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding-bottom: 9px;
-  position: relative;
-  padding: 9px 18px;
-  cursor: pointer;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+
+.base-layout__sidebar-toggle-wrap {
+  flex-shrink: 0;
+}
+
+.base-layout__sidebar-toggle {
+  width: 28px !important;
+  height: 28px !important;
+  padding: 0 !important;
+  min-width: 28px !important;
+  color: #727884;
 
   &:hover {
-    background-color: rgba(0, 0, 0, 0.03);
+    color: #111827;
+  }
+}
+
+.base-layout__sidebar-trigger {
+  position: fixed;
+  z-index: 1001;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 48px;
+  height: 64px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f7f7f8;
+  border: 1px solid #eaebef;
+  border-left: none;
+  border-radius: 0 8px 8px 0;
+  color: #5e6678;
+  cursor: pointer;
+  font-size: 18px;
+  box-shadow: 2px 0 8px rgba(0, 0, 0, 0.06);
+  transition: background 0.2s, color 0.2s;
+
+  &:hover {
+    background: #eff0f2;
+    color: #22262d;
+  }
+}
+
+.base-layout__new-chat {
+  margin: 0 10px 8px;
+  height: 36px;
+  border-radius: 10px;
+  border: 1px solid #e7e8eb;
+  background: #ffffff;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+
+  &:hover {
+    background: #f2f3f5;
+  }
+}
+
+.base-layout__new-chat-icon {
+  width: 16px;
+  height: 16px;
+}
+
+.base-layout__new-chat-title {
+  font-size: 14px;
+  color: #1e232b;
+}
+
+.base-layout__nav-header {
+  margin: 0 10px 4px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-radius: 10px;
+  height: 36px;
+  padding: 0 12px;
+  cursor: pointer;
+  transition: background-color 0.2s ease;
+
+  &:hover {
+    background-color: rgba(0, 0, 0, 0.05);
   }
 
-  &::after {
-    content: '';
-    display: block;
-    height: 1px;
-    background-color: #ffccbb;
-    position: absolute;
-    bottom: 0;
-    left: 18px;
-    right: 18px;
-    transform: scaleY(0.5);
+  &.is-disabled {
+    opacity: 0.62;
+    cursor: not-allowed;
+
+    &:hover {
+      background-color: transparent;
+    }
   }
 
   .base-layout__nav-header-icon {
-    width: 24px;
-    height: 24px;
+    width: 16px;
+    height: 16px;
+  }
+
+  .base-layout__nav-header-icon--antd {
+    width: 16px;
+    height: 16px;
+    font-size: 16px;
+    color: #0761fe;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
   }
 
   .base-layout__nav-header-title {
     font-size: 14px;
-    color: #333;
-    font-weight: bold;
+    color: #232831;
+    font-weight: 500;
   }
 
   &.is-active {
-    background-color: rgba(51, 110, 255, 0.08);
+    background-color: #ececf1;
 
     .base-layout__nav-header-title {
-      color: #336eff;
+      color: #1d2129;
     }
   }
 }

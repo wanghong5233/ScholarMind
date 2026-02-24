@@ -1,7 +1,7 @@
 .chat-message {
   display: flex;
   flex-direction: column;
-  padding: 20px;
+  padding: 20px 20px 52px;
 }
 
 .chat-message-item {
@@ -37,6 +37,22 @@
     margin-top: 8px;
   }
 
+  .chat-message-item__images {
+    margin-top: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .chat-message-item__image-thumb-wrap {
+    :global {
+      .ant-image {
+        border-radius: 8px;
+        overflow: hidden;
+      }
+    }
+  }
+
   .chat-message-item__attachment {
     display: flex;
     align-items: center;
@@ -58,12 +74,15 @@
   justify-content: flex-end;
   gap: 6px;
   margin-top: 4px;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
 
   .ant-btn {
-    height: 24px;
+    width: 26px;
+    height: 26px;
+    min-width: 26px;
     font-size: 12px;
-    padding: 0 8px;
+    padding: 0;
+    border-radius: 999px;
     color: rgba(11, 26, 60, 0.75);
 
     &:hover {

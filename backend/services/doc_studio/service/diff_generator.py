@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from difflib import SequenceMatcher
-from typing import List, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 ELLIPSIS = "\n% --- 省略未改动内容 ---\n"
 MAX_PREVIEW_CHARS = 20000
@@ -53,6 +53,24 @@ def generate_diff_preview(
         _truncate_center(modified_text, max_chars),
         True,
     )
+
+
+def compute_line_change_stats(original_text: str, modified_text: str) -> Dict[str, int]:
+    """计算行级变更统计（新增/删除）."""
+    original_lines = original_text.splitlines()
+    modified_lines = modified_text.splitlines()
+    matcher = SequenceMatcher(None, original_lines, modified_lines)
+
+    added = 0
+    removed = 0
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            continue
+        if tag in {"replace", "delete"}:
+            removed += max(0, i2 - i1)
+        if tag in {"replace", "insert"}:
+            added += max(0, j2 - j1)
+    return {"added_lines": added, "removed_lines": removed}
 
 
 def _render_preview(

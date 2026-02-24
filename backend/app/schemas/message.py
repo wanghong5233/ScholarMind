@@ -29,6 +29,7 @@ class SessionResponse(BaseModel):
     session_id: str
     session_name: str
     user_id: str
+    surface: str = "deep_chat"
     created_at: str
     updated_at: str
 

@@ -9,6 +9,7 @@ interface Window {
 
 interface ImportMetaEnv {
   readonly VITE_DOC_STUDIO_BASE?: string
+  readonly VITE_ENABLE_ADMIN_UI?: string
 }
 
 interface ImportMeta {

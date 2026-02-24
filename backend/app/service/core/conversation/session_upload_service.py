@@ -11,12 +11,14 @@ from fastapi import BackgroundTasks, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
 from models.user import User
+from schemas.knowledge_base import KnowledgeBaseCreate
 from schemas.session import CreateSessionRequest
 from service.core.api.utils.file_storage import FileStorageUtil
 from service.core.ingestion.document_parser import LightweightDocumentParser
 from service.job_handler.local_upload_handler import LocalUploadHandler
 from service.job_runner_service import execute_job
 from service.job_service import job_service
+from service.knowledgebase_service import create_kb_for_user
 from service.session_service import SessionService
 from utils.get_logger import logger
 from service.core.conversation.session_management_service import SessionManagementService
@@ -67,10 +69,7 @@ class SessionUploadService:
     ):
         """Upload files under a session knowledge base."""
         s = self._get_session(session_id)
-        if not s.knowledge_base_id:
-            raise HTTPException(status_code=400, detail="该会话未绑定知识库，无法上传")
-
-        kb_id = s.knowledge_base_id
+        kb_id = self._ensure_session_kb(s)
         up_files: List[UploadFile] = []
         if file_single is not None:
             up_files.append(file_single)
@@ -192,3 +191,24 @@ class SessionUploadService:
         if str(self.current_user.id) != str(s.user_id):
             raise HTTPException(status_code=403, detail="无权操作该会话")
         return s
+
+    def _ensure_session_kb(self, session_obj) -> int:
+        """Ensure the session has a bound session knowledge base."""
+        if session_obj.knowledge_base_id:
+            return int(session_obj.knowledge_base_id)
+        kb_name = f"session_kb_for_{session_obj.session_id}"
+        kb = create_kb_for_user(
+            db=self.db,
+            kb_create=KnowledgeBaseCreate(name=kb_name, description=None, is_ephemeral=True),
+            user_id=self.current_user.id,
+        )
+        session_obj.knowledge_base_id = kb.id
+        self.db.add(session_obj)
+        self.db.commit()
+        self.db.refresh(session_obj)
+        logger.info(
+            "Backfilled session KB id=%s for legacy session %s",
+            kb.id,
+            session_obj.session_id,
+        )
+        return int(kb.id)

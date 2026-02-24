@@ -21,3 +21,10 @@ class BaseReranker(ABC):
             List[Chunk]: 经过重排序后，相关性更高、顺序更优的文本块列表。
         """
         pass
+
+    def rerank_sync(self, query: str, chunks: List[Chunk]) -> List[Chunk]:
+        """
+        同步重排序接口（用于非 async 路径）。
+        默认实现不提供，请在具体实现类中覆盖。
+        """
+        raise NotImplementedError("rerank_sync is not implemented")

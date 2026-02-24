@@ -15,7 +15,7 @@ class LocalBgeEmbedder(BaseEmbedder):
             # 从配置中获取模型路径和设备，并加载模型
             # "trust_remote_code=True" 是加载某些社区模型（如BGE）所必需的
             self.model = SentenceTransformer(
-                settings.LOCAL_EMEMBEDDER_PATH, 
+                settings.LOCAL_EMBEDDER_PATH,
                 trust_remote_code=True,
                 device=settings.SM_LOCAL_EMBEDDER_DEVICE
             )

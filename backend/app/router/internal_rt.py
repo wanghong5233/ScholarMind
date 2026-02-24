@@ -13,10 +13,11 @@ from sqlalchemy.orm import Session
 from models.message import Message
 from models.user import User
 from schemas.rag import Chunk as RagChunk
-from service.auth import access_security
+from service.auth import access_security, is_internal_service_token_payload
 from service.core.conversation.conversation_service import ConversationService
 from service import knowledgebase_service
 from service.session_service import SessionService
+from service.core.conversation.session_management_service import SessionManagementService
 from service.core.rag.retriever import RAGRetriever
 from service.core.rag.graph.graph_service import KnowledgeGraphService
 from service.core.rag.providers.registry import resolve_provider
@@ -28,12 +29,6 @@ from utils.get_logger import logger
 router = APIRouter(prefix="/internal", tags=["Internal Services"])
 
 
-def _is_service_token(user_name: str) -> bool:
-    """Check if the token subject indicates a service caller."""
-    prefixes = ("deep-research-", "doc-studio-", "service-")
-    return any((user_name or "").startswith(prefix) for prefix in prefixes)
-
-
 def get_service_user(
     subject: "JwtAuthorizationCredentials" = Depends(access_security),
     db: Session = Depends(get_db),
@@ -41,13 +36,12 @@ def get_service_user(
     """Resolve user from service JWT only."""
     payload = subject.subject
     user_id = payload.get("user_id")
-    user_name = payload.get("user_name", "")
     if not user_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid token: user_id missing",
         )
-    if not _is_service_token(user_name):
+    if not is_internal_service_token_payload(payload):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Service token required",
@@ -70,6 +64,20 @@ class InternalMessageAppendRequest(BaseModel):
     retrieval_content: Optional[Dict[str, Any]] = None
     source: Optional[str] = Field(default=None, description="Origin of the message.")
     trace_id: Optional[str] = Field(default=None, description="Optional trace id.")
+
+
+class InternalSessionRewindRequest(BaseModel):
+    """Payload for rewinding a session to a message prefix."""
+
+    keep_messages: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Number of earliest messages to keep.",
+    )
+    before_message_id: Optional[str] = Field(
+        default=None,
+        description="Keep messages strictly before this message_id.",
+    )
 
 
 def _run_rolling_summary_update(session_id: str) -> None:
@@ -245,6 +253,52 @@ def append_message(
     db.refresh(message)
     background_tasks.add_task(_run_rolling_summary_update, payload.session_id)
     return {"message_id": str(message.message_id)}
+
+
+@router.get("/sessions/{session_id}/messages", summary="内部服务获取会话消息列表")
+def internal_list_messages(
+    session_id: str,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(200, ge=1, le=500),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_service_user),
+):
+    """Doc Studio 等内部服务获取会话消息，用于加载对话历史。"""
+    service = SessionManagementService(db=db, current_user=current_user)
+    return service.list_messages(session_id=session_id, page=page, page_size=page_size)
+
+
+@router.post("/sessions/{session_id}/rewind", summary="内部服务回卷会话消息")
+def internal_rewind_messages(
+    session_id: str,
+    payload: InternalSessionRewindRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_service_user),
+):
+    """Rewind a session to the first N messages for branching flows."""
+    logger.info(
+        "Internal rewind request: session_id=%s user_id=%s keep_messages=%s before_message_id=%s",
+        session_id,
+        current_user.id,
+        payload.keep_messages,
+        payload.before_message_id,
+    )
+    service = SessionManagementService(db=db, current_user=current_user)
+    if payload.before_message_id:
+        result = service.rewind_messages(
+            session_id=session_id,
+            before_message_id=payload.before_message_id,
+        )
+        logger.info("Internal rewind finished: %s", result)
+        return result
+    if payload.keep_messages is None:
+        raise HTTPException(status_code=400, detail="Either keep_messages or before_message_id is required")
+    result = service.rewind_messages(
+        session_id=session_id,
+        keep_messages=payload.keep_messages,
+    )
+    logger.info("Internal rewind finished: %s", result)
+    return result
 
 
 @router.get("/context/{session_id}", summary="内部对话上下文接口")

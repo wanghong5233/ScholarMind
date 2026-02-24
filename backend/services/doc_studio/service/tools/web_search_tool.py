@@ -33,24 +33,11 @@ class WebSearchTool(BaseTool):
             "required": ["query"],
         }
 
-    async def execute(self, agent_state: Any, parameters: Dict[str, Any]) -> ToolResult:
+    async def execute(self, _agent_state: Any, parameters: Dict[str, Any]) -> ToolResult:
         query = (parameters or {}).get("query") or ""
         query = str(query).strip()
         if not query:
             return ToolResult(success=False, error="query is required", summary="Missing search query")
-
-        workspace_config = getattr(agent_state, "workspace_config", {}) or {}
-        workspace_flag = workspace_config.get("enable_web_search")
-        web_search_enabled = bool(settings.ENABLE_WEB_SEARCH)
-        if isinstance(workspace_flag, bool):
-            web_search_enabled = workspace_flag
-
-        if not web_search_enabled:
-            return ToolResult(
-                success=True,
-                data={"skipped": True, "reason": "web_search_disabled"},
-                summary="Web search disabled",
-            )
 
         client = get_web_search_client(
             provider=settings.WEB_SEARCH_PROVIDER,

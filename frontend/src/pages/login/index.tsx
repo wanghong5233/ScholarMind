@@ -2,8 +2,8 @@ import * as api from '@/api'
 import { Background } from '@/layout/base/background'
 import { userActions, userState } from '@/store/user'
 import { Button, Flex, Form, Input, Tabs, TabsProps } from 'antd'
-import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useEffect, useMemo, useState } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { useSnapshot } from 'valtio'
 import styles from './index.module.scss'
 
@@ -27,7 +27,14 @@ const IconUser = (
 export default function Login() {
   const user = useSnapshot(userState)
   const navigate = useNavigate()
+  const location = useLocation()
   const [activeTab, setActiveTab] = useState<'login' | 'register'>('login')
+  const redirectPath = useMemo(() => {
+    const query = new URLSearchParams(location.search)
+    const value = query.get('redirect')
+    if (!value || !value.startsWith('/') || value.startsWith('/admin')) return '/'
+    return value
+  }, [location.search])
 
   const [form] = Form.useForm<{
     username: string
@@ -46,7 +53,7 @@ export default function Login() {
     window.$app.message.success('登录成功')
     userActions.setUsername(username)
     userActions.setToken(data.access_token)
-    navigate('/')
+    navigate(redirectPath, { replace: true })
   }
   async function register() {
     const { username, password } = form.getFieldsValue()

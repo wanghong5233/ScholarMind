@@ -2,9 +2,8 @@ import IconCopy from '@/assets/chat/copy.svg'
 import IconReference from '@/assets/chat/reference.svg'
 import IconRefresh from '@/assets/chat/refresh.svg'
 import IconShare from '@/assets/chat/share.svg'
-import IconTip from '@/assets/chat/tip.svg'
 import Markdown from '@/components/markdown'
-import { ArrowRightOutlined } from '@ant-design/icons'
+import { ArrowRightOutlined, DislikeOutlined, LikeOutlined } from '@ant-design/icons'
 import { Button, Dropdown, Tooltip, message } from 'antd'
 import classNames from 'classnames'
 import dayjs from 'dayjs'
@@ -17,8 +16,17 @@ export function Result(props: {
   onSend?: (text: string) => void
   onRefrence?: (index: number) => void
   onOpenCitations?: () => void
+  feedback?: 'thumbs_up' | 'thumbs_down'
+  onFeedback?: (rating: 'thumbs_up' | 'thumbs_down') => void
 }) {
-  const { item, isEnd, onSend, onRefrence, onOpenCitations } = props
+  const { item, isEnd, onSend, onRefrence, onOpenCitations, feedback, onFeedback } = props
+
+  const elapsedLabel = useMemo(() => {
+    const raw = Number(item.elapsed_seconds)
+    if (!Number.isFinite(raw) || raw <= 0) return ''
+    const normalized = raw >= 10 ? raw.toFixed(0) : raw.toFixed(1)
+    return `用时 ${normalized}s`
+  }, [item.elapsed_seconds])
 
   const shareMenu = useMemo(() => {
     return [
@@ -143,6 +151,9 @@ export function Result(props: {
           <div className={styles['chat-message-result__actions']}>
             <div className={styles['date']}>
               {dayjs().format('HH:mm YYYY/MM/DD')}
+              {elapsedLabel ? (
+                <span className={styles['elapsed']}> · {elapsedLabel}</span>
+              ) : null}
             </div>
 
             {isEnd ? null : (
@@ -157,15 +168,31 @@ export function Result(props: {
               </Button>
             )}
 
-            <Button
-              variant="text"
-              color="primary"
-              shape="circle"
-              size="small"
-              style={{ color: 'var(--ant-color-primary)' }}
-            >
-              <img src={IconTip} />
-            </Button>
+            <Tooltip title="有帮助">
+              <Button
+                variant="text"
+                color="primary"
+                shape="circle"
+                size="small"
+                style={{ color: feedback === 'thumbs_up' ? 'var(--ant-color-primary)' : undefined }}
+                onClick={() => onFeedback?.('thumbs_up')}
+              >
+                <LikeOutlined />
+              </Button>
+            </Tooltip>
+
+            <Tooltip title="无帮助">
+              <Button
+                variant="text"
+                color="primary"
+                shape="circle"
+                size="small"
+                style={{ color: feedback === 'thumbs_down' ? 'var(--ant-color-primary)' : undefined }}
+                onClick={() => onFeedback?.('thumbs_down')}
+              >
+                <DislikeOutlined />
+              </Button>
+            </Tooltip>
 
             <Button
               variant="text"

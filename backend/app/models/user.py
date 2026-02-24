@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String
+from sqlalchemy import Boolean, Column, Integer, String
 from sqlalchemy.orm import relationship
 from models.base import Base
 
@@ -20,6 +20,12 @@ class User(Base):
     # - unique=True: 在表中此列的值必须是唯一的，用于防止用户名重复。
     # - nullable=False: 此列不允许为空。
     username = Column(String(50), unique=True, nullable=False)
+
+    # role: 用户角色（user/admin/super_admin）
+    role = Column(String(32), nullable=False, default="user", server_default="user")
+
+    # is_active: 用户是否可用（false 表示被封禁/停用）
+    is_active = Column(Boolean, nullable=False, default=True, server_default="true")
 
     # password_hash: 存储用户密码的哈希值。
     # - String(100): 数据类型为字符串，长度设为100以容纳哈希算法生成的字符串。

@@ -59,6 +59,9 @@ class DynamicPlanBuilder:
                 notes.append(f"跳过 {tool_name}：条件 {condition} 不满足")
                 continue
 
+            if tool_name in selected_steps:
+                notes.append(f"跳过重复工具 {tool_name}：已在计划中")
+                continue
             selected_steps.append(tool_name)
 
         max_iterations = strategy.get("max_iterations")
@@ -78,18 +81,49 @@ class DynamicPlanBuilder:
         if not condition:
             return True
 
+        # 支持简单布尔表达式：
+        # - A || B
+        # - A && B
+        # - !A
+        # 不支持括号，按 || -> && -> 原子条件递归求值。
+        if "||" in condition:
+            return any(
+                self._eval_condition(part.strip(), context)
+                for part in condition.split("||")
+                if part.strip()
+            )
+        if "&&" in condition:
+            return all(
+                self._eval_condition(part.strip(), context)
+                for part in condition.split("&&")
+                if part.strip()
+            )
+
         if condition.startswith("!"):
             return not self._eval_condition(condition[1:], context)
 
         value_map = {
             "has_selection": bool(context.get("has_selection")),
+            "has_file_mentions": bool(context.get("has_file_mentions")),
             "has_kb": bool(context.get("has_kb")),
+            "wants_directory_create": bool(context.get("wants_directory_create")),
+            "wants_file_create": bool(context.get("wants_file_create")),
+            "wants_move_rename": bool(context.get("wants_move_rename")),
+            "wants_delete_path": bool(context.get("wants_delete_path")),
             "selection_length": int(context.get("selection_length") or 0),
             "workspace_file_count": int(context.get("workspace_file_count") or 0),
             "intent_confidence": float(context.get("intent_confidence") or 0.0),
         }
 
-        if condition in ("has_selection", "has_kb"):
+        if condition in (
+            "has_selection",
+            "has_file_mentions",
+            "has_kb",
+            "wants_directory_create",
+            "wants_file_create",
+            "wants_move_rename",
+            "wants_delete_path",
+        ):
             return value_map[condition]
 
         match = re.match(r"(selection_length|workspace_file_count|intent_confidence)\s*([<>]=?|==)\s*([\d\.]+)", condition)

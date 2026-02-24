@@ -146,6 +146,11 @@
   .title {
     font-size: 10px;
     color: #999;
+
+    .duration {
+      color: #7f8693;
+      font-variant-numeric: tabular-nums;
+    }
   }
 }
 

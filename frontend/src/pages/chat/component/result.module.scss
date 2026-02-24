@@ -31,6 +31,11 @@
       margin-right: 4px;
       color: var(--ant-color-primary);
       font-size: 12px;
+
+      .elapsed {
+        color: #8f96a3;
+        font-variant-numeric: tabular-nums;
+      }
     }
   }
 

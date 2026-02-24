@@ -31,7 +31,7 @@ from core.config import settings
 
 # 统一使用 settings.ES_URL（可包含认证信息）
 ES_URL = settings.ES_URL
-ATTEMPT_TIME = 2
+ATTEMPT_TIME = 1
 PAGERANK_FLD = "pagerank_fea"
 TAG_FLD = "tag_feas"
 
@@ -59,10 +59,11 @@ class ESConnection():
         """
         self.info = {}
         logger.info(f"Connecting to Elasticsearch at {ES_URL}")
+        es_client_timeout = float(getattr(settings, "SM_ES_CLIENT_TIMEOUT_SECS", 60) or 60)
         self.es = Elasticsearch(
             [ES_URL],  # 完整URL，包含认证信息
             verify_certs=False,
-            timeout=600,
+            timeout=es_client_timeout,
         )
         logger.info("Elasticsearch connection established")
 
@@ -81,6 +82,17 @@ class ESConnection():
             logger.error(f"Failed to create index '{index_name}': {e}")
             # Even if it fails (e.g., race condition), we can proceed,
             # as the insert operation might still succeed if another process created it.
+
+    def index_exists(self, index_name: str) -> bool:
+        """
+        检查索引是否存在（用于快速判定，避免重复 404）。
+        """
+        if not index_name:
+            return False
+        try:
+            return bool(self.es.indices.exists(index=index_name))
+        except Exception:
+            return False
 
     """
     Helper functions for search result
@@ -368,15 +380,22 @@ class ESConnection():
         
         # 2.2 (翻译): 遍历清单，将每个Expr对象翻译成对应的ES查询子句。
         for m in matchExprs:
-            # 翻译 MatchTextExpr -> bool.must + query_string
+            # 翻译 MatchTextExpr -> bool.must + simple_query_string
+            # 使用 simple_query_string 避免用户输入中包含特殊字符导致解析失败
             if isinstance(m, MatchTextExpr):
                 minimum_should_match = m.extra_options.get("minimum_should_match", 0.0)
                 if isinstance(minimum_should_match, float):
                     minimum_should_match = str(int(minimum_should_match * 100)) + "%"
-                bqry.must.append(Q("query_string", fields=m.fields,
-                                   type="best_fields", query=m.matching_text,
-                                   minimum_should_match=minimum_should_match,
-                                   boost=1))
+                bqry.must.append(
+                    Q(
+                        "simple_query_string",
+                        fields=m.fields,
+                        query=m.matching_text,
+                        default_operator="AND",
+                        minimum_should_match=minimum_should_match,
+                        boost=1,
+                    )
+                )
                 # 使用从FusionExpr中提取的权重，来调整文本查询的整体重要性
                 bqry.boost = 1.0 - vector_similarity_weight
 
@@ -445,12 +464,14 @@ class ESConnection():
         logger.debug(f"ESConnection.search {str(indexNames)} query: " + json.dumps(q))
 
         # 执行查询，并包含超时重试逻辑
-        for i in range(ATTEMPT_TIME):
+        attempt_times = max(int(getattr(settings, "SM_ES_SEARCH_RETRY_TIMES", ATTEMPT_TIME) or ATTEMPT_TIME), 1)
+        search_timeout_secs = max(int(getattr(settings, "SM_ES_SEARCH_TIMEOUT_SECS", 20) or 20), 1)
+        for i in range(attempt_times):
             try:
                 #print(json.dumps(q, ensure_ascii=False))
                 res = self.es.search(index=indexNames,
                                      body=q,
-                                     timeout="600s",
+                                     timeout=f"{search_timeout_secs}s",
                                      # search_type="dfs_query_then_fetch",
                                      track_total_hits=True,
                                      _source=True)
@@ -466,10 +487,10 @@ class ESConnection():
                 return {"hits": {"hits": []}, "timed_out": False}
             except Exception as e:
                 logger.exception(f"ESConnection.search {str(indexNames)} query: " + str(q))
-                if str(e).find("Timeout") > 0:
+                if re.search(r"(timeout|timed out|time out)", str(e), re.IGNORECASE):
                     continue
                 raise e
-        logger.error("ESConnection.search timeout for 3 times!")
+        logger.error("ESConnection.search timeout for %s times!", attempt_times)
         raise Exception("ESConnection.search timeout.")
 
     def delete(self, condition: dict, indexName: str, knowledgebaseId: str) -> int:

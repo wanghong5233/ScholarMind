@@ -6,6 +6,8 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Any, Optional
 import logging
+import os
+import time
 import torch
 
 # 配置日志（确保输出到标准输出，以便Docker日志捕获）
@@ -46,6 +48,62 @@ app = FastAPI(title="BGE Reranker Service", version="1.0.0")
 # 全局模型实例
 _reranker_model = None
 _model_device = None
+_last_model_inspect: Dict[str, Any] = {}
+
+_WEIGHT_CANDIDATES = (
+    "model.safetensors",
+    "pytorch_model.bin",
+    "pytorch_model-00001-of-00002.bin",
+)
+
+
+def inspect_model_dir(model_path: str) -> Dict[str, Any]:
+    path = model_path or ""
+    exists = os.path.isdir(path)
+    has_config = os.path.exists(os.path.join(path, "config.json"))
+    present_weights = [name for name in _WEIGHT_CANDIDATES if os.path.exists(os.path.join(path, name))]
+    ready = bool(exists and has_config and present_weights)
+    return {
+        "path": path,
+        "exists": exists,
+        "has_config": has_config,
+        "present_weight_files": present_weights,
+        "weight_candidates": list(_WEIGHT_CANDIDATES),
+        "ready": ready,
+    }
+
+
+def ensure_model_ready(model_path: str) -> Dict[str, Any]:
+    inspect_before = inspect_model_dir(model_path)
+    if inspect_before.get("ready"):
+        logger.info(
+            f"[MODEL_READY] path={model_path} weights={inspect_before.get('present_weight_files')}"
+        )
+        return inspect_before
+
+    logger.warning(
+        f"[MODEL_INCOMPLETE] path={model_path} inspect={inspect_before} "
+        "will attempt snapshot download from HuggingFace."
+    )
+    try:
+        from huggingface_hub import snapshot_download
+        os.makedirs(model_path, exist_ok=True)
+        snapshot_download(
+            repo_id="BAAI/bge-reranker-large",
+            local_dir=model_path,
+            local_dir_use_symlinks=False,
+        )
+    except Exception as download_error:
+        logger.error(f"[MODEL_DOWNLOAD_FAIL] err={download_error}", exc_info=True)
+        raise RuntimeError(f"Model not ready and download failed: {download_error}")
+
+    inspect_after = inspect_model_dir(model_path)
+    if not inspect_after.get("ready"):
+        raise RuntimeError(f"Model directory is still incomplete after download: {inspect_after}")
+    logger.info(
+        f"[MODEL_DOWNLOAD_OK] path={model_path} weights={inspect_after.get('present_weight_files')}"
+    )
+    return inspect_after
 
 
 class RerankRequest(BaseModel):
@@ -63,12 +121,11 @@ class RerankResponse(BaseModel):
 
 def load_reranker_model():
     """加载精排模型（延迟加载）"""
-    global _reranker_model, _model_device
+    global _reranker_model, _model_device, _last_model_inspect
     
     if _reranker_model is not None:
         return _reranker_model, _model_device
     
-    import os
     from sentence_transformers import CrossEncoder
     from transformers import AutoModelForSequenceClassification, AutoTokenizer, BitsAndBytesConfig
     
@@ -76,22 +133,7 @@ def load_reranker_model():
     device = "cuda" if gpu_available else "cpu"
     use_quantization = os.getenv("RERANKER_USE_QUANTIZATION", "true").lower() == "true"
     
-    # 检查模型是否存在，如果不存在则自动下载
-    if not os.path.exists(model_path) or not os.path.exists(os.path.join(model_path, "config.json")):
-        logger.warning(f"Model not found at {model_path}, downloading automatically...")
-        try:
-            from huggingface_hub import snapshot_download
-            os.makedirs(model_path, exist_ok=True)
-            logger.info(f"Downloading BGE-Reranker-Large from HuggingFace...")
-            snapshot_download(
-                repo_id="BAAI/bge-reranker-large",
-                local_dir=model_path,
-                local_dir_use_symlinks=False
-            )
-            logger.info(f"Model download completed successfully!")
-        except Exception as download_error:
-            logger.error(f"Failed to download model: {download_error}", exc_info=True)
-            raise RuntimeError(f"Model not found and download failed: {download_error}")
+    _last_model_inspect = ensure_model_ready(model_path)
     
     logger.info(f"[MODEL_LOAD] Loading reranker model from: {model_path}")
     logger.info(f"[MODEL_LOAD] Device: {device}, Quantization: {use_quantization}")
@@ -178,6 +220,8 @@ class QuantizedCrossEncoderWrapper:
 @app.get("/health")
 async def health():
     """健康检查"""
+    model_path = os.getenv("RERANKER_MODEL_PATH", "/models/bge-reranker-large")
+    inspect = inspect_model_dir(model_path)
     return {
         "status": "ok",
         "service": "reranker",
@@ -185,6 +229,10 @@ async def health():
         "gpu_count": gpu_count,
         "gpu_name": gpu_name,
         "model_loaded": _reranker_model is not None,
+        "model_ready": bool(inspect.get("ready")),
+        "model_path": model_path,
+        "model_inspect": inspect,
+        "last_model_inspect": _last_model_inspect,
         "device": _model_device if _model_device else "unknown"
     }
 
@@ -217,6 +265,7 @@ async def rerank(request: RerankRequest):
     if not request.chunks:
         return RerankResponse(reranked_chunks=[], scores=[])
     
+    t0 = time.perf_counter()
     try:
         # 延迟加载模型
         model, device = load_reranker_model()
@@ -224,7 +273,10 @@ async def rerank(request: RerankRequest):
         # 创建句子对：[(query, chunk_content), ...]
         sentence_pairs = [(request.query, chunk.get("content", "")) for chunk in request.chunks]
         
-        logger.info(f"[RERANK_REQUEST] query='{request.query[:60]}...' chunks={len(request.chunks)} batch_size={request.batch_size}")
+        logger.info(
+            f"[RERANK_REQUEST] query='{request.query[:60]}...' chunks={len(request.chunks)} "
+            f"batch_size={request.batch_size} device={device}"
+        )
         
         # 使用模型进行预测
         scores = model.predict(sentence_pairs, batch_size=request.batch_size)
@@ -237,7 +289,12 @@ async def rerank(request: RerankRequest):
         reranked_chunks = [chunk for score, chunk in scored_chunks]
         score_list = [float(score) for score, _ in scored_chunks]
         
-        logger.info(f"[RERANK_COMPLETE] Top score: {score_list[0] if score_list else 0:.4f}, Score range: [{min(score_list) if score_list else 0:.4f}, {max(score_list) if score_list else 0:.4f}]")
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        logger.info(
+            f"[RERANK_COMPLETE] top_score={score_list[0] if score_list else 0:.4f} "
+            f"score_min={min(score_list) if score_list else 0:.4f} "
+            f"score_max={max(score_list) if score_list else 0:.4f} elapsed_ms={elapsed_ms}"
+        )
         
         return RerankResponse(
             reranked_chunks=reranked_chunks,
@@ -245,7 +302,8 @@ async def rerank(request: RerankRequest):
         )
         
     except Exception as e:
-        logger.error(f"Reranking failed: {e}", exc_info=True)
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        logger.error(f"[RERANK_FAIL] err={e} elapsed_ms={elapsed_ms}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Reranking failed: {str(e)}")
 
 

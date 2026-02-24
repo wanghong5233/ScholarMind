@@ -40,6 +40,16 @@ class DummyDecisionAgent(DecisionAgent):
         )
 
 
+class DummySummaryLLM:
+    """Minimal LLM stub for rag.ask summary generation."""
+
+    def is_configured(self) -> bool:
+        return True
+
+    async def generate(self, _prompt: str) -> str:
+        return "Grounded summary."
+
+
 async def _build_agent():
     rag_client = DummyRAGClient()
     manager = CitationManager("test")
@@ -60,6 +70,7 @@ async def _build_agent():
         code_exec_client=None,
         web_search_max_results=3,
         paper_search_max_results=3,
+        rag_llm_client=DummySummaryLLM(),
     )
     agent = ResearchAgent(
         tool_router=ToolRouter(registry),

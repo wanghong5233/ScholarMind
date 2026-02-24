@@ -3,16 +3,19 @@
 import asyncio
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, AsyncGenerator, Dict, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi_jwt import JwtAccessBearerCookie, JwtAuthorizationCredentials
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from pydantic import BaseModel
 
 from core.config import settings
 from schemas.common import (
     BlockEvidence,
+    DeepResearchMode,
     DeepResearchRequest,
     DeepResearchPlan,
     DeepResearchResponse,
@@ -26,6 +29,8 @@ from schemas.common import (
     DeepResearchPriorityUpdateRequest,
     DeepResearchRunList,
     DeepResearchRunMeta,
+    DeepResearchSessionContextResponse,
+    DeepResearchSessionContextItem,
     DeepResearchStatus,
     DeepResearchSubmitResponse,
 )
@@ -53,6 +58,7 @@ from service.report_exporter import render_html, render_pdf
 from service.run_manager import RunManager
 from service.state_store import StateStore
 from utils.request_normalizer import apply_deep_research_preset
+from utils.plan_override import extract_plan_override_items, to_plan_item_payload
 
 router = APIRouter()
 run_manager = RunManager(
@@ -60,6 +66,171 @@ run_manager = RunManager(
     data_root=settings.DATA_ROOT,
     request_timeout=settings.REQUEST_TIMEOUT,
 )
+internal_service_security = JwtAccessBearerCookie(
+    secret_key=settings.JWT_SECRET_KEY or "__missing_internal_jwt_secret__",
+    auto_error=False,
+    access_expires_delta=timedelta(days=settings.JWT_ACCESS_TOKEN_EXPIRE_DAYS),
+)
+
+
+def _parse_csv_values(raw_value: Optional[str]) -> set[str]:
+    if not raw_value:
+        return set()
+    return {item.strip().lower() for item in raw_value.split(",") if item and item.strip()}
+
+
+def _internal_service_allowlist() -> set[str]:
+    return _parse_csv_values(settings.INTERNAL_SERVICE_ALLOWLIST)
+
+
+def _extract_timestamp(payload: Dict[str, Any]) -> str:
+    return (
+        str(payload.get("submitted_at") or payload.get("started_at") or payload.get("finished_at") or "")
+        .strip()
+    )
+
+
+def _normalize_run_meta_payload(meta: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize run meta for backward-compatible response validation."""
+
+    normalized = dict(meta or {})
+    request_payload = normalized.get("request")
+    if not isinstance(request_payload, dict):
+        request_payload = {}
+        normalized["request"] = request_payload
+
+    topic = (
+        str(normalized.get("topic") or "").strip()
+        or str(request_payload.get("topic") or "").strip()
+        or "DeepResearch"
+    )
+    normalized["topic"] = topic
+
+    status_value = str(normalized.get("status") or "").strip().lower()
+    if status_value not in DeepResearchStatus._value2member_map_:
+        status_value = DeepResearchStatus.QUEUED.value
+    normalized["status"] = status_value
+
+    mode_value = str(normalized.get("mode") or request_payload.get("mode") or "").strip().lower()
+    if mode_value not in DeepResearchMode._value2member_map_:
+        mode_value = DeepResearchMode.QUEUE.value
+    normalized["mode"] = mode_value
+    return normalized
+
+
+SNAPSHOT_COMPACT_REPORT_MAX_CHARS = 12000
+SNAPSHOT_COMPACT_CITATIONS_MAX_ITEMS = 120
+
+
+def _truncate_tail_text(text: str, max_chars: int) -> str:
+    """Return a tail-truncated preview text for large markdown payloads."""
+
+    value = str(text or "")
+    if max_chars <= 0 or len(value) <= max_chars:
+        return value
+    return (
+        f"[...已截断，仅展示末尾 {max_chars} 字符（总长 {len(value)}）...]\n\n"
+        f"{value[-max_chars:]}"
+    )
+
+
+def _compact_report_payload(report: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Reduce snapshot report payload size for high-frequency polling."""
+
+    if not isinstance(report, dict):
+        return report
+    compact = dict(report)
+    compact["snapshot_compact"] = True
+    for field in ("report_markdown", "draft_markdown"):
+        raw_text = str(compact.get(field) or "")
+        if not raw_text:
+            continue
+        if len(raw_text) > SNAPSHOT_COMPACT_REPORT_MAX_CHARS:
+            compact[f"{field}_truncated"] = True
+            compact[f"{field}_full_chars"] = len(raw_text)
+            compact[field] = _truncate_tail_text(raw_text, SNAPSHOT_COMPACT_REPORT_MAX_CHARS)
+    details = compact.get("report_details")
+    if isinstance(details, dict):
+        details_compact = dict(details)
+        draft_text = str(details_compact.get("draft_markdown") or "")
+        if len(draft_text) > SNAPSHOT_COMPACT_REPORT_MAX_CHARS:
+            details_compact["draft_markdown_truncated"] = True
+            details_compact["draft_markdown_full_chars"] = len(draft_text)
+            details_compact["draft_markdown"] = _truncate_tail_text(
+                draft_text, SNAPSHOT_COMPACT_REPORT_MAX_CHARS
+            )
+        compact["report_details"] = details_compact
+    return compact
+
+
+def _compact_citations_payload(citations: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Reduce citations payload for compact snapshot responses."""
+
+    if not isinstance(citations, dict):
+        return citations
+    compact = dict(citations)
+    items = compact.get("citations")
+    if not isinstance(items, list):
+        return compact
+    total = len(items)
+    if total > SNAPSHOT_COMPACT_CITATIONS_MAX_ITEMS:
+        compact["citations_total"] = total
+        compact["citations_truncated"] = True
+        compact["citations"] = items[:SNAPSHOT_COMPACT_CITATIONS_MAX_ITEMS]
+    return compact
+
+
+def _extract_report_summary(markdown: str, *, max_chars: int = 800) -> str:
+    """Extract a concise report summary from markdown text."""
+
+    if not isinstance(markdown, str):
+        return ""
+    lines = [line.strip() for line in markdown.splitlines() if line.strip()]
+    if not lines:
+        return ""
+    summary_lines: list[str] = []
+    for line in lines:
+        if line.startswith("#") and summary_lines:
+            break
+        normalized = line.lstrip("#").strip() if line.startswith("#") else line
+        if not normalized:
+            continue
+        summary_lines.append(normalized)
+        if len(" ".join(summary_lines)) >= max_chars:
+            break
+    summary_text = " ".join(summary_lines).strip()
+    if len(summary_text) > max_chars:
+        summary_text = summary_text[:max_chars].rstrip() + "..."
+    return summary_text
+
+
+def _build_plan_stream_progress(
+    message: str,
+    *,
+    event_type: str = "plan.progress",
+    payload: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build a normalized progress event payload for plan streaming."""
+
+    return {
+        "research_id": "plan_preview",
+        "stage": "planning",
+        "event_type": event_type,
+        "message": message,
+        "timestamp": datetime.utcnow().isoformat(),
+        "payload": payload or {},
+    }
+
+
+def _is_retrieval_disabled(index_mode: Optional[str]) -> bool:
+    """Return True when request explicitly disables session KB retrieval."""
+
+    normalized = str(index_mode or "").strip().lower()
+    return normalized in {"disabled", "off", "none", "false", "0"}
+
+
+class AdminActionRequest(BaseModel):
+    reason: Optional[str] = None
 
 
 async def get_user_id(x_user_id: Optional[str] = Header(None, alias="X-User-Id")) -> int:
@@ -93,6 +264,34 @@ async def get_user_id_for_stream(
         raise HTTPException(status_code=400, detail="Invalid user_id format") from exc
 
 
+def get_internal_service_identity(
+    subject: Optional[JwtAuthorizationCredentials] = Depends(internal_service_security),
+) -> dict[str, Any]:
+    """Validate internal service token for admin-only operations."""
+
+    if not settings.JWT_SECRET_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="JWT secret not configured for internal service auth",
+        )
+    if subject is None:
+        raise HTTPException(status_code=401, detail="Missing internal service token")
+    payload = subject.subject or {}
+    token_use = str(payload.get("token_use", "") or "").strip().lower()
+    service_name = str(payload.get("service_name", "") or "").strip().lower()
+    if token_use != "internal_service":
+        raise HTTPException(status_code=403, detail="Internal service token required")
+    if not service_name:
+        raise HTTPException(status_code=403, detail="Invalid internal service token")
+    allowlist = _internal_service_allowlist()
+    if allowlist and service_name not in allowlist:
+        raise HTTPException(status_code=403, detail="Service not allowed")
+    return {
+        "service_name": service_name,
+        "user_id": payload.get("user_id"),
+    }
+
+
 @router.post(
     "/deep-research/plan",
     response_model=DeepResearchPlan,
@@ -104,6 +303,13 @@ async def preview_deep_research_plan(
 ) -> DeepResearchPlan:
     """Generate a preview plan for a DeepResearch run."""
     payload = apply_deep_research_preset(payload)
+    override_items = extract_plan_override_items(
+        payload.metadata,
+        max_depth=payload.depth,
+        max_breadth=payload.breadth,
+    )
+    if override_items:
+        return DeepResearchPlan(items=to_plan_item_payload(override_items))
 
     planner = PlannerAgent(
         depth=payload.depth,
@@ -111,33 +317,252 @@ async def preview_deep_research_plan(
         language=payload.language,
     )
     if not payload.session_id:
-        items = planner.plan(payload.topic)
-    else:
+        raise HTTPException(status_code=400, detail="DeepResearch planning requires session_id")
+    try:
+        async with RAGClient(
+            settings.RAG_SERVICE_URL,
+            timeout=settings.REQUEST_TIMEOUT,
+        ) as rag_client:
+            items = await planner.plan_with_rag(
+                topic=payload.topic,
+                rag_client=rag_client,
+                session_id=payload.session_id,
+                user_id=user_id,
+                top_k=payload.top_k,
+                index_mode=payload.index_mode,
+            )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"LLM 规划失败: {str(exc)}") from exc
+    return DeepResearchPlan(items=to_plan_item_payload(items))
+
+
+@router.post(
+    "/deep-research/plan/stream",
+    summary="Stream DeepResearch plan preview",
+)
+async def stream_deep_research_plan_preview(
+    payload: DeepResearchRequest,
+    request: Request,
+    user_id: int = Depends(get_user_id),
+) -> StreamingResponse:
+    """Stream planning progress and final plan via server-sent events."""
+
+    payload = apply_deep_research_preset(payload)
+    idle_messages = [
+        "正在分析研究目标...",
+        "正在拆解一级研究主题...",
+        "正在组织子问题依赖关系...",
+        "正在校验计划结构完整性...",
+    ]
+
+    async def event_generator() -> AsyncGenerator[str, None]:
+        seq = 0
+
+        def encode_sse(event_name: str, data: Any) -> str:
+            nonlocal seq
+            seq += 1
+            payload_json = json.dumps(data, ensure_ascii=False)
+            return f"id: {seq}\nevent: {event_name}\ndata: {payload_json}\n\n"
+
+        yield encode_sse(
+            "progress",
+            _build_plan_stream_progress(
+                "计划预览已开始",
+                event_type="plan.started",
+                payload={
+                    "topic": payload.topic,
+                    "depth": payload.depth,
+                    "breadth": payload.breadth,
+                },
+            ),
+        )
+
         try:
+            override_items = extract_plan_override_items(
+                payload.metadata,
+                max_depth=payload.depth,
+                max_breadth=payload.breadth,
+            )
+            if override_items:
+                plan_payload = DeepResearchPlan(items=to_plan_item_payload(override_items))
+                yield encode_sse(
+                    "progress",
+                    _build_plan_stream_progress(
+                        "检测到编辑计划，直接使用自定义计划",
+                        payload={
+                            "items": len(plan_payload.items),
+                            "source": "plan_override",
+                        },
+                    ),
+                )
+                yield encode_sse(
+                    "progress",
+                    _build_plan_stream_progress(
+                        "计划预览完成",
+                        event_type="plan.completed",
+                        payload={
+                            "items": len(plan_payload.items),
+                            "source": "plan_override",
+                        },
+                    ),
+                )
+                yield encode_sse("plan", plan_payload.model_dump(mode="json"))
+                yield "event: completion\ndata: [DONE]\n\n"
+                return
+
+            planner = PlannerAgent(
+                depth=payload.depth,
+                breadth=payload.breadth,
+                language=payload.language,
+            )
+            yield encode_sse(
+                "progress",
+                _build_plan_stream_progress(
+                    "规划器初始化完成，开始拆解主题",
+                    payload={"strategy": "auto"},
+                ),
+            )
+
+            retrieval_disabled = _is_retrieval_disabled(payload.index_mode)
+            if not payload.session_id:
+                yield encode_sse(
+                    "progress",
+                    _build_plan_stream_progress(
+                        "计划预览失败: 缺少 session_id，无法执行 LLM 规划",
+                        event_type="plan.failed",
+                        payload={"reason": "missing_session_id"},
+                    ),
+                )
+                yield "event: completion\ndata: [DONE]\n\n"
+                return
+
+            progress_queue: asyncio.Queue[tuple[str, Dict[str, Any]]] = asyncio.Queue()
+
+            def observer(message: str, event_payload: Dict[str, Any]) -> None:
+                try:
+                    progress_queue.put_nowait((message, event_payload or {}))
+                except Exception:
+                    return
+
+            yield encode_sse(
+                "progress",
+                _build_plan_stream_progress(
+                    "会话检索已关闭，使用 LLM 规划（不检索知识库）"
+                    if retrieval_disabled
+                    else "正在连接 RAG 获取规划上下文",
+                    payload={
+                        "session_id": payload.session_id,
+                        "strategy": "llm_only" if retrieval_disabled else "rag",
+                    },
+                ),
+            )
             async with RAGClient(
                 settings.RAG_SERVICE_URL,
                 timeout=settings.REQUEST_TIMEOUT,
             ) as rag_client:
-                items = await planner.plan_with_rag(
-                    topic=payload.topic,
-                    rag_client=rag_client,
-                    session_id=payload.session_id,
-                    user_id=user_id,
-                    top_k=payload.top_k,
-                    index_mode=payload.index_mode,
+                plan_task = asyncio.create_task(
+                    planner.plan_with_rag(
+                        topic=payload.topic,
+                        rag_client=rag_client,
+                        session_id=payload.session_id,
+                        user_id=user_id,
+                        top_k=payload.top_k,
+                        index_mode=payload.index_mode,
+                        progress_observer=observer,
+                    )
                 )
-        except Exception:
-            items = planner.plan(payload.topic)
-    return DeepResearchPlan(
-        items=[
-            {
-                "title": item.title,
-                "question": item.question,
-                "depth": item.depth,
-                "parent_title": item.parent_title,
-            }
-            for item in items
-        ]
+
+                started_at = time.monotonic()
+                idle_index = 0
+                while not plan_task.done():
+                    if await request.is_disconnected():
+                        plan_task.cancel()
+                        try:
+                            await plan_task
+                        except Exception:
+                            pass
+                        return
+
+                    drained = False
+                    while True:
+                        try:
+                            msg, info = progress_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                        drained = True
+                        yield encode_sse(
+                            "progress",
+                            _build_plan_stream_progress(msg, payload=info),
+                        )
+
+                    if not drained:
+                        elapsed = round(time.monotonic() - started_at, 1)
+                        hint = idle_messages[idle_index % len(idle_messages)]
+                        idle_index += 1
+                        yield encode_sse(
+                            "progress",
+                            _build_plan_stream_progress(
+                                hint,
+                                payload={"elapsed_seconds": elapsed, "waiting": "planner"},
+                            ),
+                        )
+
+                    await asyncio.sleep(1.2)
+
+                while True:
+                    try:
+                        msg, info = progress_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    yield encode_sse(
+                        "progress",
+                        _build_plan_stream_progress(msg, payload=info),
+                    )
+
+                try:
+                    items = await plan_task
+                    strategy = "llm_only" if retrieval_disabled else "rag"
+                except Exception as exc:
+                    yield encode_sse(
+                        "progress",
+                        _build_plan_stream_progress(
+                            f"计划预览失败: {str(exc)}",
+                            event_type="plan.failed",
+                            payload={"error": str(exc), "strategy": "llm_only" if retrieval_disabled else "rag"},
+                        ),
+                    )
+                    yield "event: completion\ndata: [DONE]\n\n"
+                    return
+
+            plan_payload = DeepResearchPlan(items=to_plan_item_payload(items))
+            yield encode_sse(
+                "progress",
+                _build_plan_stream_progress(
+                    "计划预览完成",
+                    event_type="plan.completed",
+                    payload={"strategy": strategy, "items": len(plan_payload.items)},
+                ),
+            )
+            yield encode_sse("plan", plan_payload.model_dump(mode="json"))
+            yield "event: completion\ndata: [DONE]\n\n"
+        except Exception as exc:
+            yield encode_sse(
+                "progress",
+                _build_plan_stream_progress(
+                    f"计划预览失败: {str(exc)}",
+                    event_type="plan.failed",
+                    payload={"error": str(exc)},
+                ),
+            )
+            yield "event: completion\ndata: [DONE]\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
@@ -342,6 +767,7 @@ async def cancel_deep_research(
             {
                 "research_id": research_id,
                 "stage": "control",
+                "event_type": "control.event",
                 "message": "Run cancelled",
                 "timestamp": now,
                 "payload": {},
@@ -378,16 +804,7 @@ async def cancel_deep_research(
     )
 
 
-@router.get(
-    "/deep-research/queue",
-    response_model=DeepResearchQueueStatus,
-    summary="Fetch DeepResearch queue status",
-)
-async def get_deep_research_queue_status(
-    user_id: int = Depends(get_user_id),
-) -> DeepResearchQueueStatus:
-    """Fetch queue status for DeepResearch runs."""
-
+async def _build_queue_status(user_id: Optional[int] = None) -> DeepResearchQueueStatus:
     snapshot = await run_manager.get_queue_snapshot()
 
     def build_item(research_id: str) -> Optional[DeepResearchQueueItem]:
@@ -431,6 +848,33 @@ async def get_deep_research_queue_status(
         active_items=active_items,
         pending_items=pending_items,
     )
+
+
+@router.get(
+    "/deep-research/queue",
+    response_model=DeepResearchQueueStatus,
+    summary="Fetch DeepResearch queue status",
+)
+async def get_deep_research_queue_status(
+    user_id: int = Depends(get_user_id),
+) -> DeepResearchQueueStatus:
+    """Fetch queue status for DeepResearch runs."""
+
+    return await _build_queue_status(user_id=user_id)
+
+
+@router.get(
+    "/deep-research/admin/queue",
+    response_model=DeepResearchQueueStatus,
+    summary="Admin queue status for DeepResearch",
+)
+async def admin_get_deep_research_queue_status(
+    _identity: dict[str, Any] = Depends(get_internal_service_identity),
+) -> DeepResearchQueueStatus:
+    """Fetch global queue status for admin operations."""
+
+    _ = _identity
+    return await _build_queue_status(user_id=None)
 
 
 @router.patch(
@@ -548,18 +992,32 @@ async def get_idea_generation_run(
 @router.get("/deep-research/{research_id}/snapshot", summary="Fetch stored research snapshot")
 async def get_research_snapshot(
     research_id: str,
+    compact: bool = Query(
+        default=False,
+        description="Return compact payload for high-frequency polling",
+    ),
     user_id: int = Depends(get_user_id),
 ) -> Dict[str, Any]:
     """Fetch stored queue/citation/report data for a run."""
 
-    _ = user_id  # kept for future authorization checks
     store = StateStore(Path(settings.DATA_ROOT), research_id)
+    meta = store.load_meta()
+    if not meta:
+        raise HTTPException(status_code=404, detail="Research meta not found")
+    if user_id and str(meta.get("user_id")) != str(user_id):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    citations_payload = store.load_json("citations.json")
+    report_payload = store.load_json("report.json")
+    if compact:
+        citations_payload = _compact_citations_payload(citations_payload)
+        report_payload = _compact_report_payload(report_payload)
     return {
         "research_id": research_id,
+        "meta": _normalize_run_meta_payload(meta),
         "outline": store.load_json("outline.json"),
         "queue": store.load_json("queue.json"),
-        "citations": store.load_json("citations.json"),
-        "report": store.load_json("report.json"),
+        "citations": citations_payload,
+        "report": report_payload,
     }
 
 
@@ -705,6 +1163,93 @@ async def get_research_progress_since(
     )
 
 
+@router.get(
+    "/deep-research/session/{session_id}/runs",
+    response_model=DeepResearchRunList,
+    summary="List DeepResearch runs by session",
+)
+async def list_deep_research_runs_by_session(
+    session_id: str,
+    limit: int = Query(default=40, ge=1, le=300),
+    user_id: int = Depends(get_user_id),
+) -> DeepResearchRunList:
+    """List DeepResearch runs that belong to a specific chat session."""
+
+    items = StateStore.list_runs_by_session(
+        Path(settings.DATA_ROOT),
+        session_id=session_id,
+        user_id=user_id,
+        limit=limit,
+    )
+    normalized_items = [_normalize_run_meta_payload(item) for item in items]
+    return DeepResearchRunList(items=normalized_items)
+
+
+@router.get(
+    "/deep-research/session/{session_id}/context",
+    response_model=DeepResearchSessionContextResponse,
+    summary="Fetch session-level DeepResearch summary context",
+)
+async def get_deep_research_session_context(
+    session_id: str,
+    limit: int = Query(default=2, ge=1, le=10),
+    max_summary_chars: int = Query(default=800, ge=200, le=4000),
+    user_id: int = Depends(get_user_id),
+) -> DeepResearchSessionContextResponse:
+    """Fetch concise report summaries for context reuse in chat."""
+
+    scan_limit = max(limit * 6, limit)
+    run_items = StateStore.list_runs_by_session(
+        Path(settings.DATA_ROOT),
+        session_id=session_id,
+        user_id=user_id,
+        limit=scan_limit,
+    )
+    context_items: list[DeepResearchSessionContextItem] = []
+    for item in run_items:
+        status_value = str(item.get("status") or "").strip().lower()
+        if status_value != DeepResearchStatus.COMPLETED.value:
+            continue
+        research_id = str(item.get("research_id") or "").strip()
+        if not research_id:
+            continue
+        store = StateStore(Path(settings.DATA_ROOT), research_id)
+        report_payload = store.load_json("report.json") or {}
+        report_markdown = report_payload.get("report_markdown")
+        summary_text = _extract_report_summary(
+            report_markdown if isinstance(report_markdown, str) else "",
+            max_chars=max_summary_chars,
+        )
+        topic_text = (
+            str(item.get("topic") or "").strip()
+            or str((item.get("request") or {}).get("topic") or "").strip()
+            or "DeepResearch"
+        )
+        if not summary_text:
+            summary_text = topic_text
+        citations_payload = store.load_json("citations.json") or {}
+        citations = citations_payload.get("citations", []) if isinstance(citations_payload, dict) else []
+        status_member = (
+            DeepResearchStatus(status_value)
+            if status_value in DeepResearchStatus._value2member_map_
+            else DeepResearchStatus.COMPLETED
+        )
+        context_items.append(
+            DeepResearchSessionContextItem(
+                research_id=research_id,
+                topic=topic_text,
+                status=status_member,
+                submitted_at=item.get("submitted_at"),
+                finished_at=item.get("finished_at"),
+                citations_total=len(citations or []),
+                summary=summary_text,
+            )
+        )
+        if len(context_items) >= limit:
+            break
+    return DeepResearchSessionContextResponse(session_id=session_id, items=context_items)
+
+
 @router.get("/deep-research/runs", response_model=DeepResearchRunList, summary="List DeepResearch runs")
 async def list_deep_research_runs(
     user_id: int = Depends(get_user_id),
@@ -715,6 +1260,239 @@ async def list_deep_research_runs(
     if user_id:
         items = [item for item in items if str(item.get("user_id")) == str(user_id)]
     return DeepResearchRunList(items=items)
+
+
+@router.get("/deep-research/admin/runs", summary="Admin list DeepResearch runs")
+async def admin_list_deep_research_runs(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=200),
+    status: Optional[str] = Query(None),
+    user_id: Optional[int] = Query(None),
+    _identity: dict[str, Any] = Depends(get_internal_service_identity),
+) -> Dict[str, Any]:
+    """List global DeepResearch runs for admin operations."""
+
+    _ = _identity
+    items = StateStore.list_runs(Path(settings.DATA_ROOT))
+    if status:
+        normalized_status = status.strip().lower()
+        items = [
+            item
+            for item in items
+            if str(item.get("status", "")).strip().lower() == normalized_status
+        ]
+    if user_id is not None:
+        items = [item for item in items if str(item.get("user_id")) == str(user_id)]
+    items.sort(key=_extract_timestamp, reverse=True)
+    total = len(items)
+    start = (page - 1) * page_size
+    end = start + page_size
+    return {
+        "items": items[start:end],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+@router.post("/deep-research/admin/{research_id}/cancel", summary="Admin cancel DeepResearch run")
+async def admin_cancel_deep_research(
+    research_id: str,
+    payload: Optional[AdminActionRequest] = None,
+    _identity: dict[str, Any] = Depends(get_internal_service_identity),
+) -> DeepResearchSubmitResponse:
+    """Cancel any DeepResearch run from admin control plane."""
+
+    _ = _identity
+    cancel_reason = (payload.reason.strip() if payload and payload.reason else "") or "admin_cancel"
+    store = StateStore(Path(settings.DATA_ROOT), research_id)
+    meta = store.load_meta()
+    if not meta:
+        raise HTTPException(status_code=404, detail="Research meta not found")
+    now = datetime.utcnow().isoformat()
+    cancel_state = await run_manager.cancel(research_id)
+    if cancel_state == "cancelled_queued" or (
+        cancel_state == "not_found" and meta.get("status") == DeepResearchStatus.QUEUED.value
+    ):
+        store.update_meta(
+            {
+                "status": DeepResearchStatus.CANCELLED.value,
+                "finished_at": now,
+                "cancel_reason": cancel_reason,
+                "error": "cancelled",
+            }
+        )
+        store.append_progress(
+            {
+                "research_id": research_id,
+                "stage": "control",
+                "event_type": "control.event",
+                "message": f"Run cancelled by admin: {cancel_reason}",
+                "timestamp": now,
+                "payload": {},
+            }
+        )
+        return DeepResearchSubmitResponse(
+            research_id=research_id,
+            status=DeepResearchStatus.CANCELLED,
+            message="cancelled",
+        )
+    if meta.get("status") in {
+        DeepResearchStatus.QUEUED.value,
+        DeepResearchStatus.RUNNING.value,
+    }:
+        store.update_meta(
+            {
+                "cancel_requested_at": now,
+                "cancel_reason": cancel_reason,
+            }
+        )
+        return DeepResearchSubmitResponse(
+            research_id=research_id,
+            status=DeepResearchStatus.RUNNING,
+            message="cancel_requested",
+        )
+    return DeepResearchSubmitResponse(
+        research_id=research_id,
+        status=(
+            DeepResearchStatus(meta["status"])
+            if meta.get("status") in DeepResearchStatus._value2member_map_
+            else DeepResearchStatus.COMPLETED
+        ),
+        message="already_finished",
+    )
+
+
+@router.post("/deep-research/admin/{research_id}/retry", summary="Admin retry DeepResearch run")
+async def admin_retry_deep_research(
+    research_id: str,
+    _identity: dict[str, Any] = Depends(get_internal_service_identity),
+) -> Dict[str, Any]:
+    """Retry any DeepResearch run from admin control plane."""
+
+    _ = _identity
+    store = StateStore(Path(settings.DATA_ROOT), research_id)
+    meta = store.load_meta()
+    if not meta:
+        raise HTTPException(status_code=404, detail="Research meta not found")
+    source_user_id = int(meta.get("user_id") or 0)
+    if source_user_id <= 0:
+        raise HTTPException(status_code=400, detail="Invalid run owner for retry")
+    request_payload = meta.get("request")
+    if not isinstance(request_payload, dict):
+        raise HTTPException(status_code=400, detail="Stored request payload missing")
+    metadata = request_payload.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    request_payload = {
+        **request_payload,
+        "metadata": {**metadata, "replay_from": research_id, "replay_source": "admin"},
+    }
+    try:
+        payload = DeepResearchRequest(**request_payload)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="Invalid stored request payload") from exc
+    try:
+        replay_id, replay_status, queue_position, active_runs, pending_runs = await run_manager.submit(
+            payload,
+            user_id=source_user_id,
+        )
+    except ValueError as exc:
+        detail = str(exc)
+        if "Queue" in detail:
+            raise HTTPException(status_code=429, detail=detail) from exc
+        raise HTTPException(status_code=409, detail=detail) from exc
+    return {
+        "source_research_id": research_id,
+        "retry_research_id": replay_id,
+        "status": replay_status.value if hasattr(replay_status, "value") else str(replay_status),
+        "queue_position": queue_position,
+        "active_runs": active_runs,
+        "pending_runs": pending_runs,
+    }
+
+
+def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+@router.get("/deep-research/admin/metrics", summary="Admin DeepResearch metrics")
+async def admin_deep_research_metrics(
+    window_hours: int = Query(24, ge=1, le=24 * 30),
+    _identity: dict[str, Any] = Depends(get_internal_service_identity),
+) -> Dict[str, Any]:
+    """Aggregate global DeepResearch metrics for admin dashboards."""
+
+    _ = _identity
+    items = StateStore.list_runs(Path(settings.DATA_ROOT))
+    queue_status = await _build_queue_status(user_id=None)
+    status_counts: Dict[str, int] = {}
+    token_prompt = 0
+    token_completion = 0
+    token_total = 0
+    estimated_cost = 0.0
+    by_model: Dict[str, Dict[str, float]] = {}
+    now = datetime.utcnow()
+    window_runs = 0
+    for item in items:
+        status_key = str(item.get("status") or "unknown").strip().lower() or "unknown"
+        status_counts[status_key] = status_counts.get(status_key, 0) + 1
+        submitted_at = _parse_iso_datetime(
+            str(item.get("submitted_at") or item.get("started_at") or "")
+        )
+        if submitted_at and (now - submitted_at).total_seconds() <= window_hours * 3600:
+            window_runs += 1
+        usage = item.get("token_usage") or {}
+        if isinstance(usage, dict):
+            prompt_tokens = int(usage.get("prompt_tokens") or 0)
+            completion_tokens = int(usage.get("completion_tokens") or 0)
+            total_tokens = int(usage.get("total_tokens") or 0)
+            cost_value = float(usage.get("estimated_cost_usd") or 0.0)
+            token_prompt += prompt_tokens
+            token_completion += completion_tokens
+            token_total += total_tokens
+            estimated_cost += cost_value
+            model_name = str(usage.get("model_name") or usage.get("model") or "").strip()
+            if model_name:
+                model_entry = by_model.setdefault(
+                    model_name,
+                    {
+                        "runs": 0,
+                        "prompt_tokens": 0.0,
+                        "completion_tokens": 0.0,
+                        "total_tokens": 0.0,
+                        "estimated_cost_usd": 0.0,
+                    },
+                )
+                model_entry["runs"] += 1
+                model_entry["prompt_tokens"] += prompt_tokens
+                model_entry["completion_tokens"] += completion_tokens
+                model_entry["total_tokens"] += total_tokens
+                model_entry["estimated_cost_usd"] += cost_value
+    return {
+        "available": True,
+        "runs_total": len(items),
+        "runs_last_window": window_runs,
+        "window_hours": window_hours,
+        "runs_by_status": status_counts,
+        "queue": {
+            "active_runs": queue_status.active_runs,
+            "pending_runs": queue_status.pending_runs,
+            "max_active_runs": queue_status.max_active_runs,
+        },
+        "token_usage": {
+            "prompt_tokens": token_prompt,
+            "completion_tokens": token_completion,
+            "total_tokens": token_total,
+            "estimated_cost_usd": round(estimated_cost, 6),
+            "by_model": by_model,
+        },
+    }
 
 
 def _load_compare_side(research_id: str, user_id: int) -> DeepResearchCompareSide:
@@ -962,7 +1740,7 @@ async def get_deep_research_meta(
         raise HTTPException(status_code=404, detail="Research meta not found")
     if user_id and str(meta.get("user_id")) != str(user_id):
         raise HTTPException(status_code=403, detail="Forbidden")
-    return DeepResearchRunMeta(**meta)
+    return DeepResearchRunMeta(**_normalize_run_meta_payload(meta))
 
 
 @router.get(
@@ -972,6 +1750,7 @@ async def get_deep_research_meta(
 async def stream_research_progress(
     research_id: str,
     request: Request,
+    once: bool = Query(default=False, description="Return one streaming batch then close."),
     user_id: int = Depends(get_user_id_for_stream),
 ) -> StreamingResponse:
     """Stream progress events via server-sent events."""
@@ -992,9 +1771,10 @@ async def stream_research_progress(
     async def event_generator() -> AsyncGenerator[str, None]:
         offset = initial_offset
         last_heartbeat = time.monotonic()
+        # Emit an immediate SSE comment to flush headers and avoid client-side
+        # hangs before the first progress event arrives.
+        yield ": connected\n\n"
         while True:
-            if await request.is_disconnected():
-                break
             events, offset = store.read_progress_since(offset)
             for event, event_offset in events:
                 payload = json.dumps(event, ensure_ascii=False)
@@ -1003,6 +1783,10 @@ async def stream_research_progress(
             if now - last_heartbeat > 15:
                 last_heartbeat = now
                 yield "event: heartbeat\ndata: {}\n\n"
+            if once:
+                break
+            if await request.is_disconnected():
+                break
             await asyncio.sleep(1)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")

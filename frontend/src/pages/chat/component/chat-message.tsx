@@ -1,9 +1,14 @@
 import IconAvatar from '@/assets/chat/avatar.svg'
 import { ChatRole, ChatType } from '@/configs'
-import { FileOutlined } from '@ant-design/icons'
-import { Avatar, Button } from 'antd'
+import {
+  CopyOutlined,
+  EditOutlined,
+  FileOutlined,
+  RedoOutlined,
+} from '@ant-design/icons'
+import { Avatar, Button, Image, Tooltip, message } from 'antd'
 import classNames from 'classnames'
-import { useMemo } from 'react'
+import { useCallback, useMemo } from 'react'
 import { createChatIdText } from '../shared'
 import styles from './chat-message.module.scss'
 import DeepResearchCard from './deep-research-card'
@@ -13,10 +18,44 @@ import ChooseFile from './select-file'
 function UserMessage(props: {
   item: API.ChatItem
   index: number
+  showToolbar?: boolean
   onRetry?: (item: API.ChatItem, index: number) => void
   onResend?: (item: API.ChatItem, index: number) => void
+  onCopyPrompt?: (item: API.ChatItem) => void
 }) {
-  const { item, index, onRetry, onResend } = props
+  const { item, index, showToolbar, onRetry, onResend, onCopyPrompt } = props
+  const messageImages = Array.isArray(item.images) ? item.images : []
+
+  const handleCopyPrompt = useCallback(async () => {
+    if (onCopyPrompt) {
+      onCopyPrompt(item)
+      return
+    }
+    const text = String(item.content || '').trim()
+    if (!text) {
+      message.warning('暂无可复制内容')
+      return
+    }
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text)
+      } else {
+        const textarea = document.createElement('textarea')
+        textarea.value = text
+        textarea.style.position = 'fixed'
+        textarea.style.opacity = '0'
+        textarea.style.left = '-9999px'
+        document.body.appendChild(textarea)
+        textarea.focus()
+        textarea.select()
+        document.execCommand('copy')
+        document.body.removeChild(textarea)
+      }
+      message.success('提示词已复制')
+    } catch {
+      message.error('复制失败，请手动复制')
+    }
+  }, [item, onCopyPrompt])
 
   return (
     <>
@@ -44,21 +83,52 @@ function UserMessage(props: {
               ))}
             </div>
           ) : null}
+          {messageImages.length > 0 ? (
+            <div className={styles['chat-message-item__images']}>
+              <Image.PreviewGroup>
+                {messageImages.map((img) => (
+                  <Image
+                    key={img.id}
+                    src={img.dataUrl}
+                    alt={img.name}
+                    width={36}
+                    height={36}
+                    rootClassName={styles['chat-message-item__image-thumb-wrap']}
+                    preview={{ mask: '预览' }}
+                  />
+                ))}
+              </Image.PreviewGroup>
+            </div>
+          ) : null}
         </div>
       </div>
 
-      {item.message_id ? (
+      {showToolbar ? (
         <div className={styles['chat-message-item__toolbar']}>
-          <Button type="text" size="small" onClick={() => onRetry?.(item, index)}>
-            重新编辑
-          </Button>
-          <Button
-            type="text"
-            size="small"
-            onClick={() => onResend?.(item, index)}
-          >
-            立即重发
-          </Button>
+          <Tooltip title="复制提示词">
+            <Button
+              type="text"
+              size="small"
+              icon={<CopyOutlined />}
+              onClick={handleCopyPrompt}
+            />
+          </Tooltip>
+          <Tooltip title="编辑后继续">
+            <Button
+              type="text"
+              size="small"
+              icon={<EditOutlined />}
+              onClick={() => onRetry?.(item, index)}
+            />
+          </Tooltip>
+          <Tooltip title="立即重发">
+            <Button
+              type="text"
+              size="small"
+              icon={<RedoOutlined />}
+              onClick={() => onResend?.(item, index)}
+            />
+          </Tooltip>
         </div>
       ) : null}
     </>
@@ -75,11 +145,17 @@ function AssistantMessage(props: {
   onDeepResearchCancel?: (item: API.ChatItem) => void
   onDeepResearchEdit?: (item: API.ChatItem) => void
   onDeepResearchRetryPlan?: (item: API.ChatItem) => void
+  onDeepResearchOpenProcess?: (item: API.ChatItem) => void
   onDeepResearchOpenWorkspace?: (item: API.ChatItem) => void
   onDeepResearchExport?: (item: API.ChatItem, format: 'pdf' | 'markdown') => void
   onDeepResearchCopy?: (item: API.ChatItem) => void
   onDeepResearchSaveToNotebook?: (item: API.ChatItem) => void
   onDeepResearchInsertSummary?: (item: API.ChatItem, summary: string) => void
+  onAssistantFeedback?: (
+    item: API.ChatItem,
+    rating: 'thumbs_up' | 'thumbs_down',
+  ) => void
+  feedback?: 'thumbs_up' | 'thumbs_down'
 }) {
   const {
     item,
@@ -91,11 +167,14 @@ function AssistantMessage(props: {
     onDeepResearchCancel,
     onDeepResearchEdit,
     onDeepResearchRetryPlan,
+    onDeepResearchOpenProcess,
     onDeepResearchOpenWorkspace,
     onDeepResearchExport,
     onDeepResearchCopy,
     onDeepResearchSaveToNotebook,
     onDeepResearchInsertSummary,
+    onAssistantFeedback,
+    feedback,
   } = props
 
   const id = useMemo(() => {
@@ -123,7 +202,7 @@ function AssistantMessage(props: {
           switch (item.type) {
             case ChatType.Document:
               if (item.loading && !item.documents?.length) {
-                return <ChooseFile.Searching />
+                return <ChooseFile.Searching message={item.think} />
               } else if (!item.error) {
                 return (
                   <ChooseFile.Complete
@@ -142,6 +221,7 @@ function AssistantMessage(props: {
                   onCancel={onDeepResearchCancel}
                   onEdit={onDeepResearchEdit}
                   onRetryPlan={onDeepResearchRetryPlan}
+                  onOpenProcess={onDeepResearchOpenProcess}
                   onOpenWorkspace={onDeepResearchOpenWorkspace}
                   onExportReport={onDeepResearchExport}
                   onCopyReport={onDeepResearchCopy}
@@ -159,6 +239,8 @@ function AssistantMessage(props: {
             onSend={onSend}
             onRefrence={onRefrence}
             onOpenCitations={onOpenCiations}
+            feedback={feedback}
+            onFeedback={(rating) => onAssistantFeedback?.(item, rating)}
           />
         )}
       </div>
@@ -178,11 +260,17 @@ export default function ChatMessage(props: {
   onDeepResearchCancel?: (item: API.ChatItem) => void
   onDeepResearchEdit?: (item: API.ChatItem) => void
   onDeepResearchRetryPlan?: (item: API.ChatItem) => void
+  onDeepResearchOpenProcess?: (item: API.ChatItem) => void
   onDeepResearchOpenWorkspace?: (item: API.ChatItem) => void
   onDeepResearchExport?: (item: API.ChatItem, format: 'pdf' | 'markdown') => void
   onDeepResearchCopy?: (item: API.ChatItem) => void
   onDeepResearchSaveToNotebook?: (item: API.ChatItem) => void
   onDeepResearchInsertSummary?: (item: API.ChatItem, summary: string) => void
+  onAssistantFeedback?: (
+    item: API.ChatItem,
+    rating: 'thumbs_up' | 'thumbs_down',
+  ) => void
+  feedbackByMessageId?: Record<string, 'thumbs_up' | 'thumbs_down' | undefined>
 }) {
   const {
     list,
@@ -195,22 +283,29 @@ export default function ChatMessage(props: {
     onDeepResearchCancel,
     onDeepResearchEdit,
     onDeepResearchRetryPlan,
+    onDeepResearchOpenProcess,
     onDeepResearchOpenWorkspace,
     onDeepResearchExport,
     onDeepResearchCopy,
     onDeepResearchSaveToNotebook,
     onDeepResearchInsertSummary,
+    onAssistantFeedback,
+    feedbackByMessageId,
   } = props
 
   return (
     <div className={styles['chat-message']}>
       {list.map((item, index) => {
         if (item.role === ChatRole.User) {
+          const nextItem = list[index + 1]
+          const followsDeepResearchCard =
+            nextItem?.role === ChatRole.Assistant && nextItem?.type === ChatType.DeepResearch
           return (
             <UserMessage
               key={item.id}
               item={item}
               index={index}
+              showToolbar={Boolean(item.message_id || followsDeepResearchCard)}
               onRetry={onRetryUserMessage}
               onResend={onResendUserMessage}
             />
@@ -232,11 +327,14 @@ export default function ChatMessage(props: {
             onDeepResearchCancel={onDeepResearchCancel}
             onDeepResearchEdit={onDeepResearchEdit}
             onDeepResearchRetryPlan={onDeepResearchRetryPlan}
+            onDeepResearchOpenProcess={onDeepResearchOpenProcess}
             onDeepResearchOpenWorkspace={onDeepResearchOpenWorkspace}
             onDeepResearchExport={onDeepResearchExport}
             onDeepResearchCopy={onDeepResearchCopy}
             onDeepResearchSaveToNotebook={onDeepResearchSaveToNotebook}
             onDeepResearchInsertSummary={onDeepResearchInsertSummary}
+            onAssistantFeedback={onAssistantFeedback}
+            feedback={item.message_id ? feedbackByMessageId?.[item.message_id] : undefined}
           />
         )
       })}

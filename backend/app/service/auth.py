@@ -2,6 +2,7 @@ from utils.database import get_db, SessionLocal
 from models.user import User
 from utils.password import verify_password
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 from exceptions.auth import AuthError
 from fastapi_jwt import JwtAccessBearerCookie
 import secrets
@@ -10,7 +11,8 @@ import os
 import logging
 from fastapi import Depends, Query, HTTPException, status
 from fastapi_jwt import JwtAuthorizationCredentials
-from typing import Optional
+from functools import lru_cache
+from typing import Any, Optional
 
 # JWT配置
 from core.config import settings
@@ -33,6 +35,129 @@ access_security_optional = JwtAccessBearerCookie(
     auto_error=False,  # 不自动抛出错误，允许我们手动处理
     access_expires_delta=timedelta(days=settings.JWT_ACCESS_TOKEN_EXPIRE_DAYS)
 )
+
+
+def _parse_csv_values(raw_value: Optional[str]) -> set[str]:
+    if not raw_value:
+        return set()
+    return {item.strip() for item in raw_value.split(",") if item and item.strip()}
+
+
+class AdminConsolePrincipal:
+    """独立后台登录主体（不绑定主站 users 表记录）。"""
+
+    def __init__(self, username: str) -> None:
+        self.id = 0
+        self.username = username
+        self.role = "super_admin"
+        self.is_active = True
+
+
+def _admin_console_username() -> str:
+    return (settings.SM_ADMIN_CONSOLE_USERNAME or "").strip()
+
+
+def _admin_console_password() -> str:
+    return settings.SM_ADMIN_CONSOLE_PASSWORD or ""
+
+
+def verify_admin_console_credentials(username: str, password: str) -> bool:
+    expected_username = _admin_console_username()
+    expected_password = _admin_console_password()
+    if not expected_username or not expected_password:
+        return False
+    return secrets.compare_digest(username.strip(), expected_username) and secrets.compare_digest(
+        password,
+        expected_password,
+    )
+
+
+def create_admin_console_token(username: str) -> str:
+    subject = {
+        "user_id": 0,
+        "user_name": username,
+        "admin_username": username,
+        "token_use": "admin_console",
+        "role": "super_admin",
+        "salting": secrets.token_hex(16),
+    }
+    return access_security.create_access_token(subject=subject)
+
+
+def _build_admin_console_principal(payload: dict[str, Any]) -> Optional[AdminConsolePrincipal]:
+    token_use = str(payload.get("token_use") or "").strip().lower()
+    if token_use != "admin_console":
+        return None
+    admin_username = str(payload.get("admin_username") or payload.get("user_name") or "").strip()
+    if not admin_username:
+        return None
+    expected_username = _admin_console_username()
+    if not expected_username:
+        return None
+    if not secrets.compare_digest(admin_username, expected_username):
+        return None
+    return AdminConsolePrincipal(username=admin_username)
+
+
+@lru_cache(maxsize=1)
+def _admin_username_allowlist() -> set[str]:
+    return {name.lower() for name in _parse_csv_values(settings.SM_ADMIN_USERNAMES)}
+
+
+@lru_cache(maxsize=1)
+def _admin_user_id_allowlist() -> set[int]:
+    ids: set[int] = set()
+    for item in _parse_csv_values(settings.SM_ADMIN_USER_IDS):
+        try:
+            ids.add(int(item))
+        except ValueError:
+            logging.warning("忽略非法 SM_ADMIN_USER_IDS 配置项: %s", item)
+    return ids
+
+
+@lru_cache(maxsize=1)
+def _internal_service_allowlist() -> set[str]:
+    return {name.lower() for name in _parse_csv_values(settings.SM_INTERNAL_SERVICE_ALLOWLIST)}
+
+
+def get_user_role(user: User) -> str:
+    role = (getattr(user, "role", "") or "user").strip().lower()
+    if role in {"user", "admin", "super_admin"}:
+        return role
+    return "user"
+
+
+def is_user_super_admin(user: User) -> bool:
+    return get_user_role(user) == "super_admin"
+
+
+def is_internal_service_token_payload(payload: dict[str, Any]) -> bool:
+    token_use = str(payload.get("token_use", "") or "").strip().lower()
+    if token_use != "internal_service":
+        return False
+    service_name = str(payload.get("service_name", "") or "").strip().lower()
+    if not service_name:
+        return False
+    allowlist = _internal_service_allowlist()
+    if allowlist and service_name not in allowlist:
+        return False
+    return True
+
+
+def create_internal_service_token(
+    *,
+    service_name: str,
+    acting_user_id: Optional[int] = None,
+) -> str:
+    normalized_name = (service_name or "").strip().lower() or "service"
+    subject = {
+        "user_id": int(acting_user_id or 0),
+        "user_name": normalized_name,
+        "service_name": normalized_name,
+        "token_use": "internal_service",
+        "salting": secrets.token_hex(8),
+    }
+    return access_security.create_access_token(subject=subject)
 
 def create_token(user_id: int, user_name: str, salting: str = ""):
     # 生成token的主体部分，包含用户名和随机盐值
@@ -64,11 +189,16 @@ def authenticate(username: str, password: str) -> str:
     """
     db = next(get_db())
     try:
+        if _admin_console_username() and username.strip() == _admin_console_username():
+            raise AuthError("该账号仅用于后台管理，请前往 /admin/login 登录")
         # 查询用户
         user = db.query(User).filter(User.username == username).first()
         
         if not user:
             raise AuthError("认证失败")
+        is_active = bool(getattr(user, "is_active", True))
+        if not is_active:
+            raise AuthError("账号已被禁用")
         
         # 验证密码
         if not verify_password(password, user.password_hash):
@@ -103,6 +233,8 @@ def register_user(username: str, password: str):
     logger.info(f"开始注册用户: {username}")
     db = next(get_db())
     try:
+        if _admin_console_username() and username.strip() == _admin_console_username():
+            raise AuthError("该用户名保留给后台管理系统")
         # 检查用户名是否已存在
         logger.info("检查用户名是否已存在...")
         existing_user = db.query(User).filter(User.username == username).first()
@@ -148,18 +280,111 @@ def get_current_user(subject: "JwtAuthorizationCredentials" = Depends(access_sec
         payload = subject.subject
         user_id = payload.get("user_id")
         if user_id is None:
-            raise AuthError("无效的Token, user_id 不存在")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token: user_id missing",
+            )
         
         user = db.query(User).filter(User.id == user_id).first()
         if not user:
-            raise AuthError("用户不存在")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not found",
+            )
+        is_active = bool(getattr(user, "is_active", True))
+        if not is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="User is disabled",
+            )
         
         return user
+    except HTTPException:
+        raise
     except Exception as e:
-        # 重新抛出 AuthError 以便全局异常处理器可以捕获
-        raise AuthError(str(e))
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid token: {str(e)}",
+        )
     finally:
         db.close()
+
+
+def is_user_admin(user: User) -> bool:
+    role = get_user_role(user)
+    if role in {"admin", "super_admin"}:
+        return True
+    username_allowlist = _admin_username_allowlist()
+    if "*" in username_allowlist:
+        return True
+    username = (getattr(user, "username", "") or "").strip().lower()
+    user_id = getattr(user, "id", None)
+    if username and username in username_allowlist:
+        return True
+    if user_id is not None:
+        try:
+            user_id_int = int(user_id)
+        except (TypeError, ValueError):
+            user_id_int = None
+        if user_id_int is not None and user_id_int in _admin_user_id_allowlist():
+            return True
+    return False
+
+
+def get_current_admin_user(
+    subject: "JwtAuthorizationCredentials" = Depends(access_security),
+    db: Session = Depends(get_db),
+) -> User | AdminConsolePrincipal:
+    """管理员鉴权：优先独立 admin_console token，兼容历史 admin user token。"""
+    payload = subject.subject or {}
+    admin_console_principal = _build_admin_console_principal(payload)
+    if admin_console_principal is not None:
+        # 为兼容依赖 User 实例的历史管理接口，优先映射到白名单中的真实用户。
+        mapped_admin_ids = sorted(_admin_user_id_allowlist())
+        if mapped_admin_ids:
+            mapped_user = db.query(User).filter(User.id == mapped_admin_ids[0]).first()
+            if mapped_user and bool(getattr(mapped_user, "is_active", True)):
+                return mapped_user
+        return admin_console_principal
+
+    user_id = payload.get("user_id")
+    if user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid admin token: user_id missing",
+        )
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User not found",
+        )
+    is_active = bool(getattr(user, "is_active", True))
+    if not is_active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="User is disabled",
+        )
+    if is_user_admin(user):
+        return user
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Admin access required",
+    )
+
+
+def get_current_admin_console_user(
+    subject: "JwtAuthorizationCredentials" = Depends(access_security),
+) -> AdminConsolePrincipal:
+    """仅接受独立后台 token。"""
+    payload = subject.subject or {}
+    principal = _build_admin_console_principal(payload)
+    if principal is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Admin console token required",
+        )
+    return principal
 
 
 def get_current_user_optional_query_token(
@@ -208,6 +433,12 @@ def get_current_user_optional_query_token(
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="User not found"
+            )
+        is_active = bool(getattr(user, "is_active", True))
+        if not is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="User is disabled",
             )
         
         return user

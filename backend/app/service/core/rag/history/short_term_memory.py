@@ -11,6 +11,9 @@ from sqlalchemy.orm import Session
 
 from core.config import settings
 from models.message import Message
+from service.core.conversation.internal_history_filter import (
+    is_internal_deep_research_artifact,
+)
 from service.core.rag.nlp.model import generate_embedding
 
 
@@ -46,6 +49,7 @@ class ShortTermMemoryBuilder:
         *,
         session_id: str,
         question: str,
+        enable_semantic: bool = True,
     ) -> Tuple[List[Dict[str, str]], ShortTermMemoryDebug, Optional[List[float]]]:
         """返回可注入到 LLM 的 history 列表、调试信息以及 query embedding。"""
 
@@ -60,6 +64,15 @@ class ShortTermMemoryBuilder:
             .limit(scan_limit)
             .all()
         )
+        messages = [
+            msg
+            for msg in messages
+            if not is_internal_deep_research_artifact(
+                user_question=msg.user_question,
+                model_answer=msg.model_answer,
+                retrieval_content=msg.retrieval_content,
+            )
+        ]
         total_messages = len(messages)
 
         if total_messages == 0:
@@ -83,7 +96,7 @@ class ShortTermMemoryBuilder:
                 pass
             return [], debug, self._compute_query_embedding(question)
 
-        query_embedding = self._compute_query_embedding(question)
+        query_embedding = self._compute_query_embedding(question) if enable_semantic else None
 
         lambda_decay = float(getattr(settings, "SM_STM_SCORE_DECAY_LAMBDA", 0.1) or 0.1)
         summary_threshold = float(getattr(settings, "SM_STM_SCORE_SUMMARY_THRESHOLD", 0.4) or 0.4)
@@ -92,7 +105,6 @@ class ShortTermMemoryBuilder:
         long_msg_threshold = max(int(getattr(settings, "SM_STM_LONG_MSG_THRESHOLD", 200) or 200), 50)
 
         now = datetime.now(timezone.utc)
-        updated = False
         scored: List[Tuple[Message, float, float, float]] = []  # (message, score, semantic, time)
 
         for msg in messages:
@@ -116,18 +128,9 @@ class ShortTermMemoryBuilder:
             elif embedding is None and msg.user_question:
                 # embedding 生成失败，已记录日志
                 pass
-            if msg.user_summary is None and msg.user_question and len(msg.user_question) > long_msg_threshold:
-                msg.user_summary = self._build_summary(msg.user_question, long_msg_threshold)
-                updated = True
-            if msg.assistant_summary is None and msg.model_answer and len(msg.model_answer) > long_msg_threshold:
-                msg.assistant_summary = self._build_summary(msg.model_answer, long_msg_threshold)
-                updated = True
-
-        if updated:
-            try:
-                self.db.flush()
-            except Exception as exc:
-                self.logger.debug("STM flush failed: %s", exc)
+            # NOTE:
+            # STM 是读路径，不在这里写回 summary。
+            # 之前在此处 flush 会在长流式请求期间持有 messages 行锁，导致会话删除/回卷被阻塞。
 
         scored.sort(key=lambda item: item[1], reverse=True)
         selected_msgs = scored[:max_selected]
@@ -224,6 +227,8 @@ class ShortTermMemoryBuilder:
     def _ensure_message_embedding(self, msg: Message) -> Optional[List[float]]:
         if msg.user_embedding is not None:
             return list(msg.user_embedding)
+        if not bool(getattr(settings, "SM_STM_EMBED_MISSING_ON_READ", False)):
+            return None
         text = (msg.user_question or "").strip()
         if not text:
             return None

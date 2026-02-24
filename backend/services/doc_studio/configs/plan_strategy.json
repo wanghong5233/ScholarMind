@@ -40,7 +40,22 @@
         {
           "tool": "analyze_document_tool",
           "optional": true,
-          "condition": "selection_length>200"
+          "condition": "selection_length>200 || has_file_mentions"
+        },
+        {
+          "tool": "semantic_code_search_tool",
+          "optional": true,
+          "condition": "has_file_mentions && !has_selection"
+        },
+        {
+          "tool": "search_codebase_tool",
+          "optional": true,
+          "condition": "has_file_mentions && !has_selection"
+        },
+        {
+          "tool": "read_file_range_tool",
+          "optional": true,
+          "condition": "has_file_mentions && !has_selection"
         },
         {
           "tool": "search_papers_tool",
@@ -53,16 +68,21 @@
           "condition": "has_selection"
         },
         {
+          "tool": "rewrite_line_range_tool",
+          "optional": false,
+          "condition": "has_file_mentions && !has_selection"
+        },
+        {
           "tool": "insert_text_tool",
           "optional": false,
-          "condition": "!has_selection"
+          "condition": "!has_selection && !has_file_mentions"
         },
         {
           "tool": "reply_to_user_tool",
           "optional": false
         }
       ],
-      "notes": "有选区则重写选区，否则插入新内容"
+      "notes": "有选区优先 rewrite_selection_tool。仅 @file 且无选区时，先 semantic_code_search_tool + search_codebase_tool + read_file_range_tool 迭代定位，再用 rewrite_line_range_tool 精确修改；仅在无 @file 场景才使用 insert_text_tool。整文件重写可使用 insert_text_tool 的 replace_all。"
     },
     "citation": {
       "description": "处理引用/参考文献",
@@ -84,15 +104,39 @@
       "notes": "优先确保定位引用位置，再执行引用操作"
     },
     "file_op": {
-      "description": "执行文件创建/删除等操作",
-      "max_iterations": 4,
+      "description": "执行目录浏览与文件/目录操作（创建/移动/删除）",
+      "max_iterations": 6,
       "tool_sequence": [
+        {
+          "tool": "list_workspace_tree_tool",
+          "optional": false
+        },
+        {
+          "tool": "create_directory_tool",
+          "optional": true,
+          "condition": "wants_directory_create"
+        },
+        {
+          "tool": "create_file_tool",
+          "optional": true,
+          "condition": "wants_file_create"
+        },
+        {
+          "tool": "rename_move_path_tool",
+          "optional": true,
+          "condition": "wants_move_rename"
+        },
+        {
+          "tool": "delete_path_tool",
+          "optional": true,
+          "condition": "wants_delete_path"
+        },
         {
           "tool": "reply_to_user_tool",
           "optional": false
         }
       ],
-      "notes": "文件操作由系统直接执行，完成后立即回复"
+      "notes": "文件操作遵循“先浏览目录，再执行创建/移动/删除，最后回复”的流程。"
     }
   }
 }

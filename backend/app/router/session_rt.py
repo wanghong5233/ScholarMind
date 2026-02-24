@@ -1,12 +1,22 @@
 from typing import List as _List, Optional
 
-from fastapi import APIRouter, Depends, BackgroundTasks, UploadFile, File, Query, Body
+from fastapi import APIRouter, Depends, BackgroundTasks, UploadFile, File, Query, Body, HTTPException
 from sqlalchemy.orm import Session
 
 from core.config import settings
 from models.user import User
 from schemas.rag import Chunk as RagChunk
-from schemas.session import CreateSessionRequest, CreateSessionResponse, SessionDefaults, SessionDetail, CompareRequest, CompareResponse
+from schemas.session import (
+    AskRequest,
+    CreateSessionRequest,
+    CreateSessionResponse,
+    SessionDefaults,
+    SessionDetail,
+    SessionRenameRequest,
+    SessionRewindRequest,
+    CompareRequest,
+    CompareResponse,
+)
 from service.auth import get_current_user
 from service.core.conversation.chat_ask_orchestrator import ChatAskOrchestrator
 from service.core.conversation.chat_compare_orchestrator import ChatCompareOrchestrator
@@ -37,11 +47,11 @@ def create_session(
     db: Session = Depends(get_db),
 ):
     """
-    创建新会话（安全：会话表新增列为可空，先校验再持久化）。
+    创建新会话（每个 session 必绑定专属 Session KB）。
 
-    - 临时会话: ephemeral=True 时，创建临时知识库；
-    - 绑定会话: 提供 kbId 时校验归属；
-    - 两者必须至少满足其一。
+    - 会话创建时始终生成 Session KB；
+    - 可选提供 kbId 作为默认关联知识库（用户知识库）；
+    - Ask/Agent 共用同一会话记忆与会话知识库。
     """
     service = SessionManagementService(db=db, current_user=current_user)
     return service.create_session(req=req)
@@ -56,8 +66,8 @@ def create_and_upload(
     db: Session = Depends(get_db),
     background_tasks: BackgroundTasks = None,
 ):
-    """若未传 session_id 则创建临时会话并绑定临时 KB，然后上传。
-    若传入 session_id 则复用其 KB 直接上传。"""
+    """若未传 session_id 则创建新会话并绑定 Session KB，然后上传。
+    若传入 session_id 则复用其 Session KB 直接上传。"""
     service = SessionUploadService(db=db, current_user=current_user)
     return service.create_and_upload(
         session_id=session_id,
@@ -75,6 +85,17 @@ def get_session_detail(
 ):
     service = SessionManagementService(db=db, current_user=current_user)
     return service.get_session_detail(session_id=session_id)
+
+
+@router.put("/{session_id}/name", response_model=SessionDetail, summary="重命名会话")
+def rename_session(
+    session_id: str,
+    payload: SessionRenameRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    service = SessionManagementService(db=db, current_user=current_user)
+    return service.rename_session(session_id=session_id, session_name=payload.session_name)
 
 
 @router.get("/{session_id}/defaults", response_model=SessionDefaults)
@@ -165,15 +186,69 @@ def delete_session(
     return service.delete_session(session_id=session_id)
 
 
+@router.post("/{session_id}/rewind", summary="回卷会话历史（删除指定节点及之后消息）")
+def rewind_session_messages(
+    session_id: str,
+    payload: SessionRewindRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    service = SessionManagementService(db=db, current_user=current_user)
+    if payload.before_message_id:
+        return service.rewind_messages(
+            session_id=session_id,
+            before_message_id=payload.before_message_id,
+        )
+    if payload.keep_messages is None:
+        raise HTTPException(status_code=400, detail="keep_messages or before_message_id is required")
+    return service.rewind_messages(
+        session_id=session_id,
+        keep_messages=payload.keep_messages,
+    )
+
+
 @router.post("/{session_id}/ask", summary="RAG 基础问答（流式/非流式）")
 def ask(
     session_id: str,
-    payload: dict = Body(..., description="{ question: string, stream?: boolean, focusDocIds?: number[], topK?: number, temperature?: number, maxTokens?: number, compressHistory?: boolean }"),
+    payload: AskRequest = Body(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     orchestrator = ChatAskOrchestrator(db=db, current_user=current_user)
-    return orchestrator.handle(session_id=session_id, payload=payload)
+    return orchestrator.handle(
+        session_id=session_id,
+        payload=payload.model_dump(exclude_none=True),
+    )
+
+
+@router.get("/{session_id}/ask/replay/{run_id}", summary="按 run_id+seq 回放问答流事件")
+def replay_ask_stream(
+    session_id: str,
+    run_id: str,
+    since_seq: int = Query(-1, ge=-1),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    orchestrator = ChatAskOrchestrator(db=db, current_user=current_user)
+    return orchestrator.replay_stream(
+        session_id=session_id,
+        run_id=run_id,
+        since_seq=since_seq,
+    )
+
+
+@router.post("/{session_id}/ask/cancel/{run_id}", summary="取消指定问答流任务")
+def cancel_ask_stream(
+    session_id: str,
+    run_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    orchestrator = ChatAskOrchestrator(db=db, current_user=current_user)
+    return orchestrator.cancel_run(
+        session_id=session_id,
+        run_id=run_id,
+    )
 
 
 @router.post("/{session_id}/compare", response_model=CompareResponse, summary="跨论文对比（生成 Markdown 表格 + citations）")

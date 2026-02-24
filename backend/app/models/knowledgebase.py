@@ -19,7 +19,7 @@ class KnowledgeBase(Base):
     created_at = Column(TIMESTAMP, nullable=False, server_default=func.now(), comment="创建时间")
     updated_at = Column(TIMESTAMP, nullable=False, server_default=func.now(), onupdate=func.now(), comment="最后更新时间")
 
-    # 是否为临时知识库（会话内短期使用）
+    # 会话知识库标记（生命周期与 session 绑定；会话删除时一并清理）
     is_ephemeral = Column(Boolean, nullable=False, server_default='false')
 
     # 建立与User模型的关系

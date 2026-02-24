@@ -1,5 +1,5 @@
 import classNames from 'classnames'
-import { PropsWithChildren, ReactNode } from 'react'
+import { PropsWithChildren, ReactNode, type CSSProperties } from 'react'
 import './index.scss'
 
 export default function ComPageLayout(
@@ -7,6 +7,7 @@ export default function ComPageLayout(
     className?: string
     right?: ReactNode
     sender?: ReactNode
+    style?: CSSProperties
   }>,
 ) {
   const { children, className, right, sender, ...rest } = props

@@ -90,6 +90,8 @@ declare namespace DocStudioAPI {
     original_content: string
     modified_content: string
     is_truncated?: boolean
+    added_lines?: number
+    removed_lines?: number
   }
 
   interface AgentPlanStatus {
@@ -192,6 +194,9 @@ declare namespace DocStudioAPI {
     success: boolean
     data?: {
       compiled: boolean
+      compile_format?: 'latex' | 'markdown' | 'plaintext' | string
+      target_path?: string
+      preview_source?: string
       pdf_path?: string | null
       errors?: string[]
       warnings?: string[]

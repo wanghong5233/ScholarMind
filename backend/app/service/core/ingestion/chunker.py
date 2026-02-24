@@ -205,6 +205,18 @@ class RecursiveCharacterChunker(Chunker):
                 continue
             # Chunker 不负责过滤多模态块，只负责切分
             # 多模态块直接保留，由 Indexer 统一过滤
+            if _is_multimodal_block(block):
+                results.append(
+                    _produce_chunk(
+                        block=block,
+                        text=text,
+                        index=1,
+                        total=1,
+                        start=0,
+                        end=len(text),
+                    )
+                )
+                continue
             pieces = self._split_block(text)
             total = len(pieces)
             for idx, (chunk_text, start, end) in enumerate(pieces, start=1):
@@ -354,6 +366,18 @@ class SemanticAwareChunker(Chunker):
 
             # Chunker 不负责过滤多模态块，只负责切分
             # 多模态块直接保留，由 Indexer 统一过滤
+            if _is_multimodal_block(block):
+                final_results.append(
+                    _produce_chunk(
+                        block=block,
+                        text=text,
+                        index=1,
+                        total=1,
+                        start=0,
+                        end=len(text),
+                    )
+                )
+                continue
 
             if len(text) <= self.max_chunk_chars:
                 final_results.append(

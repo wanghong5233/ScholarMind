@@ -1,4 +1,5 @@
 import { AxiosRequestConfig } from 'axios'
+import { withAdminAuth } from './adminAuthConfig'
 import { request } from './request'
 
 export interface KnowledgeBase {
@@ -267,10 +268,14 @@ export function getDocumentParsePreview(
 ) {
   const { kbId, docId, ...rest } = params
   return request.get<DocumentParsePreviewResponse>(
-    `knowledgebases/${kbId}/documents/${docId}/parse-preview`,
-    {
+    'admin/documents/parse-preview',
+    withAdminAuth({
       ...options,
-      params: rest,
-    },
+      params: {
+        kb_id: kbId,
+        doc_id: docId,
+        ...rest,
+      },
+    }),
   )
 }

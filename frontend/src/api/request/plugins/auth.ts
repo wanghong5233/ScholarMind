@@ -17,6 +17,9 @@ const blackList = [
   '/users/sts-token',
   'users/sts-token',
   '/api/users/sts-token',
+  '/admin/auth/login',
+  'admin/auth/login',
+  '/api/admin/auth/login',
 ]
 
 // 延迟导入 router 以避免循环依赖
@@ -48,6 +51,9 @@ export const authPlugin: IRequestPlugin = {
         let message: string
         switch (code) {
           case 401:
+            if (url.includes('/admin/') || url.startsWith('admin/')) {
+              return Promise.reject(error)
+            }
             // token 失效
             userActions.setToken('')
             const router = await getRouter()

@@ -14,7 +14,7 @@ from schemas.retrieval_debug import (
     RetrievalEvalRunRequest,
     RetrievalEvalRunResponse,
 )
-from service.auth import get_current_user
+from service.auth import get_current_admin_user
 from service.core.conversation.retrieval_compare_service import RetrievalCompareService
 from service.core.conversation.retrieval_dashboard_service import RetrievalDashboardService
 from service.core.conversation.retrieval_eval_service import RetrievalEvalService
@@ -34,7 +34,7 @@ router = APIRouter()
 def retrieval_preview(
     payload: RetrievalPreviewRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin_user),
 ) -> RetrievalDebugResponse:
     service = RetrievalPreviewService(db=db, current_user=current_user)
     return service.handle(payload=payload)
@@ -49,7 +49,7 @@ def retrieval_preview(
 def retrieval_compare(
     payload: RetrievalCompareRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin_user),
 ) -> RetrievalCompareResponse:
     service = RetrievalCompareService(db=db, current_user=current_user)
     return service.handle(payload=payload)
@@ -64,7 +64,7 @@ def retrieval_compare(
 def retrieval_dashboard(
     payload: RetrievalDashboardRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin_user),
 ) -> RetrievalDashboardResponse:
     service = RetrievalDashboardService(db=db, current_user=current_user)
     return service.handle(payload=payload)
@@ -76,7 +76,7 @@ def retrieval_dashboard(
 )
 def retrieval_eval_sets(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin_user),
 ) -> dict:
     service = RetrievalEvalService(db=db, current_user=current_user)
     return {"sets": service.list_eval_sets()}
@@ -91,7 +91,7 @@ def retrieval_eval_sets(
 def retrieval_eval(
     payload: RetrievalEvalRunRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin_user),
 ) -> RetrievalEvalRunResponse:
     service = RetrievalEvalService(db=db, current_user=current_user)
     return service.run(payload=payload)

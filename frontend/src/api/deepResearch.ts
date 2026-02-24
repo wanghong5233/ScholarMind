@@ -1,4 +1,5 @@
 import { AxiosRequestConfig } from 'axios'
+import { userState } from '@/store/user'
 import { request } from './request'
 
 const DEEP_RESEARCH_BASE =
@@ -35,6 +36,8 @@ export interface DeepResearchRequest {
   session_id?: string
   language?: string
   report_style?: string
+  llm_provider?: 'dashscope' | 'openai'
+  llm_model?: string
   metadata?: Record<string, any>
 }
 
@@ -153,6 +156,21 @@ export interface DeepResearchRunList {
   items: DeepResearchRunMeta[]
 }
 
+export interface DeepResearchSessionContextItem {
+  research_id: string
+  topic: string
+  status: DeepResearchStatus | string
+  submitted_at?: string
+  finished_at?: string
+  citations_total: number
+  summary: string
+}
+
+export interface DeepResearchSessionContextResponse {
+  session_id: string
+  items: DeepResearchSessionContextItem[]
+}
+
 export interface DeepResearchArchive {
   research_id: string
   meta: DeepResearchRunMeta
@@ -236,10 +254,15 @@ export interface DeepResearchReportPayload {
   research_id?: string
   status?: string
   report_markdown?: string
+  report_markdown_truncated?: boolean
+  report_markdown_full_chars?: number
   outline?: string[]
   notes?: string[]
   citation_table?: string[]
   draft_markdown?: string
+  draft_markdown_truncated?: boolean
+  draft_markdown_full_chars?: number
+  snapshot_compact?: boolean
   summary?: DeepResearchRunSummary
   trace?: DeepResearchTrace
   report_details?: DeepResearchReportDetails
@@ -338,6 +361,7 @@ export interface IdeaGenerationRunDetail {
 export interface ProgressEvent {
   research_id: string
   stage: string
+  event_type?: string
   message: string
   timestamp?: string
   payload?: Record<string, any>
@@ -351,6 +375,7 @@ export interface DeepResearchProgress {
 
 export interface DeepResearchSnapshot {
   research_id: string
+  meta?: DeepResearchRunMeta
   outline?: DeepResearchPlan
   queue?: DeepResearchTrace['queue']
   citations?: Record<string, any>
@@ -440,10 +465,20 @@ export function getDeepResearchProgressSince(
   )
 }
 
-export function getDeepResearchSnapshot(researchId: string, options?: AxiosRequestConfig) {
+export function getDeepResearchSnapshot(
+  researchId: string,
+  options?: AxiosRequestConfig & { compact?: boolean },
+) {
+  const { compact, ...axiosOptions } = options ?? {}
   return request.get<DeepResearchSnapshot>(
     `/deep-research/${researchId}/snapshot`,
-    withDeepResearchConfig(options),
+    withDeepResearchConfig({
+      ...axiosOptions,
+      params: {
+        ...(axiosOptions.params ?? {}),
+        compact: compact ? 'true' : undefined,
+      },
+    }),
   )
 }
 
@@ -493,7 +528,16 @@ export function getIdeaGenerationRun(ideaId: string, options?: AxiosRequestConfi
 
 export function getDeepResearchProgressStreamUrl(researchId: string) {
   const base = DEEP_RESEARCH_BASE.replace(/\/$/, '')
-  return `${base}/deep-research/${encodeURIComponent(researchId)}/progress/stream`
+  const streamUrl = `${base}/deep-research/${encodeURIComponent(researchId)}/progress/stream`
+  const token = typeof userState.token === 'string' ? userState.token.trim() : ''
+  if (!token) return streamUrl
+  const sep = streamUrl.includes('?') ? '&' : '?'
+  return `${streamUrl}${sep}token=${encodeURIComponent(token)}`
+}
+
+export function getDeepResearchPlanStreamUrl() {
+  const base = DEEP_RESEARCH_BASE.replace(/\/$/, '')
+  return `${base}/deep-research/plan/stream`
 }
 
 export function getDeepResearchExportUrl(
@@ -504,8 +548,60 @@ export function getDeepResearchExportUrl(
   return `${base}/deep-research/${encodeURIComponent(researchId)}/export?format=${format}`
 }
 
+export function exportDeepResearchReport(
+  researchId: string,
+  format: 'markdown' | 'html' | 'pdf' = 'markdown',
+  options?: AxiosRequestConfig,
+) {
+  return request.get<Blob>(
+    `/deep-research/${encodeURIComponent(researchId)}/export`,
+    withDeepResearchConfig({
+      ...options,
+      responseType: 'blob',
+      params: {
+        ...(options?.params ?? {}),
+        format,
+      },
+    }),
+  )
+}
+
 export function listDeepResearchRuns(options?: AxiosRequestConfig) {
   return request.get<DeepResearchRunList>('/deep-research/runs', withDeepResearchConfig(options))
+}
+
+export function listDeepResearchRunsBySession(
+  sessionId: string,
+  limit = 40,
+  options?: AxiosRequestConfig,
+) {
+  return request.get<DeepResearchRunList>(
+    `/deep-research/session/${encodeURIComponent(sessionId)}/runs`,
+    withDeepResearchConfig({
+      ...options,
+      params: {
+        ...(options?.params ?? {}),
+        limit,
+      },
+    }),
+  )
+}
+
+export function getDeepResearchSessionContext(
+  sessionId: string,
+  params?: { limit?: number; max_summary_chars?: number },
+  options?: AxiosRequestConfig,
+) {
+  return request.get<DeepResearchSessionContextResponse>(
+    `/deep-research/session/${encodeURIComponent(sessionId)}/context`,
+    withDeepResearchConfig({
+      ...options,
+      params: {
+        ...(options?.params ?? {}),
+        ...(params ?? {}),
+      },
+    }),
+  )
 }
 
 export function getDeepResearchQueueStatus(options?: AxiosRequestConfig) {

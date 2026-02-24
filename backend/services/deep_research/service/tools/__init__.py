@@ -5,6 +5,7 @@ from service.tools.code_exec_tool import CodeExecTool
 from service.tools.compare_tool import CompareTool
 from service.tools.rag_ask_tool import RagAskTool
 from service.tools.paper_search_tool import PaperSearchTool
+from service.tools.web_content_tools import WebFindInPageTool, WebOpenPageTool
 from service.tools.web_search_tool import WebSearchTool
 
 __all__ = [
@@ -16,5 +17,7 @@ __all__ = [
     "CompareTool",
     "RagAskTool",
     "PaperSearchTool",
+    "WebOpenPageTool",
+    "WebFindInPageTool",
     "WebSearchTool",
 ]

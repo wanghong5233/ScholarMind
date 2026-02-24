@@ -11,6 +11,10 @@ from sqlalchemy.orm import Session
 
 from models.knowledgebase import KnowledgeBase
 from schemas.message import FilestResponse, SessionListResponse, SessionResponse
+from service.core.conversation.internal_history_filter import (
+    is_internal_deep_research_artifact,
+    purge_internal_deep_research_artifacts,
+)
 
 
 class HistoryService:
@@ -59,6 +63,8 @@ class HistoryService:
             if not user_id:
                 raise HTTPException(status_code=401, detail="Invalid authentication credentials")
 
+            purge_internal_deep_research_artifacts(self.db, session_id=session_id)
+
             messages_data = self.db.execute(
                 text(
                     """
@@ -79,6 +85,12 @@ class HistoryService:
             messages = []
             import json as _json
             for m in messages_data:
+                if is_internal_deep_research_artifact(
+                    user_question=m.user_question,
+                    model_answer=m.model_answer,
+                    retrieval_content=m.retrieval_content,
+                ):
+                    continue
                 docs_field = None
                 try:
                     if m.retrieval_content:
@@ -110,17 +122,30 @@ class HistoryService:
                 detail=f"Failed to retrieve messages: {str(exc)}",
             ) from exc
 
-    def get_sessions_by_user_id(self) -> SessionListResponse:
+    def get_sessions_by_user_id(self, *, surface: str | None = None) -> SessionListResponse:
         """Return sessions for the authenticated user."""
         try:
             user_id = self._get_user_id()
             if not user_id:
                 raise HTTPException(status_code=401, detail="Invalid authentication credentials")
 
-            sessions_data = self.db.execute(
-                text("SELECT * FROM sessions WHERE user_id = :user_id"),
-                {"user_id": user_id},
-            ).fetchall()
+            if surface:
+                sessions_data = self.db.execute(
+                    text(
+                        """
+                        SELECT *
+                          FROM sessions
+                         WHERE user_id = :user_id
+                           AND surface = :surface
+                        """
+                    ),
+                    {"user_id": user_id, "surface": surface},
+                ).fetchall()
+            else:
+                sessions_data = self.db.execute(
+                    text("SELECT * FROM sessions WHERE user_id = :user_id"),
+                    {"user_id": user_id},
+                ).fetchall()
 
             sessions = []
             for session in sessions_data:
@@ -129,6 +154,7 @@ class HistoryService:
                         session_id=session.session_id,
                         session_name=session.session_name,
                         user_id=session.user_id,
+                        surface=(getattr(session, "surface", None) or "deep_chat"),
                         created_at=session.created_at.strftime("%Y-%m-%d %H:%M:%S"),
                         updated_at=session.updated_at.strftime("%Y-%m-%d %H:%M:%S"),
                     )

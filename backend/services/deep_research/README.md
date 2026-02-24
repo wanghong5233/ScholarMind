@@ -125,7 +125,7 @@ Set the following environment variables to enable LLM-based report generation (O
 - `DASHSCOPE_MODEL_NAME=qwen-plus`
 - `OPENAI_API_KEY=...` (optional)
 - `OPENAI_BASE_URL=https://api.openai.com/v1` (optional)
-- `OPENAI_MODEL_NAME=gpt-4o` (optional)
+- `OPENAI_MODEL_NAME=gpt-5.2` (optional)
 
 ## Research Decision LLM (Optional)
 Enable LLM-driven tool selection and sufficiency checks:

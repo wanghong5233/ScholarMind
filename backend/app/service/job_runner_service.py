@@ -20,6 +20,9 @@ def execute_job(job_id: int, handler_cls: Type[BaseJobHandler]):
         job = db.query(Job).filter(Job.id == job_id).first()
         if not job:
             return
+        if (job.status or "").lower() == JobStatus.CANCELLED.value:
+            log.info("JobRunner: skip cancelled job_id=%s", job_id)
+            return
 
         job_service.update_progress(db, job_id=job.id, user_id=job.user_id, status=JobStatus.RUNNING.value, progress=0)
         try:
@@ -38,6 +41,10 @@ def execute_job(job_id: int, handler_cls: Type[BaseJobHandler]):
             if result.failed == 0
             else (JobStatus.PARTIAL.value if result.succeeded > 0 else JobStatus.FAILED.value)
         )
+        latest_job = db.query(Job).filter(Job.id == job.id).first()
+        if latest_job and (latest_job.status or "").lower() == JobStatus.CANCELLED.value:
+            log.info("JobRunner: job cancelled during execution job_id=%s", job.id)
+            return
         job_service.update_progress(
             db,
             job_id=job.id,

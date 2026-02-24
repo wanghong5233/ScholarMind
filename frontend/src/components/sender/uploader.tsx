@@ -37,9 +37,8 @@ export default function Uploader(props: {
       }}
     >
       <Button
-        className="com-sender__action--document"
-        type="default"
-        shape="circle"
+        className="com-sender__toolbar-icon-btn"
+        type="text"
         icon={<PaperClipOutlined />}
       />
     </Upload>

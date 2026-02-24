@@ -1,4 +1,5 @@
 import { AxiosRequestConfig } from 'axios'
+import { withAdminAuth } from './adminAuthConfig'
 import { request } from './request'
 
 export interface RetrievalVariant {
@@ -76,8 +77,10 @@ export function getRetrievalPreview(
   payload: RetrievalPreviewPayload,
   options?: AxiosRequestConfig,
 ) {
-  return request.post<RetrievalDebugResponse>('debug/retrieval-preview', payload, {
-    ...options,
-  })
+  return request.post<RetrievalDebugResponse>(
+    'admin/debug/retrieval-preview',
+    payload,
+    withAdminAuth(options),
+  )
 }
 

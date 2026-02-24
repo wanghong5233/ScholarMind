@@ -10,6 +10,9 @@ from core.config import settings
 from models.memory import Memory
 from models.message import Message
 from models.session import Session as SessionModel
+from service.core.conversation.internal_history_filter import (
+    is_internal_deep_research_artifact,
+)
 from service.core.rag.history.short_term_memory import (
     ShortTermMemoryBuilder,
     ShortTermMemoryDebug,
@@ -41,7 +44,7 @@ class ConversationService:
         self.db = db
         self.stm_builder = stm_builder or ShortTermMemoryBuilder(db)
         self.ltm_service = ltm_service or LongTermMemoryService(db)
-        self.llm_client = llm_client or LLMClient()
+        self.llm_client = llm_client or LLMClient(task="summary")
         self.session_service = session_service or SessionService(db)
 
     def build_history_slice(
@@ -49,6 +52,7 @@ class ConversationService:
         *,
         session_id: str,
         question: str,
+        enable_semantic: bool = True,
     ) -> Tuple[List[Dict[str, str]], ShortTermMemoryDebug, Optional[List[float]]]:
         """Build a short-term memory slice for a session.
 
@@ -63,6 +67,7 @@ class ConversationService:
         return self.stm_builder.build_history(
             session_id=session_id,
             question=question,
+            enable_semantic=enable_semantic,
         )
 
     def fetch_focus_doc_ids(
@@ -186,9 +191,18 @@ class ConversationService:
 
         summary = self._summarize_history(history)
         if summary:
+            last_msg = (
+                self.db.query(Message)
+                .filter(Message.session_id == session_id)
+                .order_by(Message.create_time.desc())
+                .limit(1)
+                .first()
+            )
+            message_id = last_msg.message_id if last_msg else None
             self.session_service.update_rolling_summary(
                 session_id=session_id,
                 rolling_summary=summary,
+                message_id=message_id,
             )
         return summary
 
@@ -204,6 +218,12 @@ class ConversationService:
         messages.reverse()
         history: List[Dict[str, str]] = []
         for msg in messages:
+            if is_internal_deep_research_artifact(
+                user_question=msg.user_question,
+                model_answer=msg.model_answer,
+                retrieval_content=msg.retrieval_content,
+            ):
+                continue
             if msg.user_question:
                 history.append({"role": "user", "content": msg.user_question})
             if msg.model_answer:

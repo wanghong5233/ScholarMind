@@ -13,7 +13,7 @@ from starlette.background import BackgroundTask
 
 from core.config import settings
 from models.user import User
-from service.auth import get_current_user
+from service.auth import get_current_user, get_current_user_optional_query_token
 from utils.get_logger import log
 
 
@@ -97,14 +97,14 @@ async def _proxy_request(
     timeout = httpx.Timeout(30.0, read=None)
     client = httpx.AsyncClient(timeout=timeout)
     try:
-        upstream_response = await client.request(
+        upstream_request = client.build_request(
             request.method,
             upstream_url,
             params=params,
             headers=headers,
             content=content,
-            stream=True,
         )
+        upstream_response = await client.send(upstream_request, stream=True)
     except httpx.RequestError as exc:
         await client.aclose()
         log.error("Gateway proxy failed: %s", exc)
@@ -128,11 +128,37 @@ async def _proxy_request(
 async def proxy_deep_research(
     request: Request,
     path: str,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_user_optional_query_token),
 ):
     """Proxy DeepResearch service requests."""
     base = settings.DEEP_RESEARCH_SERVICE_URL.rstrip("/")
-    upstream_path = f"/api/deep-research/{path}" if path else "/api/deep-research"
+    normalized_path = (path or "").lstrip("/")
+    if not normalized_path:
+        upstream_path = "/api/deep-research"
+    elif normalized_path == "deep-research" or normalized_path.startswith("deep-research/"):
+        # Backward-compatible form: /api/deep-research/deep-research/...
+        upstream_path = f"/api/{normalized_path}"
+    elif normalized_path.startswith("idea-generation") or normalized_path.startswith("notebook"):
+        # IdeaGen/Notebook endpoints live under /api/*
+        upstream_path = f"/api/{normalized_path}"
+    else:
+        # Canonical DeepResearch form: /api/deep-research/...
+        upstream_path = f"/api/deep-research/{normalized_path}"
+    return await _proxy_request(request, f"{base}{upstream_path}", current_user)
+
+
+@router.get(
+    "/doc-studio/workspaces/{workspace_id}/edit/async/{run_id}/events",
+)
+async def proxy_doc_studio_async_events(
+    request: Request,
+    workspace_id: str,
+    run_id: str,
+    current_user: User = Depends(get_current_user_optional_query_token),
+):
+    """Proxy Doc Studio async event stream (supports query token)."""
+    base = settings.DOC_STUDIO_SERVICE_URL.rstrip("/")
+    upstream_path = f"/api/workspaces/{workspace_id}/edit/async/{run_id}/events"
     return await _proxy_request(request, f"{base}{upstream_path}", current_user)
 
 

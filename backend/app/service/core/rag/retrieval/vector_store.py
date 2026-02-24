@@ -26,6 +26,7 @@ class RetrieveQuery:
     embedding_override: Optional[List[float]] = None  # pre-computed embedding (HyDE)
     boost_doc_ids: Optional[List[int]] = None  # 记忆引导增强的 doc_id 列表
     fallback_index: Optional[str] = None  # 当指定索引不存在时的回退索引
+    channel_topk_cap: Optional[int] = None  # 每路召回上限（用于快速模式硬限流）
 
 
 @dataclass
@@ -50,6 +51,7 @@ class ESVectoreStore(VectorStore):
         self.default_index = default_index
         self.logger = logging.getLogger("rag.retriever.es")
         self._bm25_fields_cache: Optional[List[str]] = None
+        self._index_exists_cache: Dict[str, tuple[bool, float]] = {}
 
     # ---------------------------------------------------------------------
     # Public APIs
@@ -107,6 +109,9 @@ class ESVectoreStore(VectorStore):
             ch = channel.lower().strip()
             limit = per_channel_limit.get(ch, query.top_k * multiplier)
             limit = max(limit, query.top_k)
+            if isinstance(query.channel_topk_cap, int) and query.channel_topk_cap > 0:
+                limit = min(limit, query.channel_topk_cap)
+                limit = max(limit, query.top_k)
             hits: List[RetrievedChunk] = []
 
             if ch == "bm25":
@@ -142,11 +147,18 @@ class ESVectoreStore(VectorStore):
         min_text_chars = max(int(getattr(settings, "SM_RETRIEVAL_MIN_TEXT_CHARS", 0) or getattr(settings, "SM_CHUNK_MIN_FILTER_CHARS", 0) or 0), 0)
         if min_text_chars > 0 and aggregated:
             before = len(aggregated)
-            aggregated = [
-                hit
-                for hit in aggregated
-                if len((hit.text or "").strip()) >= min_text_chars
-            ]
+            allowed_multimodal = {"equation_latex", "table_json", "figure_summary"}
+
+            def _is_short_and_not_multimodal(hit: RetrievedChunk) -> bool:
+                text_len = len((hit.text or "").strip())
+                md = hit.metadata or {}
+                element_type = str(md.get("element_type") or "").lower()
+                logical_type = str(md.get("logical_type") or "").lower()
+                if element_type in allowed_multimodal or logical_type in allowed_multimodal:
+                    return False
+                return text_len < min_text_chars
+
+            aggregated = [hit for hit in aggregated if not _is_short_and_not_multimodal(hit)]
             removed = before - len(aggregated)
             if removed > 0:
                 try:
@@ -166,6 +178,18 @@ class ESVectoreStore(VectorStore):
     # ---------------------------------------------------------------------
     def _resolve_index(self, query: RetrieveQuery) -> str:
         return query.index_override or self.default_index or "scholarmind_default"
+
+    def index_exists(self, index_name: str) -> bool:
+        if not index_name:
+            return False
+        ttl = float(getattr(settings, "SM_INDEX_EXISTS_CACHE_TTL", 60) or 60)
+        now = time.time()
+        cached = self._index_exists_cache.get(index_name)
+        if cached and (now - cached[1]) <= ttl:
+            return cached[0]
+        exists = bool(self.es.index_exists(index_name))
+        self._index_exists_cache[index_name] = (exists, now)
+        return exists
 
     def _resolve_channels(self, override: Optional[List[str]]) -> List[str]:
         if override:

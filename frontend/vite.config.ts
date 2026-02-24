@@ -5,8 +5,9 @@ import { defineConfig } from 'vite'
 export default defineConfig(() => {
   return {
     server: {
-      port: 5181,
-      host: '0.0.0.0',
+      port: 3000,
+      host: '127.0.0.1',
+      strictPort: false, // 端口被占用时自动尝试下一个
     },
     resolve: {
       alias: [

@@ -459,6 +459,7 @@ class IdeaGenerationPipeline:
             user_id=user_id,
             top_k=request.top_k,
             index_mode=request.index_mode,
+            persist_history=False,
         )
         await register_rag_citations(
             rag_citations=answer.citations,
@@ -475,6 +476,7 @@ class IdeaGenerationPipeline:
             user_id=user_id,
             top_k=request.top_k,
             index_mode=request.index_mode,
+            persist_history=False,
         )
         await register_rag_citations(
             rag_citations=repaired.citations,
@@ -498,6 +500,7 @@ class IdeaGenerationPipeline:
             user_id=user_id,
             top_k=request.top_k,
             index_mode=request.index_mode,
+            persist_history=False,
         )
         await register_rag_citations(
             rag_citations=answer.citations,

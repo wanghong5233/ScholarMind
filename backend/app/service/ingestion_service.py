@@ -103,8 +103,10 @@ class IngestionService:
                         errors.append(f"arxiv: {exc}")
 
             if not results:
-                error_text = "; ".join(errors) if errors else "no results"
-                raise APIException(f"Online paper search failed: {error_text}")
+                if errors:
+                    error_text = "; ".join(errors)
+                    raise APIException(f"Online paper search failed: {error_text}")
+                return []
 
             deduped = self._dedupe_results(results)
             ranked = self._rank_results(deduped, rank_by)

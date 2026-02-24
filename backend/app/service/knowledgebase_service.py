@@ -1,6 +1,7 @@
 from typing import List, Optional
 from sqlalchemy.orm import Session
 from models.knowledgebase import KnowledgeBase
+from models.session import Session as SessionModel
 from models.user import User
 from schemas.knowledge_base import KnowledgeBaseCreate, KnowledgeBaseUpdate
 from service.core.rag.providers.registry import resolve_provider
@@ -67,12 +68,16 @@ def get_rag_provider(db: Session, kb_id: int, user_id: int) -> str:
 
 def list_ephemeral_kbs_older_than(db: Session, user_id: int, older_than_hours: int) -> List[KnowledgeBase]:
     cutoff = datetime.utcnow() - timedelta(hours=older_than_hours)
+    bound_session_kb_query = db.query(SessionModel.knowledge_base_id).filter(
+        SessionModel.knowledge_base_id.isnot(None)
+    )
     return (
         db.query(KnowledgeBase)
         .filter(
             KnowledgeBase.user_id == user_id,
             KnowledgeBase.is_ephemeral == True,  # noqa: E712
             KnowledgeBase.created_at < cutoff,
+            ~KnowledgeBase.id.in_(bound_session_kb_query),
         )
         .all()
     )
@@ -85,7 +90,7 @@ def cleanup_ephemeral_kbs(db: Session, user_id: int, older_than_hours: int) -> i
             delete_kb(db, kb_id=kb.id, user_id=user_id)
             count += 1
         except Exception as e:
-            logger.error(f"清理临时知识库 {kb.id} 失败: {e}")
+            logger.error(f"清理会话知识库 {kb.id} 失败: {e}")
     return count
 
 def update_kb(db: Session, kb_id: int, kb_update: KnowledgeBaseUpdate, user_id: int) -> Optional[KnowledgeBase]:

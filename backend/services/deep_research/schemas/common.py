@@ -35,8 +35,8 @@ class DeepResearchRequest(BaseModel):
     max_parallel: int = Field(default=1, ge=1, le=10)
     max_iterations: int = Field(default=4, ge=1, le=10)
     iteration_mode: Optional[Literal["fixed", "flexible"]] = Field(default=None)
-    use_web_search: bool = Field(default=False)
-    use_paper_search: bool = Field(default=False)
+    use_web_search: bool = Field(default=True)
+    use_paper_search: bool = Field(default=True)
     use_code_exec: bool = Field(default=False)
     code_exec_snippets: List[str] = Field(default_factory=list)
     top_k: Optional[int] = Field(default=None, ge=1, le=50)
@@ -44,6 +44,14 @@ class DeepResearchRequest(BaseModel):
     session_id: Optional[str] = Field(default=None, description="Session id for ScholarMind RAG.")
     language: Optional[str] = Field(default=None, description="Preferred output language.")
     report_style: Optional[str] = Field(default=None, description="Style hint for the report.")
+    llm_provider: Optional[Literal["dashscope", "openai"]] = Field(
+        default=None,
+        description="Optional DeepResearch LLM provider override.",
+    )
+    llm_model: Optional[str] = Field(
+        default=None,
+        description="Optional DeepResearch LLM model override.",
+    )
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -182,6 +190,7 @@ class ProgressEvent(BaseModel):
 
     research_id: str
     stage: str
+    event_type: Optional[str] = None
     message: str
     timestamp: Optional[str] = None
     payload: Dict[str, Any] = Field(default_factory=dict)
@@ -232,6 +241,29 @@ class DeepResearchRunList(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     items: List[DeepResearchRunMeta]
+
+
+class DeepResearchSessionContextItem(BaseModel):
+    """Session-level summary item extracted from a completed run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    research_id: str
+    topic: str
+    status: DeepResearchStatus
+    submitted_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    citations_total: int = 0
+    summary: str
+
+
+class DeepResearchSessionContextResponse(BaseModel):
+    """Session-level context response for chat reuse."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str
+    items: List[DeepResearchSessionContextItem] = Field(default_factory=list)
 
 
 class DeepResearchArchive(BaseModel):

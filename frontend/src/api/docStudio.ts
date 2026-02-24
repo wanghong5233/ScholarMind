@@ -1,4 +1,5 @@
 import { AxiosRequestConfig } from 'axios'
+import { userState } from '@/store/user'
 import { request } from './request'
 
 const DOC_STUDIO_BASE =
@@ -24,7 +25,12 @@ function encodeFilePath(path: string) {
 }
 
 export function getAgentAsyncEventsUrl(workspaceId: string, runId: string) {
-  return `${DOC_STUDIO_BASE}/workspaces/${workspaceId}/edit/async/${runId}/events`
+  const baseUrl = `${DOC_STUDIO_BASE}/workspaces/${workspaceId}/edit/async/${runId}/events`
+  const token = typeof userState.token === 'string' ? userState.token.trim() : ''
+  if (!token) {
+    return baseUrl
+  }
+  return `${baseUrl}?token=${encodeURIComponent(token)}`
 }
 
 type WorkspaceSummaryDTO = {
@@ -62,6 +68,9 @@ type CompileResponseDTO = {
   success: boolean
   data?: {
     compiled: boolean
+    compile_format?: 'latex' | 'markdown' | 'plaintext' | string
+    target_path?: string
+    preview_source?: string
     pdf_path?: string | null
     errors?: string[]
     warnings?: string[]
@@ -235,6 +244,58 @@ export async function deleteWorkspace(
   return data
 }
 
+export async function listWorkspaceMessages(
+  params: { workspaceId: string; sessionId: string; page?: number; pageSize?: number },
+  options?: AxiosRequestConfig,
+) {
+  const { workspaceId, sessionId, page = 1, pageSize = 200 } = params
+  const { data } = await request.get<{
+    total: number
+    page: number
+    pageSize: number
+    items: {
+      message_id: string
+      session_id: string
+      user_question: string
+      model_answer: string
+      create_time: string
+      retrieval_content?: string
+    }[]
+  }>(
+    `/workspaces/${workspaceId}/messages`,
+    withDocStudioConfig({
+      ...options,
+      params: { session_id: sessionId, page, page_size: pageSize },
+    }),
+  )
+  return data
+}
+
+/** 调试：获取 Agent 消息原始内容及换行分析，用于排查 Markdown 渲染间距问题 */
+export async function getWorkspaceMessagesDebug(
+  params: { workspaceId: string; sessionId: string },
+  options?: AxiosRequestConfig,
+) {
+  const { workspaceId, sessionId } = params
+  const { data } = await request.get<{
+    session_id: string
+    error?: string
+    items: {
+      message_id: string
+      content_length: number
+      newline_count: number
+      double_newline_count: number
+      triple_plus_newline_count: number
+      raw_repr_sample: string
+      raw_with_markers: string
+    }[]
+  }>(
+    `/workspaces/${workspaceId}/messages/debug`,
+    withDocStudioConfig({ ...options, params: { session_id: sessionId } }),
+  )
+  return data
+}
+
 export async function fetchWorkspaceFiles(
   params: { workspaceId: string },
   options?: AxiosRequestConfig,
@@ -378,6 +439,80 @@ export async function fetchAgentRunStatus(
   return data
 }
 
+export async function cancelAgentRun(
+  params: { workspaceId: string; runId: string },
+  requestOptions?: AxiosRequestConfig,
+) {
+  const { data } = await request.post<{
+    run_id?: string
+    runId?: string
+    status?: string
+  }>(
+    `/workspaces/${params.workspaceId}/edit/async/${params.runId}/cancel`,
+    {},
+    withDocStudioConfig(requestOptions),
+  )
+  return {
+    runId: data.runId || data.run_id || '',
+    status: data.status || 'cancelled',
+  }
+}
+
+export async function respondAgentRunInteraction(
+  params: {
+    workspaceId: string
+    runId: string
+    interactionId: string
+    decision: string
+    note?: string
+  },
+  requestOptions?: AxiosRequestConfig,
+) {
+  const { data } = await request.post<{
+    run_id?: string
+    status?: string
+    accepted?: boolean
+    decision?: string
+  }>(
+    `/workspaces/${params.workspaceId}/edit/async/${params.runId}/interactions/respond`,
+    {
+      interaction_id: params.interactionId,
+      decision: params.decision,
+      note: params.note,
+    },
+    withDocStudioConfig(requestOptions),
+  )
+  return {
+    runId: data.run_id || params.runId,
+    status: data.status || 'unknown',
+    accepted: Boolean(data.accepted),
+    decision: String(data.decision || params.decision),
+  }
+}
+
+// Backward-compatible API alias.
+export async function confirmAgentRunAction(
+  params: {
+    workspaceId: string
+    runId: string
+    confirmationId: string
+    decision: 'approve' | 'reject'
+    note?: string
+  },
+  requestOptions?: AxiosRequestConfig,
+) {
+  return respondAgentRunInteraction(
+    {
+      workspaceId: params.workspaceId,
+      runId: params.runId,
+      interactionId: params.confirmationId,
+      decision: params.decision,
+      note: params.note,
+    },
+    requestOptions,
+  )
+}
+
 export async function listOperations(
   params: { workspaceId: string },
   requestOptions?: AxiosRequestConfig,
@@ -398,6 +533,45 @@ export async function revertOperation(
     {
       files: params.files,
     },
+    withDocStudioConfig(requestOptions),
+  )
+  return data
+}
+
+export async function restoreCheckpoint(
+  params: { workspaceId: string; runId: string },
+  requestOptions?: AxiosRequestConfig,
+) {
+  const { data } = await request.post<{
+    run_id: string
+    restored_files: string[]
+    skipped_files: string[]
+  }>(
+    `/workspaces/${params.workspaceId}/edit/async/${params.runId}/restore-checkpoint`,
+    {},
+    withDocStudioConfig(requestOptions),
+  )
+  return data
+}
+
+export async function rewindConversation(
+  params: { workspaceId: string; keepUserTurns?: number; beforeMessageId?: string },
+  requestOptions?: AxiosRequestConfig,
+) {
+  const payload: Record<string, any> = {}
+  if (params.beforeMessageId) {
+    payload.before_message_id = params.beforeMessageId
+  } else {
+    payload.keep_user_turns = Math.max(0, Math.floor(params.keepUserTurns || 0))
+  }
+  const { data } = await request.post<{
+    session_id?: string
+    total_turns?: number
+    kept_turns?: number
+    deleted_turns?: number
+  }>(
+    `/workspaces/${params.workspaceId}/conversation/rewind`,
+    payload,
     withDocStudioConfig(requestOptions),
   )
   return data
@@ -451,6 +625,9 @@ export async function compileWorkspace(
     data: dto.data
       ? {
           compiled: dto.data.compiled,
+            compile_format: dto.data.compile_format,
+            target_path: dto.data.target_path,
+            preview_source: dto.data.preview_source,
           pdf_path: dto.data.pdf_path,
           errors: dto.data.errors,
           warnings: dto.data.warnings,
@@ -488,6 +665,31 @@ export async function deleteFile(
     withDocStudioConfig(options),
   )
   return data
+}
+
+export async function renameFileOrDirectory(
+  params: { workspaceId: string; sourcePath: string; targetPath: string },
+  options?: AxiosRequestConfig,
+) {
+  const { data } = await request.post<{
+    moved: boolean
+    source_path: string
+    target_path: string
+    type: 'file' | 'directory'
+  }>(
+    `/workspaces/${params.workspaceId}/files/rename`,
+    {
+      source_path: params.sourcePath,
+      target_path: params.targetPath,
+    },
+    withDocStudioConfig(options),
+  )
+  return {
+    moved: data.moved,
+    sourcePath: data.source_path,
+    targetPath: data.target_path,
+    type: data.type,
+  }
 }
 
 export async function uploadFile(

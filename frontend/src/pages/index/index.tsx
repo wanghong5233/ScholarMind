@@ -1,14 +1,5 @@
-import * as api from '@/api'
-import { useMount } from 'ahooks'
-import { useNavigate } from 'react-router-dom'
+import { Navigate } from 'react-router-dom'
 
 export default function Index() {
-  const navigate = useNavigate()
-
-  useMount(async () => {
-    const { data } = await api.session.create()
-    navigate(`/chat/${data.sessionId}`)
-  })
-
-  return null
+  return <Navigate to="/chat" replace />
 }
