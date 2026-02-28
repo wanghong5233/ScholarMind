@@ -14,7 +14,7 @@ import { Footer } from './footer'
 import './index.scss'
 import { Nav } from './nav'
 
-const TITLE = import.meta.env.VITE_TITLE
+const TITLE = import.meta.env.VITE_TITLE || 'ScholarMind'
 const IDEAGEN_TEMP_DISABLED = true
 const IDEAGEN_DISABLED_TIP = 'IdeaGen 功能暂时关闭，后续开放'
 
@@ -46,6 +46,10 @@ export function BaseLayout({ children }: { children?: React.ReactNode }) {
     }
     navigate('/idea-generation')
   }, [device.chatting, navigate])
+
+  useEffect(() => {
+    document.title = TITLE || 'ScholarMind'
+  }, [])
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
