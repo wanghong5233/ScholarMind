@@ -126,7 +126,7 @@ export interface DocumentParsePreviewResponse {
 }
 
 export function listKnowledgeBases(options?: AxiosRequestConfig) {
-  return request.get<KnowledgeBase[]>('knowledgebases', {
+  return request.get<KnowledgeBase[]>('knowledgebases/', {
     ...options,
   })
 }
@@ -140,7 +140,7 @@ export function createKnowledgeBase(
   },
   options?: AxiosRequestConfig,
 ) {
-  return request.post<KnowledgeBase>('knowledgebases', payload, {
+  return request.post<KnowledgeBase>('knowledgebases/', payload, {
     ...options,
   })
 }
