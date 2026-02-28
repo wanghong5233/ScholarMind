@@ -97,9 +97,20 @@ async def generic_exception_handler(request: Request, exc: Exception):
 
 
 # 添加 CORS 中间件
+cors_allow_origins = [
+    origin.strip()
+    for origin in str(getattr(settings, "SM_CORS_ALLOW_ORIGINS", "*") or "*").split(",")
+    if origin and origin.strip()
+]
+cors_allow_origin_regex = str(
+    getattr(settings, "SM_CORS_ALLOW_ORIGIN_REGEX", "") or ""
+).strip() or None
+if not cors_allow_origins:
+    cors_allow_origins = ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 允许所有源，生产环境中应该设置具体的源
+    allow_origins=cors_allow_origins,
+    allow_origin_regex=cors_allow_origin_regex,
     allow_credentials=True,
     allow_methods=["*"],  # 允许所有方法
     allow_headers=["*"],  # 允许所有头
@@ -127,9 +138,10 @@ app.include_router(document_rt.router, prefix="/api/knowledgebases/{kb_id}/docum
 app.include_router(job_rt.router, prefix="/api/jobs", tags=["Jobs"])
 app.include_router(session_rt.router, prefix="/api/sessions", tags=["Sessions"])
 app.include_router(config_rt.router, prefix="/api/config", tags=["Config"])
-app.include_router(admin_rt.router, prefix="/api", tags=["Admin"])
-app.include_router(debug_rt.router, prefix="/api/admin/debug", tags=["Admin Debug"])
-if settings.ENABLE_DEBUG_ROUTES:
+if not settings.SM_DEMO_MODE:
+    app.include_router(admin_rt.router, prefix="/api", tags=["Admin"])
+    app.include_router(debug_rt.router, prefix="/api/admin/debug", tags=["Admin Debug"])
+if settings.ENABLE_DEBUG_ROUTES and not settings.SM_DEMO_MODE:
     app.include_router(debug_rt.router, prefix="/api/debug", tags=["Debug"])
 app.include_router(internal_rt.router, prefix="/api", tags=["Internal Services"])
 app.include_router(gateway_rt.router, prefix="/api", tags=["Gateway"])

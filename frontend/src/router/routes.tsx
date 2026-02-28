@@ -8,6 +8,7 @@ import Chat from '@/pages/chat'
 import Index from '@/pages/index'
 import Login from '@/pages/login'
 import Repository from '@/pages/repository'
+import DemoEntryPage from '@/pages/demo-entry'
 import ParseDebugPage from '@/pages/debug/parse'
 import RetrievalDebugPage from '@/pages/debug/retrieval'
 import RepositoryOnlineImport from '@/pages/repository/OnlineImport'
@@ -171,6 +172,12 @@ export const router = createBrowserRouter(
       path: '/login',
       Component: Login,
       auth: false,
+    }),
+    helper({
+      path: '/demo',
+      Component: DemoEntryPage,
+      auth: false,
+      pure: true,
     }),
     ...(ENABLE_ADMIN_UI
       ? [

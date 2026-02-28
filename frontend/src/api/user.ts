@@ -22,3 +22,16 @@ export function login(
     access_token: string
   }>('users/login', params, options)
 }
+
+export function demoEntry(
+  params?: {
+    code?: string
+  },
+  options?: AxiosRequestConfig,
+) {
+  return request.post<{
+    access_token: string
+    token_type: string
+    username: string
+  }>('users/demo-entry', params ?? {}, options)
+}

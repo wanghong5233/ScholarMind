@@ -8,6 +8,7 @@ import rehypeRaw from 'rehype-raw'
 import { useMemo } from 'react'
 import 'katex/dist/katex.min.css'
 import './index.scss'
+import { preprocessMarkdownMath } from './mathPreprocess'
 
 type MarkdownProps = {
   className?: string
@@ -18,8 +19,9 @@ type MarkdownProps = {
 function MarkdownComponent({ className, value, onClick }: MarkdownProps) {
   const content = useMemo(() => {
     if (!value) return ''
+    const normalized = preprocessMarkdownMath(value)
     // 将引用标记 ##0$$ 转换为可点击的 span
-    const processed = value.replace(/##(\d+)\$\$/g, (_, index: string) => {
+    const processed = normalized.replace(/##(\d+)\$\$/g, (_, index: string) => {
       const num = Number(index)
       return `<span class="refrence-token" data-refrence-index="${num}">[${num + 1}]</span>`
     })

@@ -173,6 +173,23 @@ def create_token(user_id: int, user_name: str, salting: str = ""):
     return access_token
 
 
+def create_demo_token(user_id: int, user_name: str) -> str:
+    """Issue short-lived token for demo entry only."""
+    expire_hours = max(1, int(getattr(settings, "SM_DEMO_TOKEN_EXPIRE_HOURS", 2) or 2))
+    demo_security = JwtAccessBearerCookie(
+        secret_key=JWT_SECRET_KEY,
+        auto_error=True,
+        access_expires_delta=timedelta(hours=expire_hours),
+    )
+    subject = {
+        "user_id": user_id,
+        "user_name": user_name,
+        "token_use": "demo_entry",
+        "salting": secrets.token_hex(16),
+    }
+    return demo_security.create_access_token(subject=subject)
+
+
 def authenticate(username: str, password: str) -> str:
     """
     认证用户

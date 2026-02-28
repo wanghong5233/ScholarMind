@@ -37,6 +37,12 @@ const TOOL_LABEL_MAP: Record<string, string> = {
   'code.exec': 'Code Exec',
 }
 
+interface ActiveToolInfo {
+  key: string
+  label: string
+  startedAt?: string
+}
+
 function parseServerTimestampMs(value?: string) {
   const text = String(value || '').trim()
   if (!text) return null
@@ -67,9 +73,9 @@ function extractToolKey(event: ProgressEvent) {
   return extractToolLabel(event)
 }
 
-function resolveActiveTool(progress?: ProgressEvent[]) {
+function resolveActiveTool(progress?: ProgressEvent[]): ActiveToolInfo | null {
   const events = Array.isArray(progress) ? progress : []
-  let active: { key: string; label: string; startedAt?: string } | null = null
+  let active: ActiveToolInfo | null = null
   events.forEach((event) => {
     const eventType = String(event.event_type || '')
       .trim()

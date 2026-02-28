@@ -97,7 +97,8 @@ class ChatAskOrchestrator:
         )
 
         bucket = f"ask:{self.current_user.id}:{session_id}"
-        if not rate_limiter.check_and_consume(bucket, limit=60, window_seconds=60):
+        ask_rate_limit = max(1, int(getattr(settings, "SM_ASK_RATE_LIMIT_PER_MINUTE", 60) or 60))
+        if not rate_limiter.check_and_consume(bucket, limit=ask_rate_limit, window_seconds=60):
             raise HTTPException(status_code=429, detail="Too Many Requests")
 
         qkey = f"ask:day:{self.current_user.id}:{int(__import__('time').time())//86400}"

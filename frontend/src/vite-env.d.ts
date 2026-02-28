@@ -8,7 +8,9 @@ interface Window {
 }
 
 interface ImportMetaEnv {
+  readonly VITE_API_BASE?: string
   readonly VITE_DOC_STUDIO_BASE?: string
+  readonly VITE_DEEP_RESEARCH_BASE?: string
   readonly VITE_ENABLE_ADMIN_UI?: string
 }
 

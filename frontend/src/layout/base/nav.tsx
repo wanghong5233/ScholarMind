@@ -325,7 +325,7 @@ export function Nav() {
             <SearchOutlined className="base-layout-nav__search-modal-icon" />
             <Input
               autoFocus
-              borderless
+              variant="borderless"
               value={searchKeyword}
               onChange={(event) => setSearchKeyword(event.target.value)}
               placeholder="Search..."

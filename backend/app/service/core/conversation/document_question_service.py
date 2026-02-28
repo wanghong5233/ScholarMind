@@ -72,7 +72,15 @@ class DocumentQuestionService:
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
         bucket = f"criticalq:{self.current_user.id}:{kb_id}:{doc_id}"
-        if not rate_limiter.check_and_consume(bucket, limit=60, window_seconds=60):
+        criticalq_rate_limit = max(
+            1,
+            int(getattr(settings, "SM_CRITICALQ_RATE_LIMIT_PER_MINUTE", 30) or 30),
+        )
+        if not rate_limiter.check_and_consume(
+            bucket,
+            limit=criticalq_rate_limit,
+            window_seconds=60,
+        ):
             raise HTTPException(status_code=429, detail="Too Many Requests")
         day_key = f"criticalq:day:{self.current_user.id}:{int(__import__('time').time())//86400}"
         if not quota.consume_count(day_key, settings.DAILY_ASK_COUNT, window_seconds=86400):

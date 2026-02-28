@@ -45,6 +45,18 @@ class Settings(BaseSettings):
     SM_INTERNAL_SERVICE_ALLOWLIST: str = "doc_studio,deep_research"
     # 是否保留旧的 /api/debug 路由（生产建议 false，仅保留 /api/admin/debug）
     ENABLE_DEBUG_ROUTES: bool = False
+    # CORS allowlist（逗号分隔；默认 *）
+    SM_CORS_ALLOW_ORIGINS: str = "*"
+    # 可选：CORS 正则白名单（用于临时域名，如 *.trycloudflare.com）
+    SM_CORS_ALLOW_ORIGIN_REGEX: Optional[str] = None
+    # Demo mode（默认关闭，开启后建议关闭 admin/debug 路由暴露）
+    SM_DEMO_MODE: bool = False
+    SM_DEMO_ENTRY_ENABLED: bool = False
+    SM_DEMO_USERNAME: str = "testuser"
+    # 可选：Demo 入口附加校验码（为空表示不校验）
+    SM_DEMO_ENTRY_CODE: Optional[str] = None
+    SM_DEMO_ENTRY_RATE_PER_MINUTE: int = 20
+    SM_DEMO_TOKEN_EXPIRE_HOURS: int = 2
     ROOT_PATH: str = ""
     # Internal service base URLs (Gateway/BFF)
     DEEP_RESEARCH_SERVICE_URL: str = "http://deep_research:8004"
@@ -324,6 +336,9 @@ class Settings(BaseSettings):
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_PER_MINUTE: int = 60  # 每分钟最多 60 次请求
     RATE_LIMIT_PER_HOUR: int = 1000  # 每小时最多 1000 次请求
+    # 问答类接口单独限流（分钟级）
+    SM_ASK_RATE_LIMIT_PER_MINUTE: int = 60
+    SM_CRITICALQ_RATE_LIMIT_PER_MINUTE: int = 30
 
     class Config:
         env_file_encoding = "utf-8"

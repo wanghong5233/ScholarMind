@@ -1,9 +1,15 @@
-from fastapi import APIRouter, Depends
-from service.auth import get_current_user
+import secrets
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from service.auth import create_demo_token, get_current_user
 from models.user import User as UserModel
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 from schemas.auth import LoginRequest, RegisterRequest, STSTokenRequest
 from service.core.system.user_service import UserService
+from core.config import settings
+from utils.database import get_db
+from utils.rate_limiter import rate_limiter
 
 router = APIRouter()
 
@@ -39,6 +45,11 @@ async def register(request: RegisterRequest):
         - 400 Bad Request: 注册失败（如用户名已存在）。
         - 500 Internal Server Error: 其他服务器内部错误。
     """
+    if settings.SM_DEMO_MODE:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Register is disabled in demo mode",
+        )
     service = UserService()
     return service.register(request)
 
@@ -66,6 +77,8 @@ async def get_sts_token(request: STSTokenRequest):
 @router.get("/test-hot-reload")
 async def test_hot_reload():
     """一个简单的测试接口，用于验证Docker卷挂载实现的代码热更新功能。"""
+    if settings.SM_DEMO_MODE:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not Found")
     return {"message": "热更新成功！ 第3版！"}
 
 # Pydantic模型，用于API响应
@@ -75,6 +88,69 @@ class User(BaseModel):
 
     class Config:
         orm_mode = True
+
+
+class DemoEntryResponse(BaseModel):
+    """Demo auto-login response."""
+
+    access_token: str
+    token_type: str = "bearer"
+    username: str
+
+
+class DemoEntryRequest(BaseModel):
+    """Demo entry payload."""
+
+    code: str | None = None
+
+
+@router.post("/demo-entry", response_model=DemoEntryResponse)
+async def demo_entry(
+    request: Request,
+    payload: DemoEntryRequest | None = None,
+    code: str | None = Query(default=None, description="可选 demo 校验码（兼容旧参数）"),
+    db: Session = Depends(get_db),
+):
+    """
+    Demo 免登录入口：
+    - 仅在 SM_DEMO_ENTRY_ENABLED 时可用
+    - 可选校验 SM_DEMO_ENTRY_CODE
+    - 返回 testuser 的短路径登录 token（与普通登录同 JWT 体系）
+    """
+    if not settings.SM_DEMO_ENTRY_ENABLED:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Demo entry is disabled")
+
+    expected_code = str(settings.SM_DEMO_ENTRY_CODE or "").strip()
+    provided_code = str((payload.code if payload else None) or code or "").strip()
+    if expected_code and not (
+        provided_code and secrets.compare_digest(provided_code, expected_code)
+    ):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid demo code")
+
+    xff = (request.headers.get("x-forwarded-for") or "").strip()
+    cfc = (request.headers.get("cf-connecting-ip") or "").strip()
+    client_ip = (
+        (cfc or (xff.split(",")[0].strip() if xff else ""))
+        or (request.client.host if request.client else "unknown")
+    ).strip() or "unknown"
+    rate_bucket = f"demo-entry:{client_ip}"
+    limit_per_minute = max(1, int(getattr(settings, "SM_DEMO_ENTRY_RATE_PER_MINUTE", 20) or 20))
+    if not rate_limiter.check_and_consume(rate_bucket, limit=limit_per_minute, window_seconds=60):
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Too Many Requests")
+
+    demo_username = str(settings.SM_DEMO_USERNAME or "testuser").strip() or "testuser"
+    user = db.query(UserModel).filter(UserModel.username == demo_username).first()
+    if not user or not bool(getattr(user, "is_active", True)):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Demo user is unavailable",
+        )
+
+    return DemoEntryResponse(
+        access_token=create_demo_token(user.id, user.username),
+        token_type="bearer",
+        username=user.username,
+    )
 
 # 获取当前用户的接口
 @router.get("/users/me", response_model=User)

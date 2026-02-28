@@ -1,13 +1,11 @@
-import { AxiosRequestConfig, AxiosRequestHeaders } from 'axios'
+import { AxiosHeaders, type AxiosRequestConfig } from 'axios'
 import { adminAuthState } from '@/store/adminAuth'
 
 export function withAdminAuth(options?: AxiosRequestConfig): AxiosRequestConfig {
   const token = adminAuthState.token
-  const headers: AxiosRequestHeaders = {
-    ...((options?.headers || {}) as AxiosRequestHeaders),
-  }
+  const headers = AxiosHeaders.from((options?.headers ?? {}) as any)
   if (token) {
-    headers.Authorization = `Bearer ${token}`
+    headers.set('Authorization', `Bearer ${token}`)
   }
   return {
     ...options,

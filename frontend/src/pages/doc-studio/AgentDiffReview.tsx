@@ -5,7 +5,8 @@
  */
 import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef } from 'react'
 import { structuredPatch } from 'diff'
-import { Diff, Hunk, Decoration } from 'react-diff-view'
+import { Decoration, Diff, Hunk as HunkView } from 'react-diff-view'
+import type { ChangeData, HunkData } from 'react-diff-view'
 import 'react-diff-view/style/index.css'
 
 export interface HunkChange {
@@ -15,23 +16,7 @@ export interface HunkChange {
   modifiedEndLineNumber: number
 }
 
-interface ParsedHunk {
-  content: string
-  oldStart: number
-  oldLines: number
-  newStart: number
-  newLines: number
-  changes: Array<{
-    type: string
-    content: string
-    isNormal?: boolean
-    isInsert?: boolean
-    isDelete?: boolean
-    oldLineNumber?: number
-    newLineNumber?: number
-    lineNumber?: number
-  }>
-}
+type ParsedHunk = HunkData
 
 export interface AgentDiffReviewProps {
   filePath: string
@@ -60,7 +45,7 @@ function structuredToViewHunk(
   const content = `@@ -${oldStart},${oldLines} +${newStart},${newLines} @@`
   let oldLine = oldStart
   let newLine = newStart
-  const changes: ParsedHunk['changes'] = []
+  const changes: ChangeData[] = []
   for (const line of lines) {
     const first = line.charAt(0)
     const text = line.slice(1)
@@ -79,7 +64,7 @@ function structuredToViewHunk(
         type: 'delete',
         content: text,
         isDelete: true,
-        oldLineNumber: oldLine,
+        lineNumber: oldLine,
       })
       oldLine++
     } else if (first === '+') {
@@ -87,7 +72,6 @@ function structuredToViewHunk(
         type: 'insert',
         content: text,
         isInsert: true,
-        newLineNumber: newLine,
         lineNumber: newLine,
       })
       newLine++
@@ -163,8 +147,8 @@ export const AgentDiffReview = forwardRef<AgentDiffReviewRef, AgentDiffReviewPro
     const nums: number[] = []
     for (const h of hunks) {
       for (const c of h.changes) {
-        if (c.type === 'insert' && (c.newLineNumber ?? c.lineNumber)) {
-          nums.push(c.newLineNumber ?? c.lineNumber ?? 0)
+        if (c.type === 'insert' && c.lineNumber) {
+          nums.push(c.lineNumber ?? 0)
         }
       }
     }
@@ -323,7 +307,7 @@ export const AgentDiffReview = forwardRef<AgentDiffReviewRef, AgentDiffReviewPro
                     <Decoration>
                       <div className="doc-studio__agent-diff-hunk-header">{hunk.content}</div>
                     </Decoration>
-                    <Hunk hunk={viewHunk as never} />
+                    <HunkView hunk={viewHunk} />
                     {!readOnly && (
                       <Decoration>
                         <div
