@@ -1,7 +1,8 @@
 import { createRequest } from './request'
+import { getApiBase } from '../env'
 
 export const request = createRequest({
-  baseURL: import.meta.env.VITE_API_BASE || '/api',
+  baseURL: getApiBase(),
   loading: true,
   errorToast: true,
   cancelRepeat: true,

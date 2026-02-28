@@ -1,10 +1,9 @@
 import { AxiosRequestConfig } from 'axios'
 import { userState } from '@/store/user'
+import { getDeepResearchBase } from './env'
 import { request } from './request'
 
-const DEEP_RESEARCH_BASE =
-  (import.meta.env.VITE_DEEP_RESEARCH_BASE as string | undefined) ||
-  (import.meta.env.DEV ? 'http://127.0.0.1:8000/api/deep-research' : '/api/deep-research')
+const DEEP_RESEARCH_BASE = getDeepResearchBase()
 
 function withDeepResearchConfig(config?: AxiosRequestConfig): AxiosRequestConfig {
   return {

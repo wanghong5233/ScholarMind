@@ -1,5 +1,6 @@
 import { AxiosRequestConfig } from 'axios'
 import { withAdminAuth } from './adminAuthConfig'
+import { getApiBase } from './env'
 import { request } from './request'
 
 export interface KnowledgeBase {
@@ -252,9 +253,7 @@ export function parseIndexDocuments(
  * @returns 完整的预览 URL，包含 token 查询参数
  */
 export function getDocumentPreviewUrl(kbId: number, docId: number, token: string): string {
-  const baseURL = import.meta.env.VITE_API_BASE || '/api'
-  
-  // 构建 URL，附加 token 作为查询参数
+  const baseURL = getApiBase()
   const url = `${baseURL}/knowledgebases/${kbId}/documents/${docId}/preview`
   if (token) {
     return `${url}?token=${encodeURIComponent(token)}`

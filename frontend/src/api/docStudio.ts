@@ -1,10 +1,9 @@
 import { AxiosRequestConfig } from 'axios'
 import { userState } from '@/store/user'
+import { getDocStudioBase } from './env'
 import { request } from './request'
 
-const DOC_STUDIO_BASE =
-  (import.meta.env.VITE_DOC_STUDIO_BASE as string | undefined) ||
-  (import.meta.env.DEV ? 'http://127.0.0.1:8000/api/doc-studio' : '/api/doc-studio')
+const DOC_STUDIO_BASE = getDocStudioBase()
 
 function withDocStudioConfig(config?: AxiosRequestConfig): AxiosRequestConfig {
   return {
