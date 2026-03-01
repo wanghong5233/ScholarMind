@@ -1,8 +1,11 @@
 import secrets
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from service.auth import create_demo_token, get_current_user
+from sqlalchemy import and_
+from service.auth import create_demo_token, get_current_demo_user, get_current_user
 from models.user import User as UserModel
+from models.demo_access_log import DemoAccessLog
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from schemas.auth import LoginRequest, RegisterRequest, STSTokenRequest
@@ -104,6 +107,9 @@ class DemoEntryRequest(BaseModel):
     code: str | None = None
 
 
+_DEMO_VISIT_DEDUP_SECONDS = 60
+
+
 @router.post("/demo-entry", response_model=DemoEntryResponse)
 async def demo_entry(
     request: Request,
@@ -146,11 +152,91 @@ async def demo_entry(
             detail="Demo user is unavailable",
         )
 
+    user_agent = (request.headers.get("user-agent") or "")[:512]
+    cutoff = datetime.utcnow() - timedelta(seconds=_DEMO_VISIT_DEDUP_SECONDS)
+    existing_entry = (
+        db.query(DemoAccessLog.id)
+        .filter(
+            and_(
+                DemoAccessLog.ip == client_ip,
+                DemoAccessLog.path == "(demo_entry)",
+                DemoAccessLog.visited_at >= cutoff,
+            )
+        )
+        .limit(1)
+        .first()
+    )
+    if not existing_entry:
+        db.add(
+            DemoAccessLog(
+                ip=client_ip,
+                path="(demo_entry)",
+                user_agent=user_agent if user_agent.strip() else None,
+            )
+        )
+        db.commit()
+
     return DemoEntryResponse(
         access_token=create_demo_token(user.id, user.username),
         token_type="bearer",
         username=user.username,
     )
+
+
+class DemoVisitRequest(BaseModel):
+    """Demo 访问记录请求。"""
+
+    path: str
+
+
+@router.post("/demo-visit")
+async def demo_visit(
+    request: Request,
+    payload: DemoVisitRequest,
+    current_user: UserModel = Depends(get_current_demo_user),
+    db: Session = Depends(get_db),
+):
+    """
+    记录 demo 用户访问的页面路径。仅限 demo token 调用。
+    同一 IP + 同一 path 在 60 秒内仅记录一次，避免重复。
+    """
+    if not settings.SM_DEMO_ENTRY_ENABLED:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Demo tracking disabled")
+
+    xff = (request.headers.get("x-forwarded-for") or "").strip()
+    cfc = (request.headers.get("cf-connecting-ip") or "").strip()
+    client_ip = (
+        (cfc or (xff.split(",")[0].strip() if xff else ""))
+        or (request.client.host if request.client else "unknown")
+    ).strip() or "unknown"
+    path = (payload.path or "")[:512].strip() or "/"
+    user_agent = (request.headers.get("user-agent") or "")[:512]
+
+    cutoff = datetime.utcnow() - timedelta(seconds=_DEMO_VISIT_DEDUP_SECONDS)
+    existing = (
+        db.query(DemoAccessLog.id)
+        .filter(
+            and_(
+                DemoAccessLog.ip == client_ip,
+                DemoAccessLog.path == path,
+                DemoAccessLog.visited_at >= cutoff,
+            )
+        )
+        .limit(1)
+        .first()
+    )
+    if existing:
+        return {"ok": True}
+    db.add(
+        DemoAccessLog(
+            ip=client_ip,
+            path=path,
+            user_agent=user_agent if user_agent.strip() else None,
+        )
+    )
+    db.commit()
+    return {"ok": True}
+
 
 # 获取当前用户的接口
 @router.get("/users/me", response_model=User)

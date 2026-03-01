@@ -112,7 +112,7 @@ Closed-loop Agent system for deep paper research, literature review, and report 
 | **NoteAgent** | Compresses summary into bullet notes for Reporter input token control |
 | **DecisionAgent** | Evidence quality (sufficient / followup / tool_calls), three-layer LLM fallback |
 | **ManagerAgent** | Adaptive topic expansion, prevents queue stall |
-| **ReporterAgent** | Section-wise generation, two-layer citation filtering, quality gates |
+| **ReporterAgent** | Section-wise generation, citation filtering, quality gates |
 
 **Tools**: `paper.search` (Semantic Scholar + arXiv), `web.search`, `rag.ask`, `rag.compare`, `web.open_page`, `code.exec`, etc.
 
@@ -144,59 +144,30 @@ Cursor-like LaTeX/Markdown intelligent editing. ReAct loop + Human-in-the-loop c
 
 ## Quick Start
 
-### Requirements
-
-- Docker & Docker Compose
-- 8GB+ RAM (16GB recommended for ES and Grobid)
-- **NVIDIA GPU** (MinerU and local Reranker; see [Troubleshooting](#troubleshooting) without GPU)
-- DashScope API Key (required for Embedding/LLM/Reranker)
-
-### Start services
+**Requirements**: Docker Compose, 8GB+ RAM, NVIDIA GPU (see [Troubleshooting](#troubleshooting) without GPU), DashScope API Key.
 
 ```bash
 git clone https://github.com/wanghong5233/ScholarMind.git
 cd ScholarMind/backend
 cp .env.example .env
-# Edit .env: DASHSCOPE_API_KEY, JWT_SECRET_KEY, ELASTIC_PASSWORD (see below)
-make up-build
-make migrate   # Run DB migrations on first start
+# Edit .env: DASHSCOPE_API_KEY, JWT_SECRET_KEY, ELASTIC_PASSWORD
+make up-build && make migrate
+cd ../frontend && npm run dev   # frontend separate
 ```
 
-First run builds images and takes longer. Use `make up` for subsequent starts.
+**Access**: Frontend http://localhost:5173 | API docs http://localhost:8000/docs
 
-### Environment variables (minimum required)
+**Required env vars**: `DASHSCOPE_API_KEY`, `JWT_SECRET_KEY` (`python -c "import secrets; print(secrets.token_hex(32))"`), `ELASTIC_PASSWORD` (8+ chars). Optional: `SEMANTIC_SCHOLAR_API_KEY`, `TAVILY_API_KEY`/`SERPER_API_KEY`. See `backend/.env.example`.
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `DASHSCOPE_API_KEY` | Yes | Alibaba DashScope for Embedding/LLM/Reranker |
-| `JWT_SECRET_KEY` | Yes | JWT signing key; `python -c "import secrets; print(secrets.token_hex(32))"` |
-| `ELASTIC_PASSWORD` | Yes | Elasticsearch 8.x password, 8+ chars |
-| `SEMANTIC_SCHOLAR_API_KEY` | Optional | DeepResearch paper search |
-| `TAVILY_API_KEY` / `SERPER_API_KEY` | Optional | Web search |
-
-### Access
-
-- **Frontend**: http://localhost:5173 (run `cd frontend && npm run dev`)
-- **API docs**: http://localhost:8000/docs
-- **Logs**: `make logs-api` or `make logs-api-history`
-
-### Make commands
-
-```bash
-make help          # List all commands
-make up            # Start (no rebuild)
-make down         # Stop and remove containers
-make logs-api      # API logs
-make migrate       # DB migrations (required on first run)
-```
+**Commands**: `make up` start | `make down` stop | `make logs-api` logs
 
 ### Troubleshooting
 
 | Issue | Solution |
 |-------|----------|
-| MinerU / Reranker fails (no GPU) | In `docker-compose.yml`, change `dockerfile` to `Dockerfile` (drop `.gpu`) for mineru and reranker; comment out `deploy.resources.reservations`. Reranker default uses DashScope; MinerU without GPU has limited PDF parsing |
-| Elasticsearch health check timeout | Set `ELASTIC_PASSWORD` in `.env`; ES first start can take 2–3 min |
-| Blank frontend / 401 | Ensure `JWT_SECRET_KEY` is set consistently |
+| MinerU/Reranker fails (no GPU) | In `docker-compose.yml`: set `dockerfile` to `Dockerfile` for mineru and reranker; comment out `deploy.resources.reservations`. Reranker can use DashScope cloud; MinerU without GPU has limited parsing |
+| Elasticsearch timeout | Set `ELASTIC_PASSWORD` in `.env`; ES first start ~2–3 min |
+| Blank frontend / 401 | Ensure `JWT_SECRET_KEY` matches backend |
 | PDF parsing fails | MinerU needs GPU; verify NVIDIA driver and Container Toolkit |
 
 ---

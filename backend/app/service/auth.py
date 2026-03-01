@@ -286,6 +286,47 @@ def register_user(username: str, password: str):
         db.close()
         logger.info("数据库连接已关闭")
 
+def get_current_demo_user(subject: "JwtAuthorizationCredentials" = Depends(access_security)):
+    """仅接受 demo_entry token，用于 demo-visit 等仅限 demo 用户的接口。"""
+    payload = subject.subject or {}
+    token_use = str(payload.get("token_use") or "").strip().lower()
+    if token_use != "demo_entry":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Demo token required",
+        )
+    db = next(get_db())
+    try:
+        user_id = payload.get("user_id")
+        if user_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token: user_id missing",
+            )
+        user = db.query(User).filter(User.id == user_id).first()
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not found",
+            )
+        is_active = bool(getattr(user, "is_active", True))
+        if not is_active:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="User is disabled",
+            )
+        return user
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=f"Invalid token: {str(e)}",
+        ) from e
+    finally:
+        db.close()
+
+
 def get_current_user(subject: "JwtAuthorizationCredentials" = Depends(access_security)):
     """
     FastAPI 依赖项，用于获取当前认证的用户。

@@ -35,3 +35,12 @@ export function demoEntry(
     username: string
   }>('users/demo-entry', params ?? {}, options)
 }
+
+/** Demo 用户访问记录（仅 demo token 可调） */
+export function postDemoVisit(params: { path: string }, options?: AxiosRequestConfig) {
+  return request.post<{ ok: boolean }>('users/demo-visit', params, {
+    ...options,
+    loading: false,
+    errorToast: false,
+  })
+}

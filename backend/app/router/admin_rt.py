@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from core.config import settings
 from models.admin_audit_log import AdminAuditLog
+from models.demo_access_log import DemoAccessLog
 from models.document import Document
 from models.job import Job, JobStatus
 from models.knowledgebase import KnowledgeBase
@@ -314,6 +315,48 @@ def get_admin_overview(
             "feature_flags",
         ],
         "uptime_secs": uptime_secs,
+    }
+
+
+@router.get("/demo-stats", summary="Demo 访问统计")
+def get_admin_demo_stats(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db),
+    current_user: AdminConsolePrincipal = Depends(get_current_admin_console_user),
+):
+    """Demo 展示界面访问记录，用于检查简历/GitHub 等入口的体验情况。"""
+    _ = current_user
+    total = db.query(func.count(DemoAccessLog.id)).scalar() or 0
+    rows = (
+        db.query(DemoAccessLog)
+        .order_by(DemoAccessLog.visited_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+        .all()
+    )
+    ip_stats = (
+        db.query(DemoAccessLog.ip, func.count(DemoAccessLog.id).label("cnt"))
+        .group_by(DemoAccessLog.ip)
+        .order_by(func.count(DemoAccessLog.id).desc())
+        .limit(50)
+        .all()
+    )
+    return {
+        "items": [
+            {
+                "id": r.id,
+                "ip": r.ip,
+                "path": r.path,
+                "user_agent": r.user_agent,
+                "visited_at": r.visited_at.isoformat() if r.visited_at else None,
+            }
+            for r in rows
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "by_ip": [{"ip": ip, "count": cnt} for ip, cnt in ip_stats],
     }
 
 

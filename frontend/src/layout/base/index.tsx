@@ -2,8 +2,11 @@ import iconNewchat from '@/assets/layout/newchat.svg'
 import iconRepository from '@/assets/layout/repository.svg'
 import iconEdit from '@/assets/layout/edit.svg'
 import logo from '@/assets/logo.svg'
+import * as api from '@/api'
 import { NOTEBOOK_WORKSPACE_ID, ensureNotebookWorkspace } from '@/utils/notebook'
 import { deviceActions, deviceState } from '@/store/device'
+import { userState } from '@/store/user'
+import { isDemoEntryEnabled } from '@/utils/demo'
 import { BookOutlined, BulbOutlined, MenuFoldOutlined, MenuUnfoldOutlined } from '@ant-design/icons'
 import { Button, Tooltip, message } from 'antd'
 import { useCallback, useEffect } from 'react'
@@ -21,6 +24,7 @@ const IDEAGEN_DISABLED_TIP = 'IdeaGen 功能暂时关闭，后续开放'
 export function BaseLayout({ children }: { children?: React.ReactNode }) {
   const navigate = useNavigate()
   const device = useSnapshot(deviceState)
+  const user = useSnapshot(userState)
   const location = useLocation()
 
   const isActive = (path: string) => location.pathname.startsWith(path)
@@ -61,6 +65,12 @@ export function BaseLayout({ children }: { children?: React.ReactNode }) {
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
   }, [])
+
+  useEffect(() => {
+    if (!isDemoEntryEnabled() || !user.token) return
+    const path = `${location.pathname}${location.search || ''}`
+    void api.user.postDemoVisit({ path }).catch(() => {})
+  }, [location.pathname, location.search, user.token])
 
   return (
     <div className={`base-layout ${device.sidebarCollapsed ? 'base-layout--sidebar-collapsed' : ''}`}>

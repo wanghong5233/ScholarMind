@@ -2,6 +2,7 @@ import { AdminLayout } from '@/layout/admin'
 import { BaseLayout } from '@/layout/base'
 import NotFound from '@/pages/404'
 import AdminPage from '@/pages/admin'
+import AdminDemoStatsPage from '@/pages/admin/demo-stats'
 import AdminForbiddenPage from '@/pages/admin/forbidden'
 import AdminLoginPage from '@/pages/admin/login'
 import Chat from '@/pages/chat'
@@ -119,6 +120,13 @@ const adminRoutes: IRouteObject[] = [
   {
     path: 'debug/retrieval',
     Component: RetrievalDebugPage,
+    meta: {
+      admin: true,
+    },
+  },
+  {
+    path: 'demo-stats',
+    Component: AdminDemoStatsPage,
     meta: {
       admin: true,
     },

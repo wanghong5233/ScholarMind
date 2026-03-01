@@ -169,6 +169,22 @@ export interface AdminDeepResearchQueueResponse {
   pending_items: AdminDeepResearchQueueItem[]
 }
 
+export interface AdminDemoStatsItem {
+  id: number
+  ip: string
+  path: string
+  user_agent: string | null
+  visited_at: string | null
+}
+
+export interface AdminDemoStatsResponse {
+  items: AdminDemoStatsItem[]
+  total: number
+  page: number
+  page_size: number
+  by_ip: { ip: string; count: number }[]
+}
+
 export function adminLogin(
   payload: { username: string; password: string },
   options?: AxiosRequestConfig,
@@ -182,6 +198,16 @@ export function adminLogin(
 
 export function getAdminMe(options?: AxiosRequestConfig) {
   return request.get<AdminMeResponse>('admin/me', withAdminAuth(options))
+}
+
+export function getAdminDemoStats(
+  params?: { page?: number; page_size?: number },
+  options?: AxiosRequestConfig,
+) {
+  return request.get<AdminDemoStatsResponse>('admin/demo-stats', {
+    ...withAdminAuth(options),
+    params,
+  })
 }
 
 export function getAdminOverview(options?: AxiosRequestConfig) {

@@ -112,7 +112,7 @@ ScholarMind 采用**四服务微服务架构**，集成生产级 RAG 检索管�
 | **NoteAgent** | 将 summary 压缩为 bullet notes，控制 Reporter 输入 token |
 | **DecisionAgent** | 证据质量评估（sufficient / followup / tool_calls），三层 LLM 容错 |
 | **ManagerAgent** | 自适应话题扩展，防队列停滞 |
-| **ReporterAgent** | 分节生成、两层引用过滤、量化质量门控 |
+| **ReporterAgent** | 分节生成、引用过滤、量化质量门控 |
 
 **工具**：`paper.search`（Semantic Scholar + arXiv）、`web.search`、`rag.ask`、`rag.compare`、`web.open_page`、`code.exec` 等。
 
@@ -144,60 +144,31 @@ ScholarMind 采用**四服务微服务架构**，集成生产级 RAG 检索管�
 
 ## 快速开始
 
-### 环境要求
-
-- Docker & Docker Compose
-- 8GB+ RAM（推荐 16GB，Elasticsearch 与 Grobid 较吃内存）
-- **NVIDIA GPU**（MinerU PDF 解析、本地 Reranker 需 GPU；无 GPU 见下方故障排查）
-- DashScope API Key（必需，用于 Embedding/LLM/Reranker）
-
-### 启动服务
+**环境**：Docker Compose、8GB+ RAM、NVIDIA GPU（无 GPU 见[故障排查](#故障排查)）、DashScope API Key
 
 ```bash
 git clone https://github.com/wanghong5233/ScholarMind.git
 cd ScholarMind/backend
 cp .env.example .env
-# 编辑 .env，至少配置：DASHSCOPE_API_KEY、JWT_SECRET_KEY、ELASTIC_PASSWORD（见下方）
-make up-build
-make migrate   # 首次启动需执行数据库迁移
+# 编辑 .env，至少配置：DASHSCOPE_API_KEY、JWT_SECRET_KEY、ELASTIC_PASSWORD
+make up-build && make migrate
+cd ../frontend && npm run dev   # 前端单独启动
 ```
 
-首次启动会构建镜像，耗时较长。后续增量启动用 `make up` 即可。
+**访问**：前端 http://localhost:5173 | API 文档 http://localhost:8000/docs
 
-### 环境变量说明（最小必填）
+**必填环境变量**：`DASHSCOPE_API_KEY`、`JWT_SECRET_KEY`（`python -c "import secrets; print(secrets.token_hex(32))"` 生成）、`ELASTIC_PASSWORD`（8 位+）。可选：`SEMANTIC_SCHOLAR_API_KEY`、`TAVILY_API_KEY`/`SERPER_API_KEY`。详见 `backend/.env.example`。
 
-| 变量 | 必需 | 说明 |
-|------|------|------|
-| `DASHSCOPE_API_KEY` | 是 | 阿里云通义千问，用于 Embedding/LLM/Reranker |
-| `JWT_SECRET_KEY` | 是 | JWT 签名密钥，`python -c "import secrets; print(secrets.token_hex(32))"` 生成 |
-| `ELASTIC_PASSWORD` | 是 | Elasticsearch 8.x 密码，建议 8 位以上 |
-| `SEMANTIC_SCHOLAR_API_KEY` | 可选 | DeepResearch 论文检索 |
-| `TAVILY_API_KEY` / `SERPER_API_KEY` | 可选 | Web 搜索 |
-
-### 访问
-
-- **前端**：http://localhost:5173（需单独 `cd frontend && npm run dev`）
-- **API 文档**：http://localhost:8000/docs
-- **日志**：`make logs-api` 或 `make logs-api-history`
-
-### Make 常用命令
-
-```bash
-make help          # 查看全部命令
-make up            # 启动（不重新构建）
-make down          # 停止并删除容器
-make logs-api      # 实时查看 API 日志
-make migrate       # 执行数据库迁移（首次启动必执行）
-```
+**常用命令**：`make up` 启动 | `make down` 停止 | `make logs-api` 日志
 
 ### 故障排查
 
 | 现象 | 处理 |
 |------|------|
-| MinerU / Reranker 启动失败（无 GPU） | 修改 `docker-compose.yml`：`mineru` 与 `reranker` 的 `dockerfile` 改为 `Dockerfile`（去掉 `.gpu`），并注释各自 `deploy.resources.reservations` 整段。Reranker 默认用 DashScope 时可不依赖本地服务；MinerU 无 GPU 时 PDF 解析会受限 |
-| Elasticsearch 健康检查超时 | 确认 `.env` 中 `ELASTIC_PASSWORD` 已设置；ES 首次启动较慢，可等 2–3 分钟 |
-| 前端空白 / 接口 401 | 检查 `JWT_SECRET_KEY` 是否已配置且与后端一致 |
-| PDF 上传解析失败 | MinerU 依赖 GPU，确认已正确安装 NVIDIA 驱动与 Container Toolkit |
+| MinerU/Reranker 启动失败（无 GPU） | 在 `docker-compose.yml` 中：`mineru`、`reranker` 的 `dockerfile` 改为 `Dockerfile`，并注释 `deploy.resources.reservations`。Reranker 可用 DashScope 云端；MinerU 无 GPU 时解析受限 |
+| Elasticsearch 超时 | 确保 `.env` 中 `ELASTIC_PASSWORD` 已设置，ES 首次启动约 2–3 分钟 |
+| 前端空白 / 401 | 检查 `JWT_SECRET_KEY` 与后端一致 |
+| PDF 解析失败 | MinerU 需 GPU，确认 NVIDIA 驱动与 Container Toolkit 已安装 |
 
 ---
 

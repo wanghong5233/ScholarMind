@@ -14,6 +14,7 @@ const NAV_ITEMS: AdminNavItem[] = [
   { key: '/admin', label: '后台总览' },
   { key: '/admin/debug/parse', label: '解析调试' },
   { key: '/admin/debug/retrieval', label: '检索调试' },
+  { key: '/admin/demo-stats', label: 'Demo 访问' },
 ]
 
 export function AdminLayout({ children }: { children?: React.ReactNode }) {
@@ -23,6 +24,7 @@ export function AdminLayout({ children }: { children?: React.ReactNode }) {
   const activeKey = useMemo(() => {
     if (location.pathname.startsWith('/admin/debug/parse')) return '/admin/debug/parse'
     if (location.pathname.startsWith('/admin/debug/retrieval')) return '/admin/debug/retrieval'
+    if (location.pathname.startsWith('/admin/demo-stats')) return '/admin/demo-stats'
     return '/admin'
   }, [location.pathname])
 
