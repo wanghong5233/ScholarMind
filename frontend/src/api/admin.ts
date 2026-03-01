@@ -171,10 +171,17 @@ export interface AdminDeepResearchQueueResponse {
 
 export interface AdminDemoStatsItem {
   id: number
+  visitor_id?: number
   ip: string
   path: string
   user_agent: string | null
   visited_at: string | null
+}
+
+export interface AdminDemoStatsByDay {
+  day: string
+  visits: number
+  unique_ips: number
 }
 
 export interface AdminDemoStatsResponse {
@@ -183,7 +190,10 @@ export interface AdminDemoStatsResponse {
   page: number
   page_size: number
   by_ip: { ip: string; count: number }[]
+  by_day?: AdminDemoStatsByDay[]
+  summary?: { unique_ips: number; today_visits: number }
 }
+
 
 export function adminLogin(
   payload: { username: string; password: string },
@@ -201,7 +211,12 @@ export function getAdminMe(options?: AxiosRequestConfig) {
 }
 
 export function getAdminDemoStats(
-  params?: { page?: number; page_size?: number },
+  params?: {
+    page?: number
+    page_size?: number
+    date_from?: string
+    date_to?: string
+  },
   options?: AxiosRequestConfig,
 ) {
   return request.get<AdminDemoStatsResponse>('admin/demo-stats', {

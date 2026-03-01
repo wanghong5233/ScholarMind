@@ -49,11 +49,6 @@ export type IRouteObject = {
 
 export const routes: IRouteObject[] = [
   {
-    path: '/',
-    Component: Index,
-    auth: false, // 根路径不校验 token，由 Index 根据 isDemoEntryEnabled 重定向到 /demo 或 /chat
-  },
-  {
     path: '/chat',
     Component: Chat,
   },
@@ -163,6 +158,13 @@ function AdminRouteLayout() {
 
 export const router = createBrowserRouter(
   [
+    // 根路径必须独立：否则会先渲染 Layout(BaseLayout+Nav)，Nav 会请求 session.list 导致 401 -> 跳登录
+    helper({
+      path: '/',
+      Component: Index,
+      auth: false,
+      pure: true,
+    }),
     helper({
       path: '/',
       Component: Layout,

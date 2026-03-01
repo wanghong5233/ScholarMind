@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import date, datetime
 from typing import Any, Optional
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
 from pydantic import BaseModel
-from sqlalchemy import func
+from sqlalchemy import distinct, func
 from sqlalchemy.orm import Session
 
 from core.config import settings
@@ -318,37 +319,105 @@ def get_admin_overview(
     }
 
 
+def _parse_date(s: str | None) -> date | None:
+    """解析 YYYY-MM-DD 格式日期。"""
+    if not (s and s.strip()):
+        return None
+    try:
+        return datetime.strptime(s.strip(), "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
 @router.get("/demo-stats", summary="Demo 访问统计")
 def get_admin_demo_stats(
     page: int = Query(1, ge=1),
     page_size: int = Query(100, ge=1, le=500),
+    date_from: str | None = Query(None, description="起始日期 YYYY-MM-DD"),
+    date_to: str | None = Query(None, description="截止日期 YYYY-MM-DD"),
     db: Session = Depends(get_db),
     current_user: AdminConsolePrincipal = Depends(get_current_admin_console_user),
 ):
     """Demo 展示界面访问记录，用于检查简历/GitHub 等入口的体验情况。"""
     _ = current_user
-    total = db.query(func.count(DemoAccessLog.id)).scalar() or 0
+    base_query = db.query(DemoAccessLog)
+    df = _parse_date(date_from)
+    dt = _parse_date(date_to)
+    if df is not None:
+        base_query = base_query.filter(
+            func.date(DemoAccessLog.visited_at) >= df
+        )
+    if dt is not None:
+        base_query = base_query.filter(
+            func.date(DemoAccessLog.visited_at) <= dt
+        )
 
-    # 诊断信息：帮助排查「无记录」问题
+    total = base_query.with_entities(func.count(DemoAccessLog.id)).scalar() or 0
     demo_entry_enabled = bool(getattr(settings, "SM_DEMO_ENTRY_ENABLED", False))
+
+    # 同一 IP 分配稳定访客编号：按首次出现时间排序，先出现的 IP 编号更小
+    ip_first_seen = (
+        db.query(DemoAccessLog.ip, func.min(DemoAccessLog.visited_at).label("first_at"))
+        .group_by(DemoAccessLog.ip)
+        .order_by(func.min(DemoAccessLog.visited_at).asc())
+        .all()
+    )
+    ip_to_visitor_id = {ip: i + 1 for i, (ip, _) in enumerate(ip_first_seen)}
+
     rows = (
-        db.query(DemoAccessLog)
-        .order_by(DemoAccessLog.visited_at.desc())
+        base_query.order_by(DemoAccessLog.visited_at.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
         .all()
     )
     ip_stats = (
-        db.query(DemoAccessLog.ip, func.count(DemoAccessLog.id).label("cnt"))
+        base_query.with_entities(
+            DemoAccessLog.ip, func.count(DemoAccessLog.id).label("cnt")
+        )
         .group_by(DemoAccessLog.ip)
         .order_by(func.count(DemoAccessLog.id).desc())
         .limit(50)
         .all()
     )
+
+    # 按天统计（在筛选范围内）
+    by_day_query = (
+        base_query.with_entities(
+            func.date(DemoAccessLog.visited_at).label("day"),
+            func.count(DemoAccessLog.id).label("visits"),
+            func.count(distinct(DemoAccessLog.ip)).label("unique_ips"),
+        )
+        .group_by(func.date(DemoAccessLog.visited_at))
+        .order_by(func.date(DemoAccessLog.visited_at).desc())
+        .limit(62)
+    )
+    by_day_raw = by_day_query.all()
+    by_day = [
+        {
+            "day": (d.day.isoformat() if hasattr(d.day, "isoformat") else str(d.day)),
+            "visits": d.visits,
+            "unique_ips": d.unique_ips,
+        }
+        for d in by_day_raw
+    ]
+
+    unique_ip_count = (
+        base_query.with_entities(func.count(distinct(DemoAccessLog.ip))).scalar()
+        or 0
+    )
+    today = date.today()
+    today_visits = (
+        db.query(func.count(DemoAccessLog.id))
+        .filter(func.date(DemoAccessLog.visited_at) == today)
+        .scalar()
+        or 0
+    )
+
     return {
         "items": [
             {
                 "id": r.id,
+                "visitor_id": ip_to_visitor_id.get(r.ip),
                 "ip": r.ip,
                 "path": r.path,
                 "user_agent": r.user_agent,
@@ -360,6 +429,11 @@ def get_admin_demo_stats(
         "page": page,
         "page_size": page_size,
         "by_ip": [{"ip": ip, "count": cnt} for ip, cnt in ip_stats],
+        "by_day": by_day,
+        "summary": {
+            "unique_ips": unique_ip_count,
+            "today_visits": today_visits,
+        },
         "diagnostic": {
             "demo_entry_enabled": demo_entry_enabled,
         },
