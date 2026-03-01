@@ -35,6 +35,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { proxy, useSnapshot } from 'valtio'
 import { sessionActions } from '../../store/session'
 import ChatMessage from './component/chat-message'
+import ChatWelcome from './component/chat-welcome'
 import Citations from './component/citations'
 import Contracts from './component/contracts'
 import ChatDrawer from './component/drawer'
@@ -92,7 +93,7 @@ const DEEP_RESEARCH_PRESET_LABELS: Record<DeepResearchPresetKey, string> = {
 }
 
 const MAX_CHAT_IMAGE_COUNT = 4
-const MAX_CHAT_IMAGE_SIZE_BYTES = 10 * 1024 * 1024
+const MAX_CHAT_IMAGE_SIZE_BYTES = 6 * 1024 * 1024 // 6MB，与 Doc Studio 一致
 const DEEP_CHAT_LLM_LOCAL_STORAGE_KEY = 'deep_chat_llm_model'
 const DEEP_CHAT_LAST_USED_USER_KB_ID_STORAGE_KEY = 'deep_chat_last_user_kb_id'
 const DEEP_CHAT_RESEARCH_PRESET_STORAGE_KEY = 'deep_chat_research_preset'
@@ -111,6 +112,22 @@ const DEEP_RESEARCH_PERSIST_PROGRESS_LIMIT = 200
 const DEEP_RESEARCH_PERSIST_CITATIONS_LIMIT = 60
 const DEEP_RESEARCH_PERSIST_REPORT_CHARS = 6000
 const DEEP_RESEARCH_PERSIST_QUEUE_BLOCKS_LIMIT = 24
+
+const FRIENDLY_MODEL_UNAVAILABLE = '当前模型暂时不可用，请稍后重试或尝试切换其他模型。'
+
+/** 将 LLM API 错误（如 400、模型不存在、流式错误等）转为半生产环境的友好提示 */
+function toFriendlyChatError(raw: string | undefined): string {
+  if (!raw || !String(raw).trim()) return FRIENDLY_MODEL_UNAVAILABLE
+  const lower = String(raw).toLowerCase()
+  const isModelOrApiError =
+    lower.includes('400') ||
+    (lower.includes('invalid') && lower.includes('model')) ||
+    (lower.includes('model') && (lower.includes('exist') || lower.includes('not found') || lower.includes('does not'))) ||
+    lower.includes('temporarily unavailable') ||
+    lower.includes('rate limit') ||
+    lower === 'stream error'
+  return isModelOrApiError ? FRIENDLY_MODEL_UNAVAILABLE : raw
+}
 
 const DASHSCOPE_TEXT_MODEL_OPTIONS = [
   { label: 'qwen-plus', value: 'qwen-plus' },
@@ -959,6 +976,7 @@ export default function Index() {
   const [chatImageAttachments, setChatImageAttachments] = useState<
     API.ChatImageAttachment[]
   >([])
+  const [chatImageProcessing, setChatImageProcessing] = useState(false)
   const [sessionDefaults, setSessionDefaults] =
     useState<API.SessionDefaults | null>(null)
   const [llmModel, setLlmModel] = useState<LlmModelValue>(() => {
@@ -1219,9 +1237,10 @@ export default function Index() {
 
   const history = useRequest(
     async () => {
-      const { data } = await api.session.detail({
-        session_id: id!,
-      })
+      const { data } = await api.session.detail(
+        { session_id: id! },
+        { loading: false, errorToast: false },
+      )
       return data
     },
     {
@@ -1481,9 +1500,10 @@ export default function Index() {
   const defaultsReq = useRequest(
     async () => {
       if (!id) return null
-      const { data } = await api.session.getDefaults({
-        sessionId: id,
-      })
+      const { data } = await api.session.getDefaults(
+        { sessionId: id },
+        { loading: false, errorToast: false },
+      )
       return data
     },
     {
@@ -1511,7 +1531,10 @@ export default function Index() {
 
   const kbReq = useRequest(
     async () => {
-      const { data } = await api.repository.listKnowledgeBases()
+      const { data } = await api.repository.listKnowledgeBases({
+        loading: false,
+        errorToast: false,
+      })
       return (data ?? []).filter((item) => !item.is_ephemeral)
     },
     {
@@ -1587,10 +1610,10 @@ export default function Index() {
       setUpdatingDefaults(true)
       const payload = { ...sessionDefaults, ...next } as API.SessionDefaults
       try {
-        const { data } = await api.session.updateDefaults({
-          sessionId: id,
-          defaults: payload,
-        })
+        const { data } = await api.session.updateDefaults(
+          { sessionId: id, defaults: payload },
+          { loading: false, errorToast: false },
+        )
         setSessionDefaults(data ?? payload)
       } catch (error: any) {
         const detail =
@@ -1993,9 +2016,15 @@ export default function Index() {
         if (replayed) {
           return { rolledBack: false }
         }
+        const rawMsg =
+          error?.response?.data?.detail ||
+          error?.response?.data?.message ||
+          error?.message
+        const friendlyError = toFriendlyChatError(String(rawMsg || '').trim() || undefined)
         updateTarget((draft) => {
-          draft.error = error?.message ?? 'Unknown error'
+          draft.error = friendlyError
         })
+        window.$app?.message?.warning?.(friendlyError)
         throw error
       } finally {
         activeAskRunIdRef.current = ''
@@ -2296,7 +2325,9 @@ export default function Index() {
         }
 
         if (json?.type === 'error' && typeof json?.message === 'string') {
-          nextTarget.error = json.message
+          const friendlyError = toFriendlyChatError(json.message)
+          nextTarget.error = friendlyError
+          window.$app?.message?.warning?.(friendlyError)
         }
 
         if (json?.message_id) {
@@ -2331,11 +2362,16 @@ export default function Index() {
   }, [])
 
   const buildChatImageAttachmentsFromFiles = useCallback(async (files: File[]) => {
-    const imageFiles = files.filter((file) => file.type.startsWith('image/'))
     const results: API.ChatImageAttachment[] = []
-    for (const file of imageFiles) {
+    for (const file of files) {
+      if (!file.type.startsWith('image/')) {
+        message.warning(`已跳过非图片文件：${file.name || 'unknown'}`)
+        continue
+      }
       if (file.size > MAX_CHAT_IMAGE_SIZE_BYTES) {
-        message.warning(`图片 ${file.name} 超过 10MB，已跳过`)
+        message.warning(
+          `图片过大（>${Math.round(MAX_CHAT_IMAGE_SIZE_BYTES / 1024 / 1024)}MB）：${file.name || 'unnamed'}`,
+        )
         continue
       }
       const dataUrl = await readFileAsDataUrl(file)
@@ -2353,31 +2389,34 @@ export default function Index() {
   const appendChatImageFiles = useCallback(
     async (files: File[]) => {
       if (!files.length) return
-      const incoming = await buildChatImageAttachmentsFromFiles(files)
-      if (!incoming.length) return
-      setChatImageAttachments((prev) => {
-        const remain = MAX_CHAT_IMAGE_COUNT - prev.length
-        if (remain <= 0) {
-          message.warning(`最多添加 ${MAX_CHAT_IMAGE_COUNT} 张图片`)
-          return prev
-        }
-        const deduped: API.ChatImageAttachment[] = []
-        const used = new Set(prev.map((item) => `${item.name}::${item.size}`))
-        for (const item of incoming) {
-          const key = `${item.name}::${item.size}`
-          if (used.has(key)) continue
-          used.add(key)
-          deduped.push(item)
-          if (deduped.length >= remain) break
-        }
-        if (!deduped.length) return prev
-        if (incoming.length > deduped.length) {
-          message.warning(`最多添加 ${MAX_CHAT_IMAGE_COUNT} 张图片`)
-        }
-        return [...prev, ...deduped]
-      })
+      const remain = MAX_CHAT_IMAGE_COUNT - chatImageAttachments.length
+      if (remain <= 0) {
+        message.warning(`最多可添加 ${MAX_CHAT_IMAGE_COUNT} 张图片`)
+        return
+      }
+      const candidates = files.slice(0, remain)
+      if (files.length > remain) {
+        message.info(`最多可添加 ${MAX_CHAT_IMAGE_COUNT} 张图片，已截取前 ${remain} 张`)
+      }
+      setChatImageProcessing(true)
+      try {
+        const incoming = await buildChatImageAttachmentsFromFiles(candidates)
+        if (!incoming.length) return
+        setChatImageAttachments((prev) => {
+          const used = new Set(prev.map((item) => `${item.name}::${item.size}`))
+          const deduped = incoming.filter((item) => {
+            const key = `${item.name}::${item.size}`
+            if (used.has(key)) return false
+            used.add(key)
+            return true
+          })
+          return deduped.length ? [...prev, ...deduped] : prev
+        })
+      } finally {
+        setChatImageProcessing(false)
+      }
     },
-    [buildChatImageAttachmentsFromFiles],
+    [buildChatImageAttachmentsFromFiles, chatImageAttachments.length],
   )
 
   const handleRemoveChatImageAttachment = useCallback((id: string) => {
@@ -3933,20 +3972,23 @@ export default function Index() {
             message.warning('请先在知识库页面创建可用知识库，再开启 RAG')
             return
           }
-          const { data } = await api.session.create({
-            surface: 'deep_chat',
-            defaults: {
-              llmProvider: resolveProviderByModel(llmModel),
-              llmModel,
-              useSessionKnowledgeBase: draftRagEnabled,
-              useUserKnowledgeBase: draftRagEnabled,
-              userKnowledgeBaseId: draftRagEnabled ? selectedKbId : null,
-              retrievalStrategy:
-                draftRagEnabled && draftRagMode === 'deep'
-                  ? 'multimodal_graph'
-                  : 'multi_stage',
+          const { data } = await api.session.create(
+            {
+              surface: 'deep_chat',
+              defaults: {
+                llmProvider: resolveProviderByModel(llmModel),
+                llmModel,
+                useSessionKnowledgeBase: draftRagEnabled,
+                useUserKnowledgeBase: draftRagEnabled,
+                userKnowledgeBaseId: draftRagEnabled ? selectedKbId : null,
+                retrievalStrategy:
+                  draftRagEnabled && draftRagMode === 'deep'
+                    ? 'multimodal_graph'
+                    : 'multi_stage',
+              },
             },
-          })
+            { loading: false, errorToast: false },
+          )
           const createdSessionId = String(data?.sessionId || '').trim()
           if (!createdSessionId) {
             message.error('创建会话失败，请重试')
@@ -4736,6 +4778,7 @@ export default function Index() {
             onRemovePendingAttachment={handleRemovePendingAttachment}
             onFileSelected={handleFileSelected}
             imageAttachments={chatImageAttachments}
+            imageProcessing={chatImageProcessing}
             onImageFilesSelected={appendChatImageFiles}
             onRemoveImageAttachment={handleRemoveChatImageAttachment}
             value={composerValue}
@@ -4813,26 +4856,30 @@ export default function Index() {
           </div>
         </div>
 
-        <ChatMessage
-          list={list}
-          onSend={send}
-          onOpenCiations={(item) => openCitationsPanel(item, { openPanel: true })}
-          onRefrence={setRead}
-          onRetryUserMessage={handleRetryUserMessage}
-          onResendUserMessage={handleResendUserMessage}
-          onDeepResearchConfirm={handleDeepResearchConfirm}
-          onDeepResearchCancel={handleDeepResearchCancel}
-          onDeepResearchEdit={handleDeepResearchEdit}
-          onDeepResearchRetryPlan={handleDeepResearchRetryPlan}
-          onDeepResearchOpenProcess={handleDeepResearchOpenProcess}
-          onDeepResearchOpenWorkspace={handleDeepResearchOpenWorkspace}
-          onDeepResearchExport={handleDeepResearchExport}
-          onDeepResearchCopy={handleDeepResearchCopy}
-          onDeepResearchSaveToNotebook={handleDeepResearchSaveToNotebook}
-          onDeepResearchInsertSummary={handleDeepResearchInsertSummary}
-          onAssistantFeedback={handleAssistantFeedback}
-          feedbackByMessageId={feedbackByMessageId}
-        />
+        {list.length === 0 ? (
+          <ChatWelcome />
+        ) : (
+          <ChatMessage
+            list={list}
+            onSend={send}
+            onOpenCiations={(item) => openCitationsPanel(item, { openPanel: true })}
+            onRefrence={setRead}
+            onRetryUserMessage={handleRetryUserMessage}
+            onResendUserMessage={handleResendUserMessage}
+            onDeepResearchConfirm={handleDeepResearchConfirm}
+            onDeepResearchCancel={handleDeepResearchCancel}
+            onDeepResearchEdit={handleDeepResearchEdit}
+            onDeepResearchRetryPlan={handleDeepResearchRetryPlan}
+            onDeepResearchOpenProcess={handleDeepResearchOpenProcess}
+            onDeepResearchOpenWorkspace={handleDeepResearchOpenWorkspace}
+            onDeepResearchExport={handleDeepResearchExport}
+            onDeepResearchCopy={handleDeepResearchCopy}
+            onDeepResearchSaveToNotebook={handleDeepResearchSaveToNotebook}
+            onDeepResearchInsertSummary={handleDeepResearchInsertSummary}
+            onAssistantFeedback={handleAssistantFeedback}
+            feedbackByMessageId={feedbackByMessageId}
+          />
+        )}
 
         <Drawer
           title={read?.document_name ?? ''}

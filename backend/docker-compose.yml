@@ -28,7 +28,7 @@ services: # 定义一系列的服务（容器）
       - "8000:8000"  # 将宿主机的8000端口映射到容器的8000端口
     volumes: # 定义数据卷挂载，用于数据持久化或代码同步
       - ./app:/app # 挂载本地的 app 目录，实现代码热更新
-      - D:/Anaconda/envs/llm-dev/nltk_data:/usr/local/nltk_data # 挂载本地NLTK数据目录到容器中
+      # NLTK 数据已预置于镜像，无需挂载（原 Windows 路径会致 Linux/Mac 启动失败）
       - ./storage_root:/app/service/core/storage
       - models_data:/models  # 共享模型目录（与reranker服务共享）
     command: ["uvicorn", "app_main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--timeout-graceful-shutdown", "5"] # 容器启动时执行的命令，并开启热重载
@@ -60,9 +60,9 @@ services: # 定义一系列的服务（容器）
       - cluster.routing.allocation.disk.watermark.low=5gb # 磁盘使用低水位线
       - cluster.routing.allocation.disk.watermark.high=3gb # 磁盘使用高水位线
       - cluster.routing.allocation.disk.watermark.flood_stage=2gb # 磁盘使用洪水阶段水位线
-      - TZ=${TIMEZONE} # 时区设置，从.env文件读取
+      - TZ=${TIMEZONE:-UTC} # 时区设置，从.env文件读取，默认 UTC
       - "ES_JAVA_OPTS=-Xms512m -Xmx512m" # 设置ES的JVM堆大小
-    mem_limit: ${MEM_LIMIT} # 内存使用限制，从.env文件读取
+    mem_limit: ${MEM_LIMIT:-2g} # 内存使用限制，从.env文件读取，默认 2g
     ulimits: # 设置容器的资源限制
       memlock: # 内存锁定限制
         soft: -1 # 软限制

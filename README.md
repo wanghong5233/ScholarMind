@@ -1,140 +1,233 @@
 # ScholarMind 🧠
 
-> An AI-powered research assistant for academic literature, powered by advanced RAG technology.
+> 面向学术研究者的 AI 助手平台：六层多策略 RAG、DeepResearch 多轮闭环 Agent、Doc Studio ReAct 智能编辑。
 
+---
+
+## 🎯 在线演示
+
+**[https://demo-scholarmind.wh5233.me](https://demo-scholarmind.wh5233.me)**
+
+体验 RAG 问答、DeepResearch 文献综述、Doc Studio 智能编辑，即刻开始无需本地部署。⭐ 若对你有帮助，欢迎 Star
+
+---
+
+[![Star](https://img.shields.io/github/stars/wanghong5233/ScholarMind?style=social)](https://github.com/wanghong5233/ScholarMind)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Python Version](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100%2B-009688.svg)](https://fastapi.tiangolo.com/)
-[![React](https://img.shields.io/badge/React-18.0%2B-61DAFB.svg)](https://react.dev/)
-[![RAG](https://img.shields.io/badge/RAG-Advanced-orange.svg)](#)
-[![RL](https://img.shields.io/badge/Reranker-Roadmap-lightgrey.svg)](#)
-[![Agent](https://img.shields.io/badge/LLM-Agent-purple.svg)](#)
+[![React 18](https://img.shields.io/badge/React-18-61DAFB.svg)](https://react.dev/)
+[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED.svg)](https://docs.docker.com/compose/)
 
-ScholarMind is an advanced research assistant designed for academic literature analysis. It goes beyond simple document Q&A by deeply understanding multi-modal academic papers, helping researchers with literature reviews, cross-paper comparison, and critical thinking.
+[English](README_EN.md) | **中文**
 
-## ✨ Core Features
+ScholarMind 采用**四服务微服务架构**，集成生产级 RAG 检索管线、DeepResearch 深度研究 Agent 和 Doc Studio 文档智能编辑 Agent，支持论文理解、文献综述、学术写作和知识库管理。**功能预览**：RAG 对话、DeepResearch 报告、Doc Studio 编辑 → [在线演示](https://demo-scholarmind.wh5233.me)
 
-- **🎨 Multi-modal Document Parsing**: Deep analysis of PDFs with text, tables, figures, and equations extraction
-- **🎯 Advanced RAG Strategies**: 
-  - Multi-Query retrieval with RRF fusion
-  - Semantic-aware chunking for better context coherence
-  - Metadata-enriched hierarchical retrieval
-- **🕸️ Graph-Enhanced Retrieval (Optional)**: LightRAG-style graph provider for concept-level evidence
-- **🧭 DeepResearch Pipeline**: Queue-based orchestration, progress tracking, exports, and run comparison
-- **📝 Doc Studio Workspace**: Markdown/LaTeX editing with diff/rollback and operation history
-- **🔒 Private & Offline First**: Support for local LLM/Embedding models (no data leakage)
-- **🔧 Pluggable Architecture**: Easily switch between different models (Embedders, Rerankers, LLMs)
-- **📊 Scholar-Oriented Features**:
-  - Cross-document comparison
-  - Critical question generation
-  - Citation tracking and visualization
-- **📈 Production-Ready**: A/B testing framework, structured logging, and observability built-in
+---
 
-## 🚀 Quick Start
+## 目录
 
-This project is containerized using Docker. Ensure you have Docker and Docker Compose installed.
+- [在线演示](#-在线演示)
+- [架构总览](#架构总览)
+- [核心模块](#核心模块)
+  - [RAG 检索增强](#1-rag-检索增强)
+  - [DeepResearch 深度研究](#2-deepresearch-深度研究)
+  - [Doc Studio 智能编辑](#3-doc-studio-智能编辑)
+- [快速开始](#快速开始)
+  - [故障排查](#故障排查)
+- [技术栈](#技术栈)
+- [架构亮点](#架构亮点)
+- [开源协议](#开源协议)
 
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/your-username/ScholarMind.git
-    cd ScholarMind
-    ```
+---
 
-2.  **Configure Environment:**
-    Navigate to the `backend` directory and set up your environment variables.
-    ```bash
-    cd backend
-    cp .env.example .env
-    ```
-    Now, edit the `.env` file to add your API keys or modify configurations as needed.
+## 架构总览
 
-3.  **Launch Services:**
-    From the `backend` directory, run:
-    ```bash
-    docker-compose up -d --build
-    ```
-    This will build the necessary images and start all services (API, database, vector store) in the background.
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     React 前端 (Vite + Ant Design)                     │
+│    主站 deep_chat  │  Doc Studio  │  Notebook  │  管理后台 admin      │
+└───────────┬──────────────┬──────────────┬──────────────┬──────────────┘
+            │              │              │              │
+            ▼              ▼              ▼              ▼
+┌───────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
+│ scholarmind   │  │ deep_research│  │ doc_studio  │  │ (同主站)     │
+│ _api :8000   │  │   :8004     │  │   :8003     │  │             │
+└───────┬───────┘  └──────┬──────┘  └──────┬──────┘  └─────────────┘
+        │                  │                │
+        │  ◄─── internal token ────────────┘
+        │
+        ├─ PostgreSQL    (用户/会话/文档/消息/记忆/审计)
+        ├─ Elasticsearch (向量 dense_vector + BM25 全文)
+        ├─ Redis         (队列/缓存/SSE 重放)
+        ├─ Reranker :8002 (BGE-Reranker 精排)
+        └─ MinerU + Grobid (PDF 高保真解析)
+```
 
-4.  **Access the API:**
-    Once the services are up, you can access the API documentation at [http://localhost:8000/docs](http://localhost:8000/docs).
+| 服务 | 端口 | 职责 |
+|------|------|------|
+| `scholarmind_api` | 8000 | 主 API：用户认证、RAG 对话、Session 管理、文档处理 |
+| `deep_research` | 8004 | DeepResearch Agent：多轮研究、队列调度、报告生成 |
+| `doc_studio` | 8003 | Doc Studio Agent：LaTeX/Markdown 编辑、文件系统、HitL 确认 |
+| `reranker` | 8002 | Cross-Encoder 精排 |
 
-## 🛠️ Tech Stack
+---
 
-- **Backend**: FastAPI, Python 3.11+, SQLAlchemy, Alembic
-- **Database**: PostgreSQL, Elasticsearch (vector store), Redis (cache)
-- **Frontend**: React 18, TypeScript, Ant Design, Valtio
-- **Core AI**: 
-  - Embedding: bge-large-zh-v1.5 (local) / DashScope API
-  - LLM: Qwen / GPT-4 / Local models
-  - Parsing: deepdoc, PyMuPDF
-- **DevOps**: Docker, Docker Compose
+## 核心模块
 
-## 📖 Documentation
+### 1. RAG 检索增强
 
-- **[Backend Architecture & API Reference](./backend/readme/readme.md)** - Detailed technical documentation with architecture diagrams
-- **[Database Migrations Guide](./backend/app/alembic/README.md)** - Alembic migration instructions
-- **[API Documentation](http://localhost:8000/docs)** - Interactive Swagger UI (after service startup)
+六层多策略检索管线，支持会话内文档与用户知识库的混合检索。
 
-## 🔬 Research & Innovation
+| 阶段 | 说明 |
+|------|------|
+| **Query Variants** | CJK 自动翻译、Multi-Query 改写、HyDE 假设文档 |
+| **多路检索** | BM25 + 向量 × N variants × M indices（session_only / global_only / hybrid） |
+| **RRF 融合** | 基于排名的量纲无关融合 |
+| **MMR 多样性** | Jaccard token 相似度，平衡相关性与多样性 |
+| **公式上下文扩展** | 公式 chunk 前后各 2 块纳入，保证定义与解释完整 |
+| **Metadata 重排** | 年份、引用数、章节、知识图谱 boost、多模态元素 |
+| **Cross-Encoder 精排** | BGE-Reranker-Large INT8 最终排序 |
 
-This project combines production-ready RAG/Agent systems with a roadmap for RL-driven optimization:
+**文档摄入**：MinerU 高保真解析 → Grobid 学术元数据 → 策略感知分块 → Embedding → ES 双索引。
 
-- **Graph-Enhanced Retrieval (LightRAG-style)**: Optional graph provider for concept-level evidence
-- **Multimodal RAG**: Treating figures and tables as first-class knowledge units alongside text
-- **Reinforcement Learning for Information Retrieval (Roadmap)**: Rerankers trained on implicit user signals
-- **LLM Agent Optimization (Roadmap)**: RL (PPO/REINFORCE) for multi-step planning/tool use
+**SSE 事件序列**：`progress.accepted` → `progress.history`（STM）→ `progress.memory`（LTM）→ `progress.retrieving` → `progress.rerank` → `delta.*`（流式 token）→ `completion`。支持 `Last-Event-ID` 断线重放。
 
-These innovations aim to bridge the gap between academic research and production systems, demonstrating how advanced ML techniques can be applied to real-world problems.
+**记忆**：Session KB（会话内文档）+ 用户知识库（RAG 可选）+ STM（近期历史）+ LTM（跨会话长期记忆）。
 
-## 🎯 Project Highlights
+**Session KB 与用户知识库**：Session KB 是每个会话专属的文档库，随会话生命周期管理；用户知识库是自建的跨会话知识库，RAG 开启时参与检索，二者独立。
 
-This project demonstrates production-level engineering practices in RAG systems:
+---
 
-### ✅ **Implemented Features**
+### 2. DeepResearch 深度研究
 
-1. **Semantic-Aware Chunking**: Splits documents based on sentence embedding similarity, preserving semantic coherence
-2. **Hierarchical Retrieval Pipeline**: Multi-stage retrieval from broad recall (Multi-Query + RRF) to precise reranking
-3. **Multimodal Information Extraction**: Extracts and indexes figure captions and table structures as first-class entities
-4. **Context Compression**: Token-based conversation history management with rolling summaries
-5. **Observability & A/B Testing**: Feature flags, JSONL event logging, and built-in experimentation framework
-6. **Cross-Paper Comparison**: Structured comparison across multiple documents with citation tracking
-7. **Critical Question Generation**: AI-powered question generation for deeper paper understanding
+多轮闭环 Agent 系统，用于论文深度研究、文献综述和报告生成。
 
-### 🚧 **Planned Features** (Roadmap)
+**六层 Agent 体系**：
 
-#### **Phase 2: Advanced RAG Optimization**
-- 🔄 **RL-Based Reranker**: Reinforcement learning model trained on implicit user feedback (citation clicks, dwell time) to optimize chunk ranking
-  - **Target**: Improve Citation CTR by 20-30% and NDCG@5 by 10-15%
-- 🔄 **Adaptive Retrieval Strategy**: Dynamic strategy selection based on query type and user context
-- 🔄 **Query Understanding**: Intent classification and multi-hop question decomposition
+| Agent | 职责 |
+|-------|------|
+| **PlannerAgent** | RAG 辅助生成 JSON 研究计划 |
+| **ResearchAgent** | Beam-Select 动作评分、CJK 剥离+锚点注入、多轮 Observe→Decide→Act |
+| **NoteAgent** | 将 summary 压缩为 bullet notes，控制 Reporter 输入 token |
+| **DecisionAgent** | 证据质量评估（sufficient / followup / tool_calls），三层 LLM 容错 |
+| **ManagerAgent** | 自适应话题扩展，防队列停滞 |
+| **ReporterAgent** | 分节生成、两层引用过滤、量化质量门控 |
 
-#### **Phase 3: AI-Powered Writing Assistant**
-- 📝 **Smart Citation Suggestion**: Cite-as-you-write functionality with automatic reference generation
-- 📝 **Academic Language Polishing**: Transform drafts into publication-ready prose
-- 📝 **Context-Aware Writing**: Generate paper sections grounded in your knowledge base
+**工具**：`paper.search`（Semantic Scholar + arXiv）、`web.search`、`rag.ask`、`rag.compare`、`web.open_page`、`code.exec` 等。
 
-#### **Phase 4: Advanced Agentic Automation (Roadmap)**
-- 🤖 **Agent-Powered Related Work Generation**: Autonomous multi-step drafting pipelines
-  - Tools: `search_papers`, `read_and_summarize`, `synthesize_content`, `format_bibliography`
-  - **Target**: Generate 80% ready-to-use Related Work sections
-- 🤖 **Agent Planning Optimization via RL**: Fine-tune decision-making with PPO/REINFORCE
-  - Optimize tool selection and parameter generation for complex research tasks
-> Base agentic workflows already exist in DeepResearch and Doc Studio; this phase focuses on full automation.
+**弹性设计**：租约调度、Watchdog 超时、断点续跑、SSE 全链路可观测。`MAX_ACTIVE_RUNS=2` 全局并发上限，超出入队；优先级 + Aging 防饥饿；租约续约失败 → 实例宕机保护，自动取消并重入队。
 
-#### **Phase 5: Knowledge Intelligence (Roadmap)**
-- 🕸️ **Graph Analytics & Visualization**: Extend beyond current graph-enhanced retrieval
-  - Visualize author networks, research trends, and paper relationships
-- 📊 **Literature Analytics**: Topic modeling, citation impact analysis, research gap detection
+**引用质量**：两层漏斗（严格层 + relaxed 层），学术域名（arxiv、semanticscholar 等）豁免 topic overlap 检查；质量门控（最少段落、最少引用、引用段落覆盖率）未达标则 run 标记 FAILED。
 
-## 🤝 Contributing
+---
 
-Contributions are welcome! Please check our `CONTRIBUTING.md` for guidelines.
+### 3. Doc Studio 智能编辑
 
-## 📄 License
+体验参考 Cursor，侧重 LaTeX/Markdown 等文档的智能编辑。ReAct 推理循环 + Human-in-the-loop 危险操作确认。
 
-This project is licensed under the MIT License. See the `LICENSE` file for details.
+| 能力 | 说明 |
+|------|------|
+| **Ask/Agent 双模式** | Ask 只读分析；Agent 全工具链执行 |
+| **动态工具编排** | 定位→读片段→精确改写，16 种工具独立预算守卫 |
+| **Human-in-the-loop** | 危险操作（如批量删除）需用户确认；asyncio.Future 挂起，最长 900s 等待 |
+| **语义混合检索** | embedding + lexical n-gram，增量索引与冷启动预热 |
+| **异步可取消** | SSE 全链路事件，支持中断与断线重连回放 |
+| **多模态** | 图片附件自动切换 vision 模型 |
+| **LaTeX CJK** | Unicode/CJK 检测自动注入 ctex，保证中文编译 |
 
+**Notebook**：Doc Studio 的 workspaceId=`notebook` 特例，支持 DeepResearch 报告一键导入。系统目录（如 `_system/auto_notes/`）结构只读，文件可删；用户目录完全自由。
 
+**approval_token 安全**：危险删除操作路径绑定、单次消费（`pop()`）、TTL 过期清理，防重放。
 
+---
 
+## 快速开始
 
+### 环境要求
+
+- Docker & Docker Compose
+- 8GB+ RAM（推荐 16GB，Elasticsearch 与 Grobid 较吃内存）
+- **NVIDIA GPU**（MinerU PDF 解析、本地 Reranker 需 GPU；无 GPU 见下方故障排查）
+- DashScope API Key（必需，用于 Embedding/LLM/Reranker）
+
+### 启动服务
+
+```bash
+git clone https://github.com/wanghong5233/ScholarMind.git
+cd ScholarMind/backend
+cp .env.example .env
+# 编辑 .env，至少配置：DASHSCOPE_API_KEY、JWT_SECRET_KEY、ELASTIC_PASSWORD（见下方）
+make up-build
+make migrate   # 首次启动需执行数据库迁移
+```
+
+首次启动会构建镜像，耗时较长。后续增量启动用 `make up` 即可。
+
+### 环境变量说明（最小必填）
+
+| 变量 | 必需 | 说明 |
+|------|------|------|
+| `DASHSCOPE_API_KEY` | 是 | 阿里云通义千问，用于 Embedding/LLM/Reranker |
+| `JWT_SECRET_KEY` | 是 | JWT 签名密钥，`python -c "import secrets; print(secrets.token_hex(32))"` 生成 |
+| `ELASTIC_PASSWORD` | 是 | Elasticsearch 8.x 密码，建议 8 位以上 |
+| `SEMANTIC_SCHOLAR_API_KEY` | 可选 | DeepResearch 论文检索 |
+| `TAVILY_API_KEY` / `SERPER_API_KEY` | 可选 | Web 搜索 |
+
+### 访问
+
+- **前端**：http://localhost:5173（需单独 `cd frontend && npm run dev`）
+- **API 文档**：http://localhost:8000/docs
+- **日志**：`make logs-api` 或 `make logs-api-history`
+
+### Make 常用命令
+
+```bash
+make help          # 查看全部命令
+make up            # 启动（不重新构建）
+make down          # 停止并删除容器
+make logs-api      # 实时查看 API 日志
+make migrate       # 执行数据库迁移（首次启动必执行）
+```
+
+### 故障排查
+
+| 现象 | 处理 |
+|------|------|
+| MinerU / Reranker 启动失败（无 GPU） | 修改 `docker-compose.yml`：`mineru` 与 `reranker` 的 `dockerfile` 改为 `Dockerfile`（去掉 `.gpu`），并注释各自 `deploy.resources.reservations` 整段。Reranker 默认用 DashScope 时可不依赖本地服务；MinerU 无 GPU 时 PDF 解析会受限 |
+| Elasticsearch 健康检查超时 | 确认 `.env` 中 `ELASTIC_PASSWORD` 已设置；ES 首次启动较慢，可等 2–3 分钟 |
+| 前端空白 / 接口 401 | 检查 `JWT_SECRET_KEY` 是否已配置且与后端一致 |
+| PDF 上传解析失败 | MinerU 依赖 GPU，确认已正确安装 NVIDIA 驱动与 Container Toolkit |
+
+---
+
+## 技术栈
+
+| 层级 | 技术 |
+|------|------|
+| **后端** | FastAPI、Python 3.11+、SQLAlchemy、Alembic |
+| **数据库** | PostgreSQL 15、Elasticsearch 8.x、Redis 7 |
+| **前端** | React 18、TypeScript、Ant Design、Valtio |
+| **AI** | DashScope / OpenAI（Embedding、LLM）、BGE-Reranker、MinerU、Grobid |
+| **运维** | Docker Compose |
+
+---
+
+## 架构亮点
+
+| 亮点 | 说明 |
+|------|------|
+| **三层鉴权** | User Token（7 天）/ Admin Token（2 小时）/ Internal Service Token（服务间），完全解耦 |
+| **SSE 鉴权** | `EventSource` 无法带 Header → 支持 `?token=` query param 传 JWT，生产环境需 HTTPS |
+| **per-session 流控制** | `AskRunControl` 确保同 session 同一时刻最多一个活跃 ask，新请求协作取消旧流 |
+| **断线重放** | `AskStreamReplayBuffer` 双后端（内存 + Redis），`Last-Event-ID` 协议无感续流 |
+| **产品面隔离** | `sessions.surface` 区分 deep_chat / doc_studio，硬隔离会话宇宙 |
+| **GraphRAG** | 实体提取 → 图谱节点匹配 → `boost_chunk_ids` 传入 RAG Metadata 阶段 |
+| **MinerU + Grobid** | 双引擎对齐，高保真学术 PDF 解析（版面 + 元数据） |
+
+---
+
+## 开源协议
+
+本项目采用 [MIT License](./LICENSE)。  
+如对你有帮助，欢迎 ⭐ [Star](https://github.com/wanghong5233/ScholarMind) 支持。

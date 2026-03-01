@@ -1,0 +1,88 @@
+.chat-welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 240px;
+  padding: 48px 24px 64px;
+  color: #8c8c8c;
+  user-select: none;
+
+  .chat-welcome__logo-wrap {
+    margin-bottom: 20px;
+  }
+
+  .chat-welcome__logo {
+    width: 56px;
+    height: 56px;
+    opacity: 0.6;
+  }
+
+  .chat-welcome__title {
+    font-size: 14px;
+    font-weight: 500;
+    color: #8c8c8c;
+    margin-bottom: 20px;
+  }
+
+  .chat-welcome__tips {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    max-width: 480px;
+    width: 100%;
+  }
+
+  .chat-welcome__tip {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin-bottom: 12px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: #8c8c8c;
+
+    &:last-of-type {
+      margin-bottom: 0;
+    }
+  }
+
+  .chat-welcome__tip-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    flex-shrink: 0;
+    border-radius: 6px;
+    background: #f0f0f0;
+    color: #8c8c8c;
+    font-size: 14px;
+
+    .chat-welcome__tip-icon-img {
+      width: 18px;
+      height: 18px;
+      object-fit: contain;
+    }
+  }
+
+  .chat-welcome__tip-content {
+    flex: 1;
+    min-width: 0;
+
+    strong {
+      color: #595959;
+      font-weight: 500;
+    }
+  }
+
+  .chat-welcome__note {
+    margin-top: 20px;
+    padding: 10px 16px;
+    font-size: 12px;
+    color: #bfbfbf;
+    background: #fafafa;
+    border-radius: 8px;
+    text-align: center;
+  }
+}

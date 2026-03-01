@@ -60,6 +60,7 @@ import type { DataNode } from 'antd/es/tree'
 import { useSnapshot } from 'valtio'
 import Editor from '@monaco-editor/react'
 import { AgentDiffReview, type AgentDiffReviewRef } from './AgentDiffReview'
+import DocStudioWelcome from './component/doc-studio-welcome'
 import { ChatMarkdown } from '@/components/markdown/ChatMarkdown'
 import Recorder from '@/components/sender/recorder'
 import type React from 'react'
@@ -6835,12 +6836,12 @@ const LatexEditorPage = () => {
                           }}
                         />
                       ) : (
-                        <Empty description="请先选择文件" />
+                        <DocStudioWelcome />
                       )}
                     </div>
                 </div>
               ) : (
-                <Empty description="请先选择工作区" />
+                <DocStudioWelcome />
               )}
             </Content>
           </Layout>

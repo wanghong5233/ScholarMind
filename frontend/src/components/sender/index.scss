@@ -76,39 +76,56 @@
 
   .com-sender__image-chip {
     position: relative;
-    width: 36px;
-    height: 36px;
+    display: inline-block;
     border-radius: 8px;
     overflow: hidden;
-    border: 1px solid rgba(15, 23, 42, 0.1);
-    display: inline-flex;
-    flex-shrink: 0;
+
+    &:hover .com-sender__image-chip-remove {
+      opacity: 1;
+    }
   }
 
   .com-sender__image-chip-thumb {
-    width: 36px;
-    height: 36px;
-    object-fit: cover;
     display: block;
+    flex-shrink: 0;
+    cursor: pointer;
+    border-radius: 8px;
+    overflow: hidden;
+
+    img {
+      object-fit: cover;
+      display: block;
+    }
   }
 
   .com-sender__image-chip-remove {
     position: absolute;
-    right: -6px;
-    top: -6px;
+    top: 2px;
+    right: 2px;
+    z-index: 1;
+    border: none;
+    background: transparent;
+    color: #fff;
+    cursor: pointer;
+    line-height: 1;
+    padding: 0;
     width: 16px;
     height: 16px;
-    border-radius: 999px;
-    border: none;
-    background: rgba(17, 24, 39, 0.9);
-    color: #fff;
-    line-height: 1;
-    cursor: pointer;
+    min-width: 16px;
+    min-height: 16px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    font-size: 12px;
-    padding: 0;
+    font-size: 16px;
+    font-weight: 500;
+    text-shadow: 0 0 2px rgba(0, 0, 0, 0.8), 0 1px 2px rgba(0, 0, 0, 0.6);
+    opacity: 0;
+    transition: opacity 0.15s ease;
+
+    &:hover {
+      color: #fff;
+      text-shadow: 0 0 3px rgba(0, 0, 0, 0.9), 0 1px 3px rgba(0, 0, 0, 0.8);
+    }
   }
 
   .com-sender__pending-chip {

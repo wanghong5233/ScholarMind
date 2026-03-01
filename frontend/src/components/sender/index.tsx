@@ -7,7 +7,7 @@ import {
   FileOutlined,
   PictureOutlined,
 } from '@ant-design/icons'
-import { Button, Input, Select, Space, Tooltip } from 'antd'
+import { Button, Image, Input, Select, Space, Tooltip } from 'antd'
 import type { TextAreaRef } from 'antd/es/input/TextArea'
 import classNames from 'classnames'
 import {
@@ -77,6 +77,7 @@ export default function ComSender(
     onRemovePendingAttachment?: (id: number) => void
     onFileSelected?: (file: File) => void
     imageAttachments?: API.ChatImageAttachment[]
+    imageProcessing?: boolean
     onImageFilesSelected?: (files: File[]) => void | Promise<void>
     onRemoveImageAttachment?: (id: string) => void
     disableImageUpload?: boolean
@@ -104,6 +105,7 @@ export default function ComSender(
     imageAttachments = [],
     onImageFilesSelected,
     onRemoveImageAttachment,
+    imageProcessing = false,
     disableImageUpload,
     value: controlledValue,
     onValueChange,
@@ -196,23 +198,32 @@ export default function ComSender(
       )}
       {imageAttachments.length > 0 && (
         <div className="com-sender__image-attachments">
-          {imageAttachments.map((item) => (
-            <span key={item.id} className="com-sender__image-chip">
-              <img
-                src={item.dataUrl}
-                alt={item.name}
-                className="com-sender__image-chip-thumb"
-              />
-              <button
-                type="button"
-                className="com-sender__image-chip-remove"
-                onClick={() => onRemoveImageAttachment?.(item.id)}
-                title="移除图片"
-              >
-                ×
-              </button>
-            </span>
-          ))}
+          <Space wrap size={[8, 8]}>
+            {imageAttachments.map((item) => (
+              <span key={item.id} className="com-sender__image-chip">
+                <Image
+                  src={item.dataUrl}
+                  alt={item.name}
+                  width={36}
+                  height={36}
+                  className="com-sender__image-chip-thumb"
+                  preview={{ mask: false }}
+                />
+                <button
+                  type="button"
+                  className="com-sender__image-chip-remove"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    e.preventDefault()
+                    onRemoveImageAttachment?.(item.id)
+                  }}
+                  title="移除图片"
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </Space>
         </div>
       )}
       <Input.TextArea
@@ -220,7 +231,7 @@ export default function ComSender(
         value={value}
         onChange={(e) => updateValue(e.target.value)}
         onPaste={handleInputPaste}
-        placeholder="输入你的问题…"
+        placeholder="输入你的问题… Ctrl+V 粘贴图片（最多 4 张）"
         autoSize={{ minRows: 2 }}
         autoFocus
       />
@@ -353,6 +364,7 @@ export default function ComSender(
             shape="circle"
             icon={<PictureOutlined />}
             onClick={() => imageInputRef.current?.click()}
+            loading={imageProcessing}
             disabled={disableImageUpload}
             title="添加图片"
           />
