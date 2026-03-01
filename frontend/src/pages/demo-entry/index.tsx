@@ -1,14 +1,22 @@
 import * as api from '@/api'
-import { userActions } from '@/store/user'
+import { userActions, userState } from '@/store/user'
 import { Flex, Spin, Typography } from 'antd'
 import { useEffect } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
+import { useSnapshot } from 'valtio'
 
 export default function DemoEntryPage() {
   const navigate = useNavigate()
   const location = useLocation()
+  const user = useSnapshot(userState)
 
   useEffect(() => {
+    // 已有 token 时直接进 chat，避免覆盖真实登录态
+    if (user.token) {
+      navigate('/chat', { replace: true })
+      return
+    }
+
     let cancelled = false
     const query = new URLSearchParams(location.search)
     const code = (query.get('code') || '').trim()
@@ -43,7 +51,7 @@ export default function DemoEntryPage() {
     return () => {
       cancelled = true
     }
-  }, [location.search, navigate])
+  }, [user.token, location.search, navigate])
 
   return (
     <Flex

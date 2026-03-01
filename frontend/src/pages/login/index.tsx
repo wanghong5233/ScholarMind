@@ -1,7 +1,9 @@
 import * as api from '@/api'
 import { Background } from '@/layout/base/background'
 import { userActions, userState } from '@/store/user'
+import { isDemoEntryEnabled } from '@/utils/demo'
 import { Button, Flex, Form, Input, Tabs, TabsProps } from 'antd'
+import { Link } from 'react-router-dom'
 import { useEffect, useMemo, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { useSnapshot } from 'valtio'
@@ -112,6 +114,13 @@ export default function Login() {
               登录
             </Button>
           </Form.Item>
+          {isDemoEntryEnabled() && (
+            <Form.Item style={{ marginBottom: 0 }}>
+              <Link to="/demo" className={styles['demo-link']}>
+                免登录进入演示
+              </Link>
+            </Form.Item>
+          )}
         </Form>
       ),
     },
