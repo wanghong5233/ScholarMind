@@ -328,6 +328,9 @@ def get_admin_demo_stats(
     """Demo 展示界面访问记录，用于检查简历/GitHub 等入口的体验情况。"""
     _ = current_user
     total = db.query(func.count(DemoAccessLog.id)).scalar() or 0
+
+    # 诊断信息：帮助排查「无记录」问题
+    demo_entry_enabled = bool(getattr(settings, "SM_DEMO_ENTRY_ENABLED", False))
     rows = (
         db.query(DemoAccessLog)
         .order_by(DemoAccessLog.visited_at.desc())
@@ -357,6 +360,9 @@ def get_admin_demo_stats(
         "page": page,
         "page_size": page_size,
         "by_ip": [{"ip": ip, "count": cnt} for ip, cnt in ip_stats],
+        "diagnostic": {
+            "demo_entry_enabled": demo_entry_enabled,
+        },
     }
 
 

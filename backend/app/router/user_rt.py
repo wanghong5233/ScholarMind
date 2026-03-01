@@ -1,7 +1,10 @@
+import logging
 import secrets
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+
+_logger = logging.getLogger(__name__)
 from sqlalchemy import and_
 from service.auth import create_demo_token, get_current_demo_user, get_current_user
 from models.user import User as UserModel
@@ -11,7 +14,7 @@ from sqlalchemy.orm import Session
 from schemas.auth import LoginRequest, RegisterRequest, STSTokenRequest
 from service.core.system.user_service import UserService
 from core.config import settings
-from utils.database import get_db
+from utils.database import SessionLocal, get_db
 from utils.rate_limiter import rate_limiter
 
 router = APIRouter()
@@ -166,15 +169,29 @@ async def demo_entry(
         .limit(1)
         .first()
     )
-    if not existing_entry:
-        db.add(
-            DemoAccessLog(
-                ip=client_ip,
-                path="(demo_entry)",
-                user_agent=user_agent if user_agent.strip() else None,
-            )
-        )
-        db.commit()
+    try:
+        if not existing_entry:
+            # 使用独立 session 插入，避免与请求事务相互干扰
+            _log_db = SessionLocal()
+            try:
+                _log_db.add(
+                    DemoAccessLog(
+                        ip=client_ip,
+                        path="(demo_entry)",
+                        user_agent=user_agent if user_agent.strip() else None,
+                    )
+                )
+                _log_db.commit()
+                _logger.info("demo_entry logged: ip=%s", client_ip)
+            except Exception as e:
+                _log_db.rollback()
+                _logger.warning("demo_entry failed to log: %s", e)
+            finally:
+                _log_db.close()
+        else:
+            _logger.debug("demo_entry dedup: ip=%s skipped", client_ip)
+    except Exception as e:
+        _logger.warning("demo_entry check failed: %s", e)
 
     return DemoEntryResponse(
         access_token=create_demo_token(user.id, user.username),
@@ -226,15 +243,27 @@ async def demo_visit(
         .first()
     )
     if existing:
+        _logger.debug("demo_visit dedup: ip=%s path=%s skipped", client_ip, path)
         return {"ok": True}
-    db.add(
-        DemoAccessLog(
-            ip=client_ip,
-            path=path,
-            user_agent=user_agent if user_agent.strip() else None,
-        )
-    )
-    db.commit()
+    try:
+        _log_db = SessionLocal()
+        try:
+            _log_db.add(
+                DemoAccessLog(
+                    ip=client_ip,
+                    path=path,
+                    user_agent=user_agent if user_agent.strip() else None,
+                )
+            )
+            _log_db.commit()
+            _logger.info("demo_visit logged: ip=%s path=%s", client_ip, path)
+        except Exception as e:
+            _log_db.rollback()
+            _logger.warning("demo_visit failed to log: %s", e)
+        finally:
+            _log_db.close()
+    except Exception as e:
+        _logger.warning("demo_visit check failed: %s", e)
     return {"ok": True}
 
 

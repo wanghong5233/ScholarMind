@@ -1,6 +1,6 @@
 import * as api from '@/api'
 import { useRequest } from 'ahooks'
-import { Card, Space, Statistic, Table, Typography } from 'antd'
+import { Button, Card, Space, Statistic, Table, Typography } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 
 const { Title, Text } = Typography
@@ -41,7 +41,10 @@ export default function AdminDemoStatsPage() {
 
   return (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-      <Title level={4}>Demo 访问统计</Title>
+      <Space>
+        <Title level={4} style={{ margin: 0 }}>Demo 访问统计</Title>
+        <Button size="small" onClick={refresh} loading={loading}>刷新</Button>
+      </Space>
       <Text type="secondary">
         临时用于追踪简历/GitHub 等入口的 demo 体验情况。记录 IP、路径、访问时间。
       </Text>

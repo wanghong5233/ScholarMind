@@ -51,6 +51,7 @@ export const routes: IRouteObject[] = [
   {
     path: '/',
     Component: Index,
+    auth: false, // 根路径不校验 token，由 Index 根据 isDemoEntryEnabled 重定向到 /demo 或 /chat
   },
   {
     path: '/chat',
