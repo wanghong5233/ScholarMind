@@ -6836,12 +6836,13 @@ const LatexEditorPage = () => {
                           }}
                         />
                       ) : (
-                        <DocStudioWelcome />
+                        // 加载工作区时不显示引导，避免刷新时闪烁
+                        snap.workspaceLoading ? null : <DocStudioWelcome />
                       )}
                     </div>
                 </div>
               ) : (
-                <DocStudioWelcome />
+                snap.workspaceLoading ? null : <DocStudioWelcome />
               )}
             </Content>
           </Layout>

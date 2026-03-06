@@ -4857,7 +4857,8 @@ export default function Index() {
         </div>
 
         {list.length === 0 ? (
-          <ChatWelcome />
+          // 仅在「新对话未初始化」时显示引导：无 session 或 history 已加载且为空；加载/刷新时不显示
+          id && history.loading ? null : <ChatWelcome />
         ) : (
           <ChatMessage
             list={list}
