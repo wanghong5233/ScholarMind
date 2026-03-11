@@ -60,10 +60,39 @@
   }
 }
 
+.base-layout-nav__search-drawer-section + .base-layout-nav__search-drawer-section {
+  margin-top: 8px;
+}
+
+.base-layout-nav__search-drawer-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
 .base-layout-nav__search-drawer-title {
   color: #8a9099;
   font-size: 12px;
   padding: 0 0 6px;
+}
+
+.base-layout-nav__search-drawer-toggle,
+.base-layout-nav__search-drawer-more {
+  border: none;
+  background: transparent;
+  color: #8a9099;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0 2px;
+
+  &:hover {
+    color: #4d5562;
+  }
+}
+
+.base-layout-nav__search-drawer-more {
+  margin-top: 2px;
 }
 
 .base-layout-nav__search-drawer-list {

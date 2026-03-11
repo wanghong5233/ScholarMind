@@ -43,25 +43,88 @@ ScholarMind uses a **four-service microservice architecture**, integrating produ
 
 ## Architecture Overview
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                React Frontend (Vite + Ant Design)                     │
-│   deep_chat  │  Doc Studio  │  Notebook  │  admin                   │
-└───────────┬──────────────┬──────────────┬──────────────┬────────────┘
-            │              │              │              │
-            ▼              ▼              ▼              ▼
-┌───────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
-│ scholarmind   │  │ deep_research│  │ doc_studio  │  │ (same)      │
-│ _api :8000   │  │   :8004     │  │   :8003     │  │             │
-└───────┬───────┘  └──────┬──────┘  └──────┬──────┘  └─────────────┘
-        │                  │                │
-        │  ◄─── internal token ────────────┘
-        │
-        ├─ PostgreSQL    (users/sessions/documents/messages/memory/audit)
-        ├─ Elasticsearch (dense_vector + BM25 full-text)
-        ├─ Redis         (queue/cache/SSE replay)
-        ├─ Reranker :8002 (BGE-Reranker)
-        └─ MinerU + Grobid (high-fidelity PDF parsing)
+```mermaid
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'background': '#ffffff',
+    'primaryColor': '#f7f7f9',
+    'primaryBorderColor': '#d8d8df',
+    'primaryTextColor': '#444444',
+    'secondaryColor': '#f7f7f9',
+    'secondaryBorderColor': '#d8d8df',
+    'secondaryTextColor': '#444444',
+    'tertiaryColor': '#f7f7f9',
+    'tertiaryBorderColor': '#d8d8df',
+    'tertiaryTextColor': '#444444',
+    'lineColor': '#cfcfd6',
+    'fontSize': '12px',
+    'fontFamily': 'Segoe UI, Arial'
+  },
+  'flowchart': {
+    'curve': 'linear',
+    'nodeSpacing': 40,
+    'rankSpacing': 45,
+    'padding': 15
+  }
+}}%%
+flowchart TB
+    subgraph Frontend["Product Surface (React + Vite + Ant Design)"]
+        direction LR
+        UI_Chat["deep_chat"]
+        UI_DR["DeepResearch"]
+        UI_Doc["Doc Studio / Notebook"]
+        UI_Admin["admin"]
+    end
+
+    API["scholarmind_api<br/>:8000<br/>Unified entry / Auth<br/>Session / RAG<br/>Gateway"]
+
+    subgraph Services["Specialized Services"]
+        direction LR
+        DR["deep_research<br/>:8004<br/>Research orchestration / Reporting"]
+        DS["doc_studio<br/>:8003<br/>Agent editing / Workspace"]
+    end
+
+    subgraph Infra["Core Infrastructure"]
+        direction LR
+        PG[("PostgreSQL<br/>(users / documents / audit)")]
+        ES[("Elasticsearch<br/>(vector + BM25)")]
+        Redis[("Redis<br/>(queue / SSE replay)")]
+        Rerank["Reranker<br/>:8002"]
+        Parse["MinerU + Grobid<br/>(PDF parsing)"]
+    end
+
+    UI_Chat --> API
+    UI_DR --> API
+    UI_Doc --> API
+    UI_Admin --> API
+
+    API -- "/api/deep-research" --> DR
+    API -- "/api/doc-studio" --> DS
+
+    DR -. "internal token /api/internal" .-> API
+    DS -. "internal token /api/internal" .-> API
+
+    API --- PG
+    API --- ES
+    API --- Redis
+    API --- Rerank
+    API --- Parse
+
+    DR --- Redis
+
+    classDef gateway fill:#ece9f6,stroke:#b9b3cc,stroke-width:1px,color:#4f4a60;
+    classDef node fill:#f7f7f9,stroke:#d8d8df,stroke-width:1px,color:#444444;
+    classDef infra fill:#f4f5f8,stroke:#cfd6e0,stroke-width:1px,color:#444444;
+
+    class API gateway;
+    class UI_Chat,UI_DR,UI_Doc,UI_Admin,DR,DS node;
+    class PG,ES,Redis,Rerank,Parse infra;
+
+    style Frontend fill:transparent,stroke:#e3e3e8,stroke-width:1px,color:#666666,stroke-dasharray: 5 5;
+    style Services fill:transparent,stroke:#e3e3e8,stroke-width:1px,color:#666666,stroke-dasharray: 5 5;
+    style Infra fill:transparent,stroke:#e3e3e8,stroke-width:1px,color:#666666,stroke-dasharray: 5 5;
+    linkStyle default stroke:#cfcfd6,stroke-width:1px,fill:none;
 ```
 
 | Service | Port | Role |
@@ -120,6 +183,84 @@ Closed-loop Agent system for deep paper research, literature review, and report 
 
 **Citation quality**: Two-layer funnel; academic domains exempt; quality gates (min paragraphs, citations, coverage); FAILED if unmet.
 
+The diagram below shows the main closed loop of the DeepResearch multi-agent workflow, making it easier to understand how planning, research, expansion, and reporting fit together:
+
+```mermaid
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'background': '#ffffff',
+    'primaryColor': '#f7f7f9',
+    'primaryBorderColor': '#d8d8df',
+    'primaryTextColor': '#444444',
+    'secondaryColor': '#f7f7f9',
+    'secondaryBorderColor': '#d8d8df',
+    'secondaryTextColor': '#444444',
+    'tertiaryColor': '#f7f7f9',
+    'tertiaryBorderColor': '#d8d8df',
+    'tertiaryTextColor': '#444444',
+    'lineColor': '#cfcfd6',
+    'fontSize': '12px',
+    'fontFamily': 'Segoe UI, Arial'
+  },
+  'flowchart': {
+    'curve': 'linear',
+    'nodeSpacing': 26,
+    'rankSpacing': 38,
+    'padding': 10
+  }
+}}%%
+flowchart TD
+    A[User submits research topic] --> B[Create Research Run]
+    B --> C[PlannerAgent<br/>uses main-site RAG for planning]
+    C --> D[Generate outline + Block queue]
+    D -->|Parallelizable| E{Any pending Block left?}
+
+    subgraph R1[Single Block research loop]
+        direction TB
+        F[ResearchAgent works on Block] --> G[Get initial context<br/>]
+        G --> H{DecisionAgent evaluates<br/>sufficient and quality passed?}
+        H -- No --> I[Act: Beam-Select tools]
+        I --> J1[paper.search]
+        I --> J2[web.search]
+        I --> J3[followup rag.ask]
+        I --> J4[rag.compare]
+        I --> J5[code.exec]
+        J1 --> K[Observe: merge execution results<br/>update quality score and context]
+        J2 --> K
+        J3 --> K
+        J4 --> K
+        J5 --> K
+        K --> H
+        H -- Yes --> L[NoteAgent compresses notes]
+        L --> M[ManagerAgent<br/>queue management / follow-up expansion]
+    end
+
+    E -- Yes --> F
+    M --> E
+    E -- No --> N[ReporterAgent drafts report]
+    N --> O[Citation filtering + Citation Table]
+    O --> P[LLM refinement]
+    P --> Q{Quality gate?}
+    Q -- Yes --> R[Output report]
+    Q -- No --> S[FAILED / fallback]
+
+    classDef agent fill:#ece9f6,stroke:#b9b3cc,stroke-width:1px,color:#4f4a60;
+    classDef node fill:#f7f7f9,stroke:#d8d8df,stroke-width:1px,color:#444444;
+    classDef decision fill:#f5f5f7,stroke:#d8d8df,stroke-width:1px,color:#444444;
+    classDef action fill:#f7f7f9,stroke:#d8d8df,stroke-width:1px,color:#444444;
+    classDef result fill:#f7f7f9,stroke:#d8d8df,stroke-width:1px,color:#444444;
+
+    class C,F,H,L,M,N agent;
+    class A,B,D,G,O,P,R,S node;
+    class I,J1,J2,J3,J4,J5 action;
+    class K result;
+    class E,Q decision;
+
+    style R1 fill:transparent,stroke:#e3e3e8,stroke-width:1px,color:#666666;
+    linkStyle default stroke:#cfcfd6,stroke-width:1px,fill:none;
+```
+
 ---
 
 ### 3. Doc Studio
@@ -139,6 +280,80 @@ Cursor-like LaTeX/Markdown intelligent editing. ReAct loop + Human-in-the-loop c
 **Notebook**: Doc Studio workspaceId=`notebook` for DeepResearch report one-click import. System dirs read-only; user dirs fully writable.
 
 **approval_token security**: Path-bound, single-use (`pop()`), TTL cleanup, replay-resistant.
+
+The diagram below summarizes the single-agent ReAct editing loop in Doc Studio, from intent recognition and plan construction to tool execution and Diff delivery:
+
+```mermaid
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'background': '#ffffff',
+    'primaryColor': '#f7f7f9',
+    'primaryBorderColor': '#d8d8df',
+    'primaryTextColor': '#444444',
+    'secondaryColor': '#f7f7f9',
+    'secondaryBorderColor': '#d8d8df',
+    'secondaryTextColor': '#444444',
+    'tertiaryColor': '#f7f7f9',
+    'tertiaryBorderColor': '#d8d8df',
+    'tertiaryTextColor': '#444444',
+    'lineColor': '#cfcfd6',
+    'fontSize': '12px',
+    'fontFamily': 'Segoe UI, Arial'
+  },
+  'flowchart': {
+    'curve': 'linear',
+    'nodeSpacing': 26,
+    'rankSpacing': 38,
+    'padding': 10
+  }
+}}%%
+flowchart TD
+    A[User input + selection] --> B[IntentClassifier]
+    B --> C[Task type: EDIT / QA / CITATION]
+    C --> D[PlanBuilder soft plan]
+    D --> E[Initialize AgentState]
+
+    subgraph R2[ReAct loop]
+        E --> F[Observation]
+        F --> G[LLM reason_and_act]
+        G --> H{Choose tool}
+        H --> I[analyze_context]
+        H --> J[search_papers]
+        H --> K[rewrite_selection]
+        H --> L[insert/update_citation]
+        H --> M[compile_latex]
+        H --> U[delete_path]
+        U --> V[Risky action confirmation]
+        I --> N[Write back to AgentState]
+        J --> N
+        K --> N
+        L --> N
+        M --> N
+        V --> N
+        N --> O{reply_to_user<br/>or exceptional exit?}
+        O -- No: continue loop --> F
+        O -- Yes: exit loop --> P[Break ReAct loop]
+    end
+
+    P --> Q[Generate Diff preview]
+    Q --> R[Persist operation snapshot]
+    R --> S[Frontend Diff]
+    S --> T[Accept / Reject / Edit]
+
+    classDef node fill:#f7f7f9,stroke:#d8d8df,stroke-width:1px,color:#444444;
+    classDef decision fill:#f5f5f7,stroke:#d8d8df,stroke-width:1px,color:#444444;
+    classDef action fill:#f7f7f9,stroke:#d8d8df,stroke-width:1px,color:#444444;
+    classDef result fill:#f7f7f9,stroke:#d8d8df,stroke-width:1px,color:#444444;
+
+    class A,B,C,D,E,F,G,P,Q,R,S,T node;
+    class I,J,K,L,M,U,V action;
+    class N result;
+    class H,O decision;
+
+    style R2 fill:transparent,stroke:#e3e3e8,stroke-width:1px,color:#666666;
+    linkStyle default stroke:#cfcfd6,stroke-width:1px,fill:none;
+```
 
 ---
 

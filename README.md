@@ -43,25 +43,88 @@ ScholarMind 采用**四服务微服务架构**，集成生产级 RAG 检索管�
 
 ## 架构总览
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                     React 前端 (Vite + Ant Design)                     │
-│    主站 deep_chat  │  Doc Studio  │  Notebook  │  管理后台 admin      │
-└───────────┬──────────────┬──────────────┬──────────────┬──────────────┘
-            │              │              │              │
-            ▼              ▼              ▼              ▼
-┌───────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
-│ scholarmind   │  │ deep_research│  │ doc_studio  │  │ (同主站)     │
-│ _api :8000   │  │   :8004     │  │   :8003     │  │             │
-└───────┬───────┘  └──────┬──────┘  └──────┬──────┘  └─────────────┘
-        │                  │                │
-        │  ◄─── internal token ────────────┘
-        │
-        ├─ PostgreSQL    (用户/会话/文档/消息/记忆/审计)
-        ├─ Elasticsearch (向量 dense_vector + BM25 全文)
-        ├─ Redis         (队列/缓存/SSE 重放)
-        ├─ Reranker :8002 (BGE-Reranker 精排)
-        └─ MinerU + Grobid (PDF 高保真解析)
+```mermaid
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'background': '#ffffff',
+    'primaryColor': '#f7f7f9',
+    'primaryBorderColor': '#d8d8df',
+    'primaryTextColor': '#444444',
+    'secondaryColor': '#f7f7f9',
+    'secondaryBorderColor': '#d8d8df',
+    'secondaryTextColor': '#444444',
+    'tertiaryColor': '#f7f7f9',
+    'tertiaryBorderColor': '#d8d8df',
+    'tertiaryTextColor': '#444444',
+    'lineColor': '#cfcfd6',
+    'fontSize': '12px',
+    'fontFamily': 'Segoe UI, Microsoft YaHei, Arial'
+  },
+  'flowchart': {
+    'curve': 'linear',
+    'nodeSpacing': 40,
+    'rankSpacing': 45,
+    'padding': 15
+  }
+}}%%
+flowchart TB
+    subgraph Frontend["前端产品面（React + Vite + Ant Design）"]
+        direction LR
+        UI_Chat["主站 deep_chat"]
+        UI_DR["DeepResearch"]
+        UI_Doc["Doc Studio / Notebook"]
+        UI_Admin["管理后台 admin"]
+    end
+
+    API["scholarmind_api<br/>:8000<br/>统一入口 / 鉴权<br/>Session / RAG<br/>Gateway"]
+
+    subgraph Services["专项微服务"]
+        direction LR
+        DR["deep_research<br/>:8004<br/>研究编排 / 报告生成"]
+        DS["doc_studio<br/>:8003<br/>Agent 编辑 / Workspace"]
+    end
+
+    subgraph Infra["核心基础设施与组件"]
+        direction LR
+        PG[("PostgreSQL<br/>(用户/文档/审计)")]
+        ES[("Elasticsearch<br/>(向量 + BM25)")]
+        Redis[("Redis<br/>(队列/SSE重放)")]
+        Rerank["Reranker<br/>:8002"]
+        Parse["MinerU + Grobid<br/>(PDF解析)"]
+    end
+
+    UI_Chat --> API
+    UI_DR --> API
+    UI_Doc --> API
+    UI_Admin --> API
+
+    API -- "/api/deep-research" --> DR
+    API -- "/api/doc-studio" --> DS
+
+    DR -. "internal token /api/internal" .-> API
+    DS -. "internal token /api/internal" .-> API
+
+    API --- PG
+    API --- ES
+    API --- Redis
+    API --- Rerank
+    API --- Parse
+
+    DR --- Redis
+
+    classDef gateway fill:#ece9f6,stroke:#b9b3cc,stroke-width:1px,color:#4f4a60;
+    classDef node fill:#f7f7f9,stroke:#d8d8df,stroke-width:1px,color:#444444;
+    classDef infra fill:#f4f5f8,stroke:#cfd6e0,stroke-width:1px,color:#444444;
+    
+    class API gateway;
+    class UI_Chat,UI_DR,UI_Doc,UI_Admin,DR,DS node;
+    class PG,ES,Redis,Rerank,Parse infra;
+    
+    style Frontend fill:transparent,stroke:#e3e3e8,stroke-width:1px,color:#666666,stroke-dasharray: 5 5;
+    style Services fill:transparent,stroke:#e3e3e8,stroke-width:1px,color:#666666,stroke-dasharray: 5 5;
+    style Infra fill:transparent,stroke:#e3e3e8,stroke-width:1px,color:#666666,stroke-dasharray: 5 5;
+    linkStyle default stroke:#cfcfd6,stroke-width:1px,fill:none;
 ```
 
 | 服务 | 端口 | 职责 |
@@ -120,6 +183,84 @@ ScholarMind 采用**四服务微服务架构**，集成生产级 RAG 检索管�
 
 **引用质量**：两层漏斗（严格层 + relaxed 层），学术域名（arxiv、semanticscholar 等）豁免 topic overlap 检查；质量门控（最少段落、最少引用、引用段落覆盖率）未达标则 run 标记 FAILED。
 
+下图用于直观展示 DeepResearch 多 Agent 的主干闭环，便于快速理解规划、研究、扩展和报告生成之间的关系：
+
+```mermaid
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'background': '#ffffff',
+    'primaryColor': '#f7f7f9',
+    'primaryBorderColor': '#d8d8df',
+    'primaryTextColor': '#444444',
+    'secondaryColor': '#f7f7f9',
+    'secondaryBorderColor': '#d8d8df',
+    'secondaryTextColor': '#444444',
+    'tertiaryColor': '#f7f7f9',
+    'tertiaryBorderColor': '#d8d8df',
+    'tertiaryTextColor': '#444444',
+    'lineColor': '#cfcfd6',
+    'fontSize': '12px',
+    'fontFamily': 'Segoe UI, Microsoft YaHei, Arial'
+  },
+  'flowchart': {
+    'curve': 'linear',
+    'nodeSpacing': 26,
+    'rankSpacing': 38,
+    'padding': 10
+  }
+}}%%
+flowchart TD
+    A[用户输入研究主题] --> B[创建 Research Run]
+    B --> C[PlannerAgent<br/>调用主站 RAG 做研究规划]
+    C --> D[生成 outline + Block 队列]
+    D -->|可并发| E{还有待研究 Block?}
+
+    subgraph R1[单个 Block 研究闭环]
+        direction TB
+        F[ResearchAgent 研究 Block] --> G[获取初始上下文<br/>]
+        G --> H{DecisionAgent 评估<br/>充分且质量达标?}
+        H -- 否 --> I[Act: Beam-Select 选定工具]
+        I --> J1[paper.search]
+        I --> J2[web.search]
+        I --> J3[followup rag.ask]
+        I --> J4[rag.compare]
+        I --> J5[code.exec]
+        J1 --> K[Observe: 合并执行结果<br/>更新质量分数与上下文]
+        J2 --> K
+        J3 --> K
+        J4 --> K
+        J5 --> K
+        K --> H
+        H -- 是 --> L[NoteAgent 压缩 notes]
+        L --> M[ManagerAgent<br/>队列管理/扩展 follow-ups]
+    end
+
+    E -- 是 --> F
+    M --> E
+    E -- 否 --> N[ReporterAgent 生成草稿]
+    N --> O[引用过滤 + Citation Table]
+    O --> P[LLM 精炼]
+    P --> Q{质量门控?}
+    Q -- 是 --> R[输出报告]
+    Q -- 否 --> S[FAILED/回退]
+
+    classDef agent fill:#ece9f6,stroke:#b9b3cc,stroke-width:1px,color:#4f4a60;
+    classDef node fill:#f7f7f9,stroke:#d8d8df,stroke-width:1px,color:#444444;
+    classDef decision fill:#f5f5f7,stroke:#d8d8df,stroke-width:1px,color:#444444;
+    classDef action fill:#f7f7f9,stroke:#d8d8df,stroke-width:1px,color:#444444;
+    classDef result fill:#f7f7f9,stroke:#d8d8df,stroke-width:1px,color:#444444;
+
+    class C,F,H,L,M,N agent;
+    class A,B,D,G,O,P,R,S node;
+    class I,J1,J2,J3,J4,J5 action;
+    class K result;
+    class E,Q decision;
+
+    style R1 fill:transparent,stroke:#e3e3e8,stroke-width:1px,color:#666666;
+    linkStyle default stroke:#cfcfd6,stroke-width:1px,fill:none;
+```
+
 ---
 
 ### 3. Doc Studio 智能编辑
@@ -139,6 +280,80 @@ ScholarMind 采用**四服务微服务架构**，集成生产级 RAG 检索管�
 **Notebook**：Doc Studio 的 workspaceId=`notebook` 特例，支持 DeepResearch 报告一键导入。系统目录（如 `_system/auto_notes/`）结构只读，文件可删；用户目录完全自由。
 
 **approval_token 安全**：危险删除操作路径绑定、单次消费（`pop()`）、TTL 过期清理，防重放。
+
+下图用于概括 Doc Studio 单 Agent 的 ReAct 编辑循环，展示从意图识别、计划生成到工具执行和 Diff 交付的完整链路：
+
+```mermaid
+%%{init: {
+  'theme': 'base',
+  'themeVariables': {
+    'background': '#ffffff',
+    'primaryColor': '#f7f7f9',
+    'primaryBorderColor': '#d8d8df',
+    'primaryTextColor': '#444444',
+    'secondaryColor': '#f7f7f9',
+    'secondaryBorderColor': '#d8d8df',
+    'secondaryTextColor': '#444444',
+    'tertiaryColor': '#f7f7f9',
+    'tertiaryBorderColor': '#d8d8df',
+    'tertiaryTextColor': '#444444',
+    'lineColor': '#cfcfd6',
+    'fontSize': '12px',
+    'fontFamily': 'Segoe UI, Microsoft YaHei, Arial'
+  },
+  'flowchart': {
+    'curve': 'linear',
+    'nodeSpacing': 26,
+    'rankSpacing': 38,
+    'padding': 10
+  }
+}}%%
+flowchart TD
+    A[用户输入+选区] --> B[IntentClassifier]
+    B --> C[任务类型: EDIT/QA/CITATION]
+    C --> D[PlanBuilder 软计划]
+    D --> E[初始化 AgentState]
+
+    subgraph R2[ReAct 循环]
+        E --> F[Observation]
+        F --> G[LLM reason_and_act]
+        G --> H{选工具}
+        H --> I[analyze_context]
+        H --> J[search_papers]
+        H --> K[rewrite_selection]
+        H --> L[insert/update_citation]
+        H --> M[compile_latex]
+        H --> U[delete_path]
+        U --> V[危险操作确认]
+        I --> N[写回 AgentState]
+        J --> N
+        K --> N
+        L --> N
+        M --> N
+        V --> N
+        N --> O{是否为 reply_to_user<br/>或触发异常退出?}
+        O -- 否: 继续循环 --> F
+        O -- 是: 结束循环 --> P[跳出 ReAct 循环]
+    end
+
+    P --> Q[生成 Diff 预览]
+    Q --> R[操作快照]
+    R --> S[前端 Diff]
+    S --> T[Accept/Reject/Edit]
+
+    classDef node fill:#f7f7f9,stroke:#d8d8df,stroke-width:1px,color:#444444;
+    classDef decision fill:#f5f5f7,stroke:#d8d8df,stroke-width:1px,color:#444444;
+    classDef action fill:#f7f7f9,stroke:#d8d8df,stroke-width:1px,color:#444444;
+    classDef result fill:#f7f7f9,stroke:#d8d8df,stroke-width:1px,color:#444444;
+
+    class A,B,C,D,E,F,G,P,Q,R,S,T node;
+    class I,J,K,L,M,U,V action;
+    class N result;
+    class H,O decision;
+
+    style R2 fill:transparent,stroke:#e3e3e8,stroke-width:1px,color:#666666;
+    linkStyle default stroke:#cfcfd6,stroke-width:1px,fill:none;
+```
 
 ---
 

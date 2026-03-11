@@ -11,7 +11,63 @@ import { useSnapshot } from 'valtio'
 import classNames from 'classnames'
 import './nav.scss'
 
-const MAX_RECENT_SIDEBAR_ITEMS = 10
+const SIDEBAR_DEFAULT_VISIBLE_PER_GROUP = 8
+const SEARCH_TIME_GROUPS = [
+  { key: 'today', label: 'Today' },
+  { key: 'yesterday', label: 'Yesterday' },
+  { key: 'previous7Days', label: 'Previous 7 Days' },
+  { key: 'previous30Days', label: 'Previous 30 Days' },
+  { key: 'older', label: 'Older' },
+] as const
+
+type SearchTimeGroupKey = (typeof SEARCH_TIME_GROUPS)[number]['key']
+const EMPTY_GROUP_STATE: Record<SearchTimeGroupKey, boolean> = {
+  today: false,
+  yesterday: false,
+  previous7Days: false,
+  previous30Days: false,
+  older: false,
+}
+
+function groupSessionsByTime(sessions: API.Session[]) {
+  const grouped: Record<SearchTimeGroupKey, API.Session[]> = {
+    today: [],
+    yesterday: [],
+    previous7Days: [],
+    previous30Days: [],
+    older: [],
+  }
+  const now = dayjs()
+
+  sessions.forEach((item) => {
+    const ts = dayjs(item.updated_at || item.created_at)
+    if (!ts.isValid()) {
+      grouped.older.push(item)
+      return
+    }
+
+    const dayDiff = now.startOf('day').diff(ts.startOf('day'), 'day')
+    if (dayDiff <= 0) {
+      grouped.today.push(item)
+      return
+    }
+    if (dayDiff === 1) {
+      grouped.yesterday.push(item)
+      return
+    }
+    if (dayDiff <= 7) {
+      grouped.previous7Days.push(item)
+      return
+    }
+    if (dayDiff <= 30) {
+      grouped.previous30Days.push(item)
+      return
+    }
+    grouped.older.push(item)
+  })
+
+  return grouped
+}
 
 function normalizeSessionTitle(value?: string) {
   const text = String(value || '').trim()
@@ -33,6 +89,14 @@ export function Nav() {
   const [renameSessionId, setRenameSessionId] = useState('')
   const [renameSessionName, setRenameSessionName] = useState('')
   const [renameSubmitting, setRenameSubmitting] = useState(false)
+  const [collapsedSidebarGroups, setCollapsedSidebarGroups] = useState<Record<
+    SearchTimeGroupKey,
+    boolean
+  >>(() => ({ ...EMPTY_GROUP_STATE }))
+  const [expandedSidebarGroups, setExpandedSidebarGroups] = useState<Record<
+    SearchTimeGroupKey,
+    boolean
+  >>(() => ({ ...EMPTY_GROUP_STATE }))
 
   const currentSessionId = useMemo(() => {
     const matched = location.pathname.match(/^\/chat\/([^/?#]+)/)
@@ -237,11 +301,6 @@ export function Nav() {
     return source
   }, [session.list])
 
-  const sidebarRecentSessions = useMemo(
-    () => sortedSessions.slice(0, MAX_RECENT_SIDEBAR_ITEMS),
-    [sortedSessions],
-  )
-
   const filteredSessions = useMemo(() => {
     const keyword = searchKeyword.trim().toLowerCase()
     if (!keyword) return sortedSessions
@@ -251,19 +310,24 @@ export function Nav() {
     })
   }, [searchKeyword, sortedSessions])
 
-  const { todaySessions, earlierSessions } = useMemo(() => {
-    const today: API.Session[] = []
-    const earlier: API.Session[] = []
-    filteredSessions.forEach((item) => {
-      const ts = dayjs(item.updated_at || item.created_at)
-      if (ts.isValid() && ts.isSame(dayjs(), 'day')) {
-        today.push(item)
-      } else {
-        earlier.push(item)
-      }
-    })
-    return { todaySessions: today, earlierSessions: earlier }
-  }, [filteredSessions])
+  const groupedSidebarSessions = useMemo(
+    () => groupSessionsByTime(sortedSessions),
+    [sortedSessions],
+  )
+
+  const groupedSearchSessions = useMemo(
+    () => groupSessionsByTime(filteredSessions),
+    [filteredSessions],
+  )
+
+  const formatSessionMeta = useCallback((item: API.Session, groupKey: SearchTimeGroupKey) => {
+    const ts = dayjs(item.updated_at || item.created_at)
+    if (!ts.isValid()) return '--'
+    if (groupKey === 'today' || groupKey === 'yesterday') {
+      return ts.format('HH:mm')
+    }
+    return ts.format('MM/DD HH:mm')
+  }, [])
 
   return (
     <div className="base-layout-nav">
@@ -279,35 +343,83 @@ export function Nav() {
         </button>
 
         <div className="base-layout-nav__search-drawer-content">
-          <div className="base-layout-nav__search-drawer-title">Today</div>
-          <div className="base-layout-nav__search-drawer-list">
-            {sidebarRecentSessions.length === 0 && (
-              <div className="base-layout-nav__empty">暂无历史对话</div>
-            )}
-            {sidebarRecentSessions.map((item) => {
-              const isActive = currentSessionId === item.session_id
-              return (
-                <Dropdown
-                  key={item.session_id}
-                  trigger={['contextMenu']}
-                  menu={buildSessionContextMenu(item)}
-                >
-                  <div
-                    className={classNames('base-layout-nav__item', {
-                      'base-layout-nav__item--active': isActive,
-                    })}
+          {sortedSessions.length === 0 && (
+            <div className="base-layout-nav__empty">暂无历史对话</div>
+          )}
+          {SEARCH_TIME_GROUPS.map((group) => {
+            const sessions = groupedSidebarSessions[group.key]
+            if (sessions.length === 0) return null
+            const isCollapsed = collapsedSidebarGroups[group.key]
+            const isExpanded = expandedSidebarGroups[group.key]
+            const hasOverflow = sessions.length > SIDEBAR_DEFAULT_VISIBLE_PER_GROUP
+            const visibleSessions =
+              isCollapsed
+                ? []
+                : isExpanded
+                ? sessions
+                : sessions.slice(0, SIDEBAR_DEFAULT_VISIBLE_PER_GROUP)
+            return (
+              <div key={group.key} className="base-layout-nav__search-drawer-section">
+                <div className="base-layout-nav__search-drawer-header">
+                  <div className="base-layout-nav__search-drawer-title">{group.label}</div>
+                  <button
+                    type="button"
+                    className="base-layout-nav__search-drawer-toggle"
+                    onClick={() =>
+                      setCollapsedSidebarGroups((prev) => ({
+                        ...prev,
+                        [group.key]: !prev[group.key],
+                      }))
+                    }
                   >
-                    <div
-                      className="base-layout-nav__item-main"
-                      onClick={() => handleEnterSession(item.session_id)}
-                    >
-                      <div className="title">{normalizeSessionTitle(item.session_name)}</div>
-                    </div>
-                  </div>
-                </Dropdown>
-              )
-            })}
-          </div>
+                    {isCollapsed ? 'Expand' : 'Collapse'}
+                  </button>
+                </div>
+                {isCollapsed && <div className="base-layout-nav__empty">({sessions.length})</div>}
+                <div className="base-layout-nav__search-drawer-list">
+                  {visibleSessions.map((item) => {
+                    const isActive = currentSessionId === item.session_id
+                    return (
+                      <Dropdown
+                        key={`${group.key}-${item.session_id}`}
+                        trigger={['contextMenu']}
+                        menu={buildSessionContextMenu(item)}
+                      >
+                        <div
+                          className={classNames('base-layout-nav__item', {
+                            'base-layout-nav__item--active': isActive,
+                          })}
+                        >
+                          <div
+                            className="base-layout-nav__item-main"
+                            onClick={() => handleEnterSession(item.session_id)}
+                          >
+                            <div className="title">{normalizeSessionTitle(item.session_name)}</div>
+                          </div>
+                        </div>
+                      </Dropdown>
+                    )
+                  })}
+                </div>
+                {!isCollapsed && hasOverflow && (
+                  <button
+                    type="button"
+                    className="base-layout-nav__search-drawer-more"
+                    onClick={() =>
+                      setExpandedSidebarGroups((prev) => ({
+                        ...prev,
+                        [group.key]: !prev[group.key],
+                      }))
+                    }
+                  >
+                    {isExpanded
+                      ? 'Show less'
+                      : `Show more (${sessions.length - SIDEBAR_DEFAULT_VISIBLE_PER_GROUP})`}
+                  </button>
+                )}
+              </div>
+            )
+          })}
         </div>
       </div>
 
@@ -347,95 +459,56 @@ export function Nav() {
             </button>
           </div>
 
-          <div className="base-layout-nav__search-section">
-            <div className="base-layout-nav__search-section-title">Today</div>
-            <div className="base-layout-nav__search-list">
-              {todaySessions.length === 0 && (
-                <div className="base-layout-nav__search-empty">暂无匹配对话</div>
-              )}
-              {todaySessions.map((item) => {
-                const isActive = currentSessionId === item.session_id
-                return (
-                  <Dropdown
-                    key={`today-${item.session_id}`}
-                    trigger={['contextMenu']}
-                    menu={buildSessionContextMenu(item)}
-                  >
-                    <div
-                      className={classNames('base-layout-nav__search-item', {
-                        'base-layout-nav__search-item--active': isActive,
-                      })}
-                      onClick={() => handleEnterSession(item.session_id, true)}
-                    >
-                      <div className="base-layout-nav__search-item-title">
-                        {normalizeSessionTitle(item.session_name)}
-                      </div>
-                      <div className="base-layout-nav__search-item-meta">
-                        {dayjs(item.updated_at || item.created_at).format('HH:mm')}
-                      </div>
-                      <Popconfirm
-                        title="确认删除该对话？"
-                        description="删除后不可恢复，将同时清空会话内消息。"
-                        onConfirm={() => handleDeleteSession(item.session_id)}
+          {SEARCH_TIME_GROUPS.map((group) => {
+            const sessions = groupedSearchSessions[group.key]
+            if (sessions.length === 0) return null
+            return (
+              <div key={group.key} className="base-layout-nav__search-section">
+                <div className="base-layout-nav__search-section-title">{group.label}</div>
+                <div className="base-layout-nav__search-list">
+                  {sessions.map((item) => {
+                    const isActive = currentSessionId === item.session_id
+                    return (
+                      <Dropdown
+                        key={`${group.key}-${item.session_id}`}
+                        trigger={['contextMenu']}
+                        menu={buildSessionContextMenu(item)}
                       >
-                        <Button
-                          type="text"
-                          danger
-                          size="small"
-                          onClick={stopPropagation}
-                          icon={<DeleteOutlined />}
-                        />
-                      </Popconfirm>
-                    </div>
-                  </Dropdown>
-                )
-              })}
-            </div>
-          </div>
-
-          {earlierSessions.length > 0 && (
-            <div className="base-layout-nav__search-section">
-              <div className="base-layout-nav__search-section-title">Earlier</div>
-              <div className="base-layout-nav__search-list">
-                {earlierSessions.map((item) => {
-                  const isActive = currentSessionId === item.session_id
-                  return (
-                    <Dropdown
-                      key={`earlier-${item.session_id}`}
-                      trigger={['contextMenu']}
-                      menu={buildSessionContextMenu(item)}
-                    >
-                      <div
-                        className={classNames('base-layout-nav__search-item', {
-                          'base-layout-nav__search-item--active': isActive,
-                        })}
-                        onClick={() => handleEnterSession(item.session_id, true)}
-                      >
-                        <div className="base-layout-nav__search-item-title">
-                          {normalizeSessionTitle(item.session_name)}
-                        </div>
-                        <div className="base-layout-nav__search-item-meta">
-                          {dayjs(item.updated_at || item.created_at).format('MM/DD HH:mm')}
-                        </div>
-                        <Popconfirm
-                          title="确认删除该对话？"
-                          description="删除后不可恢复，将同时清空会话内消息。"
-                          onConfirm={() => handleDeleteSession(item.session_id)}
+                        <div
+                          className={classNames('base-layout-nav__search-item', {
+                            'base-layout-nav__search-item--active': isActive,
+                          })}
+                          onClick={() => handleEnterSession(item.session_id, true)}
                         >
-                          <Button
-                            type="text"
-                            danger
-                            size="small"
-                            onClick={stopPropagation}
-                            icon={<DeleteOutlined />}
-                          />
-                        </Popconfirm>
-                      </div>
-                    </Dropdown>
-                  )
-                })}
+                          <div className="base-layout-nav__search-item-title">
+                            {normalizeSessionTitle(item.session_name)}
+                          </div>
+                          <div className="base-layout-nav__search-item-meta">
+                            {formatSessionMeta(item, group.key)}
+                          </div>
+                          <Popconfirm
+                            title="确认删除该对话？"
+                            description="删除后不可恢复，将同时清空会话内消息。"
+                            onConfirm={() => handleDeleteSession(item.session_id)}
+                          >
+                            <Button
+                              type="text"
+                              danger
+                              size="small"
+                              onClick={stopPropagation}
+                              icon={<DeleteOutlined />}
+                            />
+                          </Popconfirm>
+                        </div>
+                      </Dropdown>
+                    )
+                  })}
+                </div>
               </div>
-            </div>
+            )
+          })}
+          {filteredSessions.length === 0 && (
+            <div className="base-layout-nav__search-empty">暂无匹配对话</div>
           )}
         </div>
       </Modal>
