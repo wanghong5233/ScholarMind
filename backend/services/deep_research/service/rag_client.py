@@ -120,6 +120,22 @@ class RAGClient:
 
         return status_code in {429, 500, 502, 503, 504}
 
+    @staticmethod
+    def _extract_error_detail(response: httpx.Response) -> str:
+        """Extract API error detail without losing provider-specific messages."""
+
+        try:
+            payload = response.json()
+        except ValueError:
+            return response.text.strip()
+        if isinstance(payload, dict):
+            detail = payload.get("detail") or payload.get("message") or payload.get("error")
+            if isinstance(detail, str):
+                return detail
+            if detail is not None:
+                return str(detail)
+        return response.text.strip()
+
     async def ask(
         self,
         session_id: str,
@@ -354,7 +370,13 @@ class RAGClient:
             json=payload,
             headers=headers,
         )
-        response.raise_for_status()
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            detail = self._extract_error_detail(response)
+            if detail:
+                raise RuntimeError(detail) from exc
+            raise
         data = response.json()
         if isinstance(data, list):
             return data
