@@ -10,7 +10,7 @@ import json
 import tempfile
 import subprocess
 from service.core.ingestion.ocr_engines import OCREngine
-from service.core.ingestion.vision_engines import VisionEngine
+from service.core.ingestion.vision_engines import VisionEngine, get_vision_engine
 
 
 class MinerUParser(DocumentParser):
@@ -200,6 +200,9 @@ class MinerUParser(DocumentParser):
         
         # 统一处理图表语义生成（按页限额）
         self._augment_figures_with_vision(blocks, figs_for_vision)
+
+        # 为公式块生成自然语言描述以改善嵌入质量
+        self._augment_equation_description(blocks)
         
         # 调试：打印前2个解析后的 block（预合并前）
         for i, block in enumerate(blocks[:2]):
@@ -475,7 +478,7 @@ class MinerUParser(DocumentParser):
             limit_per_2pages = max(int(getattr(settings, "SM_VISION_MAX_PER_2PAGES", 1)), 0)
         except Exception:
             limit_per_2pages = 1
-        engine = VisionEngine()
+        engine = get_vision_engine()
         if not engine.is_available():
             log.info(f"MinerUParser.VISION_DISABLED: {len(figs)} figures skipped")
             return
@@ -503,6 +506,65 @@ class MinerUParser(DocumentParser):
         
         if success_cnt:
             log.info(f"MinerUParser.VISION_OK: generated {success_cnt} figure summaries")
+
+    def _augment_equation_description(self, blocks: List[ParsedBlock]) -> None:
+        """Use LLM to generate natural language descriptions for equation blocks.
+
+        Prepends a one-sentence description to the block text so the embedding
+        captures semantic meaning in addition to raw LaTeX.
+        Original LaTeX is preserved in metadata["equation_latex"].
+        """
+        if not getattr(settings, "SM_EQUATION_DESCRIPTION_ENABLED", False):
+            return
+
+        eq_blocks = [b for b in blocks if (b.metadata or {}).get("element_type") == "equation_latex"]
+        if not eq_blocks:
+            return
+
+        try:
+            from service.core.rag.llm.client import LLMClient
+            llm = LLMClient(task="aux")
+        except Exception as exc:
+            log.warning("Failed to init LLM for equation description: %s", exc)
+            return
+
+        batch_latex = []
+        for b in eq_blocks:
+            latex = (b.metadata or {}).get("equation_latex") or b.text or ""
+            batch_latex.append(latex.strip()[:500])
+
+        prompt = (
+            "你是学术论文公式解读助手。对以下每个 LaTeX 公式，给出一句话自然语言描述（中文），"
+            "说明公式的含义或作用。每行对应一个公式，直接输出描述，不要编号。\n\n"
+            + "\n".join(f"公式{i+1}: {ltx}" for i, ltx in enumerate(batch_latex))
+        )
+        messages = [{"role": "user", "content": prompt}]
+
+        try:
+            result = llm.generate(
+                messages,
+                temperature=0.2,
+                max_tokens=min(len(eq_blocks) * 80, 2048),
+                stream=False,
+            )
+            if not isinstance(result, str):
+                result = "".join(result)
+        except Exception as exc:
+            log.warning("Equation description LLM call failed: %s", exc)
+            return
+
+        lines = [ln.strip() for ln in result.strip().splitlines() if ln.strip()]
+
+        augmented = 0
+        for i, b in enumerate(eq_blocks):
+            desc = lines[i] if i < len(lines) else None
+            if desc:
+                original_latex = b.text
+                b.text = f"{desc}\n{original_latex}"
+                augmented += 1
+
+        if augmented:
+            log.info("Equation description: augmented %d/%d equations", augmented, len(eq_blocks))
 
     # ------------------------
     # 兜底路径

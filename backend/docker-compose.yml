@@ -32,6 +32,13 @@ services: # 定义一系列的服务（容器）
       - ./storage_root:/app/service/core/storage
       - models_data:/models  # 共享模型目录（与reranker服务共享）
     command: ["uvicorn", "app_main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--timeout-graceful-shutdown", "5"] # 容器启动时执行的命令，并开启热重载
+    healthcheck:
+      # 使用 python 标准库做健康检查，避免依赖 curl 是否存在
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:8000/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
     restart: unless-stopped # 定义容器的重启策略，除非手动停止，否则容器会自动重启
     depends_on: # 定义服务间的依赖关系，确保依赖的服务先启动
       - scholarmind_db # 依赖PostgreSQL数据库服务
@@ -42,6 +49,26 @@ services: # 定义一系列的服务（容器）
       - reranker # 依赖精排服务
     networks: # 指定服务连接的网络
       - scholarmind_net # 连接到名为scholarmind_net的自定义网络
+
+  cloudflared: # Cloudflare Tunnel（公网演示入口）
+    image: cloudflare/cloudflared:2026.2.0
+    container_name: cf_tunnel_scholarmind
+    profiles: ["public"] # 默认不启动，按需开启：docker compose --profile public up -d cloudflared
+    # 强制使用 HTTP2(TCP) 以规避本地网络对 QUIC(UDP) 的抖动问题
+    command: ["tunnel", "--no-autoupdate", "--protocol", "http2", "run", "--token", "${CF_TUNNEL_TOKEN:-}"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      scholarmind_api:
+        condition: service_healthy
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks:
+      - scholarmind_net
 
   scholarmind_vector: # Elasticsearch服务
     container_name: scholarmind-es-01 # 容器名称

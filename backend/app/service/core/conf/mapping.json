@@ -105,6 +105,10 @@
       "page_range": {
         "type": "integer",
         "store": true
+      },
+      "level": {
+        "type": "keyword",
+        "store": true
       }
     },
     "date_detection": "true",

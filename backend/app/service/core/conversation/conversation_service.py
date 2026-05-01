@@ -17,6 +17,12 @@ from service.core.rag.history.short_term_memory import (
     ShortTermMemoryBuilder,
     ShortTermMemoryDebug,
 )
+from service.core.rag.history.long_term_memory import (
+    FactExtractor,
+    LongTermMemoryRecaller,
+    LongTermMemoryStore,
+    LTMRecallDebug,
+)
 from service.core.rag.llm.client import LLMClient
 from service.memory_service import LongTermMemoryService
 from service.session_service import SessionService
@@ -46,6 +52,7 @@ class ConversationService:
         self.ltm_service = ltm_service or LongTermMemoryService(db)
         self.llm_client = llm_client or LLMClient(task="summary")
         self.session_service = session_service or SessionService(db)
+        self._ltm_recaller = LongTermMemoryRecaller()
 
     def build_history_slice(
         self,
@@ -94,6 +101,25 @@ class ConversationService:
             session=session,
             query=query,
             query_embedding=query_embedding,
+        )
+
+    def recall_ltm_facts(
+        self,
+        *,
+        user_id: int | str,
+        question: str,
+        query_embedding: Optional[List[float]] = None,
+        language: str = "zh",
+    ) -> tuple[Optional[str], LTMRecallDebug]:
+        """Recall long-term memory facts relevant to the current question.
+
+        Returns an optional system-prompt segment and debug metadata.
+        """
+        return self._ltm_recaller.recall_for_prompt(
+            user_id=str(user_id),
+            question=question,
+            query_embedding=query_embedding,
+            language=language,
         )
 
     def list_memory_profile(

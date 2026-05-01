@@ -607,6 +607,76 @@ class ESVectoreStore(VectorStore):
 
         return expanded_chunks
 
+    # ---------------------------------------------------------------------
+    # Generic context window expansion (all chunk types)
+    # ---------------------------------------------------------------------
+    def _expand_context_window(
+        self,
+        chunks: List[RetrievedChunk],
+        index_name: Optional[str],
+        kb_id: int,
+    ) -> List[RetrievedChunk]:
+        from core.config import settings as _settings
+
+        if not getattr(_settings, "SM_CONTEXT_WINDOW_EXPANSION_ENABLED", False):
+            return chunks
+
+        prev_count = int(getattr(_settings, "SM_CONTEXT_WINDOW_EXPANSION_PREV", 1) or 1)
+        next_count = int(getattr(_settings, "SM_CONTEXT_WINDOW_EXPANSION_NEXT", 1) or 1)
+        if prev_count <= 0 and next_count <= 0:
+            return chunks
+
+        expanded_chunks: List[RetrievedChunk] = []
+        seen_chunk_ids: set[str] = set()
+
+        for chunk in chunks:
+            expanded_chunks.append(chunk)
+            seen_chunk_ids.add(chunk.chunk_id)
+
+        for chunk in chunks:
+            if (chunk.metadata or {}).get("is_context"):
+                continue
+
+            prev_id = (chunk.metadata or {}).get("prev_chunk_id")
+            next_id = (chunk.metadata or {}).get("next_chunk_id")
+
+            context_ids: List[str] = []
+            if prev_id and prev_count > 0 and prev_id not in seen_chunk_ids:
+                context_ids.append(prev_id)
+            if next_id and next_count > 0 and next_id not in seen_chunk_ids:
+                context_ids.append(next_id)
+
+            if not context_ids:
+                continue
+
+            effective_index = (chunk.metadata or {}).get("index_name") or index_name
+            if not effective_index:
+                continue
+
+            try:
+                context_chunks = self._fetch_chunks_by_ids(
+                    chunk_ids=context_ids,
+                    index_name=effective_index,
+                    kb_id=kb_id,
+                )
+                for ctx_chunk in context_chunks:
+                    if ctx_chunk.chunk_id in seen_chunk_ids:
+                        continue
+                    seen_chunk_ids.add(ctx_chunk.chunk_id)
+                    ctx_chunk.score = chunk.score * 0.4
+                    ctx_chunk.metadata["is_context"] = True
+                    ctx_chunk.metadata["context_for_chunk_id"] = chunk.chunk_id
+                    if effective_index:
+                        ctx_chunk.metadata.setdefault("index_name", effective_index)
+                    expanded_chunks.append(ctx_chunk)
+            except Exception as exc:
+                try:
+                    self.logger.warning("Failed to expand context window for %s: %s", chunk.chunk_id, exc)
+                except Exception:
+                    pass
+
+        return expanded_chunks
+
     def _fetch_chunks_by_ids(
         self,
         chunk_ids: List[str],
