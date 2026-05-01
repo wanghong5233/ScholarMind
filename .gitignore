@@ -223,6 +223,7 @@ postman使用说明.md
 
 # Local runtime data and storage
 storage_root/
+backend/.watchdog/
 
 # Test files (sample documents for development)
 backend/test_*.pdf

@@ -1,3 +1,4 @@
+import logging
 import logging.config
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,17 +34,31 @@ app = FastAPI(
     root_path=root_path,
 )
 
+
+class HealthAccessLogFilter(logging.Filter):
+    """Filter out /health access logs to reduce noise."""
+
+    def filter(self, record: logging.LogRecord) -> bool:  # type: ignore[override]
+        return "/health" not in str(record.getMessage())
+
+
+uvicorn_access_logger = logging.getLogger("uvicorn.access")
+if not any(isinstance(f, HealthAccessLogFilter) for f in uvicorn_access_logger.filters):
+    uvicorn_access_logger.addFilter(HealthAccessLogFilter())
+
 # 定义请求处理中间件
 @app.middleware("http")
 async def dispatch(request: Request, call_next):
     # 为每个请求生成唯一的 request_id
     request_id = str(uuid.uuid4())
+    is_health_request = request.url.path == "/health"
     
     # 将 request_id 设置到 context var 中
     request_id_var.set(request_id)
     
-    # 记录请求开始的日志
-    log.info(f"Request started: {request.method} {request.url.path}")
+    # /health 由容器频繁探活，不记录可显著降低噪音
+    if not is_health_request:
+        log.info(f"Request started: {request.method} {request.url.path}")
     
     start_time = time.time()
     status_code = 500
@@ -60,10 +75,11 @@ async def dispatch(request: Request, call_next):
     finally:
         process_time = (time.time() - start_time) * 1000
         runtime_metrics.record_request(status_code=status_code, latency_ms=process_time)
-        log.info(
-            f"Request finished in {process_time:.2f}ms. "
-            f"Status code: {response.status_code if 'response' in locals() else status_code}"
-        )
+        if not is_health_request:
+            log.info(
+                f"Request finished in {process_time:.2f}ms. "
+                f"Status code: {response.status_code if 'response' in locals() else status_code}"
+            )
 
     return response
 
