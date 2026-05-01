@@ -164,6 +164,7 @@ class ChatGenerationService:
                     cut = max(int(len(history_summary) * ratio), 200)
                     history_summary = history_summary[:cut]
             if chunks:
+                chunks = self._compress_chunks(chunks, question)
                 chunks = self._trim_chunks_to_tokens(chunks, context_budget)
         except Exception:
             pass
@@ -344,6 +345,14 @@ class ChatGenerationService:
     def get_last_usage(self) -> Dict[str, Any] | None:
         """Return token usage for the last non-stream generation."""
         return self._last_usage
+
+    def get_last_runtime_model(self) -> Dict[str, Any] | None:
+        """Return requested/actual LLM model metadata for the last generation."""
+        getter = getattr(self.llm, "get_last_runtime_model", None)
+        if not callable(getter):
+            return None
+        runtime_model = getter()
+        return runtime_model if isinstance(runtime_model, dict) else None
 
     def get_last_history_debug(self) -> Dict[str, Any] | None:
         """Return history debug info for the last generation."""
@@ -562,6 +571,68 @@ class ChatGenerationService:
             "deepseek-chat": 128000,
         }
         return table.get(name) if name else None
+
+    def _compress_chunks(
+        self,
+        chunks: List[Dict[str, Any]],
+        question: str,
+    ) -> List[Dict[str, Any]]:
+        """Per-chunk compression: extract query-relevant sentences via LLM."""
+        if not getattr(settings, "SM_CONTEXT_COMPRESSION_ENABLED", False):
+            return chunks
+        if not chunks or not question:
+            return chunks
+
+        max_chunks = int(getattr(settings, "SM_COMPRESSION_MAX_CHUNKS", 8) or 8)
+        compress_model = getattr(settings, "SM_COMPRESSION_MODEL", None) or None
+
+        try:
+            llm = LLMClient(task="aux")
+        except Exception:
+            return chunks
+
+        result = list(chunks)
+        compressed_count = 0
+
+        for i, chunk in enumerate(result[:max_chunks]):
+            text = (chunk or {}).get("text") or ""
+            if len(text) < 200:
+                continue
+            try:
+                prompt = (
+                    "只保留原文中与以下问题直接相关的句子，不改写不补充，直接输出保留的句子。"
+                    '如果没有相关句子，输出"无相关内容"。\n\n'
+                    f"问题：{question[:200]}\n\n原文：{text[:3000]}"
+                )
+                messages = [{"role": "user", "content": prompt}]
+                compressed = llm.generate(
+                    messages,
+                    temperature=0.0,
+                    max_tokens=min(len(text) // 2 + 100, 1024),
+                    stream=False,
+                    model=compress_model,
+                )
+                if not isinstance(compressed, str):
+                    compressed = "".join(compressed)
+                compressed = compressed.strip()
+                if compressed and "无相关内容" not in compressed and len(compressed) > 20:
+                    result[i] = dict(chunk)
+                    result[i]["text"] = compressed
+                    result[i].setdefault("metadata", {})["compressed"] = True
+                    compressed_count += 1
+            except Exception:
+                pass
+
+        if compressed_count:
+            try:
+                self.logger.info(
+                    "Context compression: compressed %d/%d chunks",
+                    compressed_count, min(len(chunks), max_chunks),
+                )
+            except Exception:
+                pass
+
+        return result
 
     def _trim_chunks_to_tokens(
         self,

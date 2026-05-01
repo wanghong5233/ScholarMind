@@ -102,6 +102,7 @@ class AgentState:
     consecutive_tool_failures: int = 0
     recovery_actions_used: int = 0
     pending_delete_confirmations: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    runtime_model_emitted: bool = False
 
 
 class AgentCancelledError(Exception):
@@ -1162,6 +1163,9 @@ class LaTeXEditAgent(BaseAgent):
             "operation_id": final_state.operation_id,
             "history_path": history_path,
             "intent_confidence": final_state.intent_confidence,
+            "runtime_model": self.llm.get_last_runtime_model()
+            if callable(getattr(self.llm, "get_last_runtime_model", None))
+            else None,
         }
         await self._emit_progress(
             progress_callback,
@@ -1305,6 +1309,7 @@ class LaTeXEditAgent(BaseAgent):
             text = str(delta_text or "")
             if not text:
                 return
+            await self._emit_runtime_model(progress_callback, state)
             stream_buffer.append(text)
             now = time.time()
             merged = "".join(stream_buffer)
@@ -1334,6 +1339,7 @@ class LaTeXEditAgent(BaseAgent):
             image_attachments=state.image_attachments,
             stream_text_callback=_on_stream_text,
         )
+        await self._emit_runtime_model(progress_callback, state)
         if should_cancel and should_cancel():
             raise AgentCancelledError("cancelled_by_user")
         if stream_buffer:
@@ -1354,6 +1360,7 @@ class LaTeXEditAgent(BaseAgent):
                 "mode": "ask",
                 "provider": llm_result.get("provider"),
                 "model": llm_result.get("model"),
+                "runtime_model": llm_result.get("runtime_model"),
                 "image_count": len(state.image_attachments),
             },
             timestamp=time.time(),
@@ -1414,6 +1421,7 @@ class LaTeXEditAgent(BaseAgent):
                 forced_action = None
             else:
                 action = await self._llm_reason_and_act(observation, state)
+                await self._emit_runtime_model(progress_callback, state)
             if should_cancel and should_cancel():
                 raise AgentCancelledError("cancelled_by_user")
             
@@ -1998,6 +2006,26 @@ class LaTeXEditAgent(BaseAgent):
                     )
                     return
                 await asyncio.sleep(0.05 * (attempt + 1))
+
+    async def _emit_runtime_model(
+        self,
+        progress_callback: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]],
+        state: AgentState,
+    ) -> None:
+        """Emit the actual runtime model once, so the UI can stay honest."""
+
+        if state.runtime_model_emitted:
+            return
+        getter = getattr(self.llm, "get_last_runtime_model", None)
+        if not callable(getter):
+            return
+        runtime_model = getter()
+        if not isinstance(runtime_model, dict):
+            return
+        if not runtime_model.get("fallback_applied"):
+            return
+        state.runtime_model_emitted = True
+        await self._emit_progress(progress_callback, "runtime_model", runtime_model)
 
     @classmethod
     async def _emit_text_delta(

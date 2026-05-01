@@ -43,6 +43,7 @@ class LLMClient:
         self.client = None
         self._client_cache: Dict[str, AsyncOpenAI] = {}
         self._provider_health: Dict[str, Dict[str, Any]] = {}
+        self._last_runtime_model: Dict[str, Any] | None = None
         self._configure()
 
     def refresh_config(self) -> Dict[str, Any]:
@@ -165,6 +166,84 @@ class LLMClient:
         name = str(model_name or "").strip().lower()
         return name.startswith("gpt-5")
 
+    @staticmethod
+    def _supports_custom_temperature(model_name: Optional[str]) -> bool:
+        name = str(model_name or "").strip().lower()
+        return not name.startswith("gpt-5")
+
+    @staticmethod
+    def _infer_provider_from_model(model_name: Optional[str]) -> Optional[str]:
+        name = str(model_name or "").strip().lower()
+        if not name:
+            return None
+        if name.startswith(("gpt-", "o1", "o3", "o4")):
+            return "openai"
+        if name.startswith(("qwen", "deepseek")):
+            return "dashscope"
+        return None
+
+    def _model_matches_provider(self, model_name: Optional[str], provider_key: str) -> bool:
+        inferred = self._infer_provider_from_model(model_name)
+        return inferred is None or inferred == self._normalize_provider_key(provider_key)
+
+    @staticmethod
+    def _split_csv(value: Optional[str]) -> List[str]:
+        items: List[str] = []
+        seen: set[str] = set()
+        for raw_item in str(value or "").split(","):
+            item = raw_item.strip().strip('"').strip("'")
+            if not item or item in seen:
+                continue
+            seen.add(item)
+            items.append(item)
+        return items
+
+    def _configured_models_for_provider(self, provider_key: str) -> List[str]:
+        normalized = self._normalize_provider_key(provider_key)
+        config = self._get_provider_config(normalized)
+        if normalized == "openai":
+            configured = self._split_csv(getattr(settings, "OPENAI_MODEL_CANDIDATES", ""))
+        elif normalized == "dashscope":
+            configured = self._split_csv(getattr(settings, "DASHSCOPE_MODEL_CANDIDATES", ""))
+        else:
+            configured = []
+
+        result: List[str] = []
+        seen: set[str] = set()
+        for candidate in [config.get("model"), *configured]:
+            model_name = str(candidate or "").strip()
+            if (
+                not model_name
+                or model_name in seen
+                or not self._model_matches_provider(model_name, normalized)
+            ):
+                continue
+            seen.add(model_name)
+            result.append(model_name)
+        return result
+
+    def _model_candidates_for_provider(
+        self,
+        llm_options: Optional[Dict[str, Any]],
+        provider_key: str,
+    ) -> List[str]:
+        normalized = self._normalize_provider_key(provider_key)
+        candidates: List[str] = []
+        model_override = (llm_options or {}).get("llm_model")
+        if model_override and self._model_matches_provider(str(model_override), normalized):
+            candidates.append(str(model_override).strip())
+        candidates.extend(self._configured_models_for_provider(normalized))
+
+        result: List[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            model_name = str(candidate or "").strip()
+            if not model_name or model_name in seen:
+                continue
+            seen.add(model_name)
+            result.append(model_name)
+        return result
+
     def _resolve_llm_config(
         self,
         llm_options: Optional[Dict[str, Any]],
@@ -180,9 +259,11 @@ class LLMClient:
             else:
                 resolved_provider = "openai" if settings.OPENAI_API_KEY else "dashscope"
 
-        config = self._get_provider_config(self._normalize_provider_key(resolved_provider))
+        normalized_provider = self._normalize_provider_key(resolved_provider)
+        config = self._get_provider_config(normalized_provider)
+        config["provider_key"] = normalized_provider
         model_override = (llm_options or {}).get("llm_model")
-        if model_override:
+        if model_override and self._model_matches_provider(str(model_override), normalized_provider):
             config["model"] = str(model_override)
 
         config["temperature"] = self._coerce_float(
@@ -262,6 +343,11 @@ class LLMClient:
             "cooldown_seconds": settings.LLM_HEALTH_COOLDOWN_SECONDS,
             "request_timeout": settings.LLM_REQUEST_TIMEOUT,
         }
+
+    def get_last_runtime_model(self) -> Dict[str, Any] | None:
+        """Return requested/actual model metadata for the last generation."""
+
+        return dict(self._last_runtime_model) if isinstance(self._last_runtime_model, dict) else None
 
     def _get_provider_state(self, provider_key: str) -> Dict[str, Any]:
         key = self._normalize_provider_key(provider_key)
@@ -402,39 +488,80 @@ class LLMClient:
                 max_tokens_value = None
 
             last_error: Optional[Exception] = None
+            requested_provider = self._normalize_provider_key(
+                (llm_options or {}).get("llm_provider") or healthy_candidates[0]
+            )
+            if requested_provider in {"", "auto"}:
+                requested_provider = healthy_candidates[0]
+            requested_model = str((llm_options or {}).get("llm_model") or "").strip()
             primary_provider = healthy_candidates[0]
+            primary_model: Optional[str] = None
 
             for provider_key in healthy_candidates:
-                try:
-                    llm_config = self._resolve_llm_config(llm_options, provider_key)
-                    resolved_temp = temp_value if temp_value is not None else llm_config["temperature"]
-                    resolved_max_tokens = (
-                        max_tokens_value if max_tokens_value is not None else llm_config["max_tokens"]
-                    )
-                    response = await self._generate_api(
-                        prompt,
-                        tools,
-                        resolved_temp,
-                        llm_config,
-                        resolved_max_tokens,
-                        image_attachments=image_attachments,
-                        stream_text_callback=stream_text_callback,
-                    )
-                    self._mark_provider_success(provider_key)
-                    if provider_key != primary_provider:
-                        logger.warning(
-                            "LLM fallback applied: %s -> %s",
-                            primary_provider,
-                            provider_key,
+                for model_name in self._model_candidates_for_provider(llm_options, provider_key):
+                    try:
+                        llm_config = self._resolve_llm_config(llm_options, provider_key)
+                        llm_config["model"] = model_name
+                        if primary_model is None:
+                            primary_model = model_name
+                        resolved_provider = self._normalize_provider_key(
+                            llm_config.get("provider_key") or provider_key
                         )
-                    return response
-                except Exception as exc:
-                    if isinstance(exc, asyncio.CancelledError) or exc.__class__.__name__ == "AgentCancelledError":
-                        raise
-                    last_error = exc
-                    self._mark_provider_failure(provider_key, exc)
-                    logger.warning("LLM provider %s failed: %s", provider_key, exc)
-                    continue
+                        runtime_model = {
+                            "requested_provider": requested_provider,
+                            "requested_model": requested_model or primary_model or model_name,
+                            "actual_provider": resolved_provider,
+                            "actual_model": model_name,
+                            "fallback_applied": (
+                                resolved_provider != requested_provider
+                                or (
+                                    bool(requested_model)
+                                    and model_name != requested_model
+                                )
+                            ),
+                        }
+                        self._last_runtime_model = runtime_model
+                        resolved_temp = temp_value if temp_value is not None else llm_config["temperature"]
+                        resolved_max_tokens = (
+                            max_tokens_value if max_tokens_value is not None else llm_config["max_tokens"]
+                        )
+                        response = await self._generate_api(
+                            prompt,
+                            tools,
+                            resolved_temp,
+                            llm_config,
+                            resolved_max_tokens,
+                            image_attachments=image_attachments,
+                            stream_text_callback=stream_text_callback,
+                        )
+                        response["runtime_model"] = runtime_model
+                        response["requested_provider"] = runtime_model["requested_provider"]
+                        response["requested_model"] = runtime_model["requested_model"]
+                        response["actual_provider"] = runtime_model["actual_provider"]
+                        response["actual_model"] = runtime_model["actual_model"]
+                        response["fallback_applied"] = runtime_model["fallback_applied"]
+                        self._mark_provider_success(resolved_provider)
+                        if resolved_provider != primary_provider or model_name != primary_model:
+                            logger.warning(
+                                "LLM fallback applied: %s/%s -> %s/%s",
+                                primary_provider,
+                                primary_model,
+                                resolved_provider,
+                                model_name,
+                            )
+                        return response
+                    except Exception as exc:
+                        if isinstance(exc, asyncio.CancelledError) or exc.__class__.__name__ == "AgentCancelledError":
+                            raise
+                        last_error = exc
+                        self._mark_provider_failure(provider_key, exc)
+                        logger.warning(
+                            "LLM candidate %s/%s failed: %s",
+                            provider_key,
+                            model_name,
+                            exc,
+                        )
+                        continue
 
             if last_error:
                 raise last_error
@@ -477,9 +604,10 @@ class LLMClient:
             kwargs = {
                 "model": model,
                 "messages": messages,
-                "temperature": temperature,
                 "stream": should_stream_text,
             }
+            if self._supports_custom_temperature(str(model)) or float(temperature) == 1.0:
+                kwargs["temperature"] = temperature
             kwargs[token_key] = max_tokens or self.max_tokens
             
             # 如果提供了工具，添加到请求中
