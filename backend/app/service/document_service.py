@@ -1,17 +1,14 @@
-from typing import List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 from sqlalchemy.orm import Session
 from sqlalchemy import or_
 from models.document import Document
 from models.knowledgebase import KnowledgeBase
 from schemas.document import DocumentUpdate, DocumentCreate
 from exceptions.base import ResourceNotFoundException, PermissionDeniedException, APIException
-from service.core.rag.utils.es_conn import ESConnection
 from service.core.rag.graph.store import KnowledgeGraphStore
 from core.config import settings
 import os
 from utils.get_logger import logger
-from elasticsearch import NotFoundError
-from typing import Dict
 
 def get_document_by_id(db: Session, doc_id: int, user_id: int, kb_id: int = None) -> Document:
     """
@@ -126,42 +123,7 @@ def delete_document(db: Session, doc_id: int, user_id: int, kb_id: int) -> Docum
     except Exception as exc:
         logger.warning("Failed to remove local file for doc_id=%s: %s", doc_to_delete.id, exc)
 
-    # 3) 从向量数据库中删除相关数据
-    logger.info(f"Start ES deletion phase for doc_id={doc_to_delete.id}, kb_id={kb_id}")
-    try:
-        es = ESConnection()
-        es_prefix = settings.ES_DEFAULT_INDEX.split('_')[0]
-        target_indices = _resolve_es_targets(es, es_prefix)
-        total_removed = 0
-        residual_indices: Dict[str, int] = {}
-        for idx in sorted(target_indices):
-            removed = _delete_chunks_from_index(
-                es_conn=es,
-                index_name=idx,
-                kb_id=str(kb_id),
-                doc_id=str(doc_to_delete.id),
-            )
-            total_removed += removed
-            residual = _count_chunks_in_index(
-                es_conn=es,
-                index_name=idx,
-                kb_id=str(kb_id),
-                doc_id=str(doc_to_delete.id),
-            )
-            if residual > 0:
-                residual_indices[idx] = residual
-        logger.info(
-            f"ES deletion summary for doc_id={doc_to_delete.id}, kb_id={kb_id}: "
-            f"indices_checked={len(target_indices)}, chunks_removed={total_removed}"
-        )
-        if residual_indices:
-            raise APIException(
-                f"Detected {sum(residual_indices.values())} residual chunks for doc_id={doc_to_delete.id}: "
-                f"{residual_indices}. Deletion aborted to avoid inconsistent state."
-            )
-    except Exception as e:
-        logger.exception(f"An error occurred during ES deletion for doc_id={doc_to_delete.id}. Error: {e}")
-        raise
+    _delete_document_chunks_from_vector_store(kb_id=kb_id, document_id=doc_to_delete.id)
 
     # 4) 返回被删除的文档对象
     try:
@@ -241,7 +203,9 @@ def find_document_by_file_hash(db: Session, kb_id: int, file_hash: str) -> Optio
         .first()
     )
 
-def _resolve_es_targets(es_conn: ESConnection, prefix: str) -> Set[str]:
+def _resolve_es_targets(es_conn: Any, prefix: str) -> Set[str]:
+    from elasticsearch import NotFoundError
+
     targets: Set[str] = set()
     if settings.ES_DEFAULT_INDEX:
         targets.add(settings.ES_DEFAULT_INDEX)
@@ -262,7 +226,82 @@ def _resolve_es_targets(es_conn: ESConnection, prefix: str) -> Set[str]:
     return targets
 
 
-def _delete_chunks_from_index(es_conn: ESConnection, index_name: str, kb_id: str, doc_id: str) -> int:
+def _delete_document_chunks_from_vector_store(*, kb_id: int, document_id: int) -> None:
+    vector_store = str(getattr(settings, "SM_VECTOR_STORE", "pgvector") or "pgvector").strip().lower()
+    if vector_store == "pgvector":
+        _delete_document_chunks_from_pgvector(kb_id=kb_id, document_id=document_id)
+        return
+    _delete_document_chunks_from_es(kb_id=kb_id, document_id=document_id)
+
+
+def _delete_document_chunks_from_pgvector(*, kb_id: int, document_id: int) -> None:
+    logger.info("Start pgvector deletion phase for doc_id=%s, kb_id=%s", document_id, kb_id)
+    try:
+        from service.core.ingestion.pgvector_writer import PgVectorChunkWriter
+
+        writer = PgVectorChunkWriter()
+        removed = writer.delete_document_chunks(kb_id=kb_id, document_id=document_id)
+        residual = writer.count_document_chunks(kb_id=kb_id, document_id=document_id)
+        logger.info(
+            "pgvector deletion summary for doc_id=%s, kb_id=%s: chunks_removed=%s",
+            document_id,
+            kb_id,
+            removed,
+        )
+        if residual > 0:
+            raise APIException(
+                f"Detected {residual} residual pgvector chunks for doc_id={document_id}. "
+                "Deletion aborted to avoid inconsistent state."
+            )
+    except Exception as exc:
+        logger.exception("An error occurred during pgvector deletion for doc_id=%s. Error: %s", document_id, exc)
+        raise
+
+
+def _delete_document_chunks_from_es(*, kb_id: int, document_id: int) -> None:
+    logger.info("Start ES deletion phase for doc_id=%s, kb_id=%s", document_id, kb_id)
+    try:
+        from service.core.rag.utils.es_conn import ESConnection
+
+        es = ESConnection()
+        es_prefix = settings.ES_DEFAULT_INDEX.split("_")[0]
+        target_indices = _resolve_es_targets(es, es_prefix)
+        total_removed = 0
+        residual_indices: Dict[str, int] = {}
+        for idx in sorted(target_indices):
+            removed = _delete_chunks_from_index(
+                es_conn=es,
+                index_name=idx,
+                kb_id=str(kb_id),
+                doc_id=str(document_id),
+            )
+            total_removed += removed
+            residual = _count_chunks_in_index(
+                es_conn=es,
+                index_name=idx,
+                kb_id=str(kb_id),
+                doc_id=str(document_id),
+            )
+            if residual > 0:
+                residual_indices[idx] = residual
+        logger.info(
+            "ES deletion summary for doc_id=%s, kb_id=%s: indices_checked=%s, chunks_removed=%s",
+            document_id,
+            kb_id,
+            len(target_indices),
+            total_removed,
+        )
+        if residual_indices:
+            raise APIException(
+                f"Detected {sum(residual_indices.values())} residual chunks for doc_id={document_id}: "
+                f"{residual_indices}. Deletion aborted to avoid inconsistent state."
+            )
+    except Exception as exc:
+        logger.exception("An error occurred during ES deletion for doc_id=%s. Error: %s", document_id, exc)
+        raise
+
+
+def _delete_chunks_from_index(es_conn: Any, index_name: str, kb_id: str, doc_id: str) -> int:
     """
     多次调用 delete_by_query，直到删除数为 0，确保索引彻底清理。
     """
@@ -283,7 +322,9 @@ def _delete_chunks_from_index(es_conn: ESConnection, index_name: str, kb_id: str
     return total_removed
 
 
-def _count_chunks_in_index(es_conn: ESConnection, index_name: str, kb_id: str, doc_id: str) -> int:
+def _count_chunks_in_index(es_conn: Any, index_name: str, kb_id: str, doc_id: str) -> int:
+    from elasticsearch import NotFoundError
+
     try:
         body = {
             "query": {

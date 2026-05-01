@@ -8,8 +8,7 @@ from models.knowledgebase import KnowledgeBase
 from models.session_summary_checkpoint import SessionSummaryCheckpoint
 from service import knowledgebase_service
 from utils.get_logger import logger
-from service.core.rag.utils.es_conn import ESConnection
-from elasticsearch import NotFoundError
+from core.config import settings
 
 
 class SessionService:
@@ -131,9 +130,42 @@ class SessionService:
         }
 
     def _purge_session_indices(self, *, session_id: str) -> None:
+        """Remove all vector-store chunks tied to this session."""
+        vector_store = str(getattr(settings, "SM_VECTOR_STORE", "pgvector") or "pgvector").strip().lower()
+        if vector_store == "pgvector":
+            self._purge_session_pgvector_chunks(session_id=session_id)
+            return
+        self._purge_session_es_indices(session_id=session_id)
+
+    def _purge_session_pgvector_chunks(self, *, session_id: str) -> None:
+        try:
+            from service.core.ingestion.pgvector_writer import PgVectorChunkWriter
+
+            removed = PgVectorChunkWriter().delete_session_chunks(session_id=session_id)
+            logger.info(
+                "Removed %s session pgvector chunks for session_id=%s",
+                removed,
+                session_id,
+            )
+        except Exception as exc:
+            logger.error(
+                "Failed to remove session pgvector chunks for session_id=%s: %s",
+                session_id,
+                exc,
+            )
+
+    def _purge_session_es_indices(self, *, session_id: str) -> None:
         """Remove all Elasticsearch indices tied to this session."""
         index_pattern = f"sm_sess_{session_id}*"
         try:
+            from elasticsearch import NotFoundError
+        except ImportError:
+            class NotFoundError(RuntimeError):
+                pass
+
+        try:
+            from service.core.rag.utils.es_conn import ESConnection
+
             es = ESConnection()
             es.es.indices.delete(index=index_pattern, ignore_unavailable=True)
             logger.info(

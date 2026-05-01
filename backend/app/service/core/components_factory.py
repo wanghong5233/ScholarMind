@@ -13,7 +13,6 @@ from service.core.implementations.rerankers.dashscope import DashScopeReranker
 from service.core.implementations.llms.local import LocalLlm
 from service.core.implementations.llms.dashscope import DashScopeLlm
 from service.core.implementations.llms.openai import OpenAiLlm
-from service.core.implementations.vector_stores.elasticsearch import ElasticsearchVectorStore
 
 # 这是一个简单的“注册表”模式，用于缓存已创建的组件实例（单例）
 _embedder_instance = None
@@ -74,10 +73,18 @@ def get_llm() -> BaseLLM:
 def get_vector_store() -> BaseVectorStore:
     """
     组件工厂函数：返回一个 BaseVectorStore 的单例。
-    （目前我们只计划一种实现，但工厂模式提供了未来的扩展性）
     """
     global _vector_store_instance
     if _vector_store_instance is None:
-        # 在这里填入 ElasticsearchVectorStore 或其他实现
-        _vector_store_instance = ElasticsearchVectorStore()
+        vector_store = str(getattr(settings, "SM_VECTOR_STORE", "pgvector") or "pgvector").strip().lower()
+        if vector_store == "pgvector":
+            from service.core.implementations.vector_stores.pgvector import PgVectorVectorStore
+
+            _vector_store_instance = PgVectorVectorStore()
+        elif vector_store == "elasticsearch":
+            from service.core.implementations.vector_stores.elasticsearch import ElasticsearchVectorStore
+
+            _vector_store_instance = ElasticsearchVectorStore()
+        else:
+            raise ModelNotFoundError(model_name=vector_store, message="Unknown vector store type configured.")
     return _vector_store_instance

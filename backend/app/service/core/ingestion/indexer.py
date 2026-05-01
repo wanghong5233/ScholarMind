@@ -1,19 +1,26 @@
 from __future__ import annotations
 
-from typing import Dict, Iterable, Optional
-from service.core.rag.utils.es_conn import ESConnection
-from core.config import settings
-from service.core.ingestion.constants import is_multimodal_metadata
 import hashlib
 import logging
 import math
 import time
+from typing import Dict, Iterable, Optional
+
+from sqlalchemy.exc import SQLAlchemyError
+
+from core.config import settings
+from service.core.ingestion.constants import is_multimodal_metadata
 
 
 class ESIndexer:
     def __init__(self, index_name: str | None = None) -> None:
         self.index_name = index_name or settings.ES_DEFAULT_INDEX
-        self.es = ESConnection()
+        self.vector_store = str(getattr(settings, "SM_VECTOR_STORE", "pgvector") or "pgvector").strip().lower()
+        self.es = None
+        if self.vector_store != "pgvector":
+            from service.core.rag.utils.es_conn import ESConnection
+
+            self.es = ESConnection()
 
     @staticmethod
     def build_chunk_id(
@@ -133,44 +140,61 @@ class ESIndexer:
         # 交给 ESConnection 批量写入（空列表则跳过）
         if docs:
             target_index = session_index or self.index_name
-            # 可观测性：记录写入的索引名
-            try:
-                logging.getLogger('ragflow.es_conn').info(
-                    f"Indexing {len(docs)} chunks into index '{target_index}' for kb_id={kb_id}, document_id={document_id}"
-                )
-            except Exception:
-                pass
+            if self.vector_store == "pgvector":
+                self._write_pgvector_primary(docs=docs, target_index=target_index)
+            else:
+                # 可观测性：记录写入的索引名
+                try:
+                    logging.getLogger('ragflow.es_conn').info(
+                        f"Indexing {len(docs)} chunks into index '{target_index}' for kb_id={kb_id}, document_id={document_id}"
+                    )
+                except Exception:
+                    pass
 
-            # 分片与指数退避，缓解 429（coordinating bytes 限制）
-            batch_size = getattr(settings, "ES_BULK_BATCH_SIZE", 500)
-            max_retries = getattr(settings, "ES_BULK_MAX_RETRIES", 4)
-            base_sleep = getattr(settings, "ES_BULK_BACKOFF_BASE_SECS", 1.0)
+                # 分片与指数退避，缓解 429（coordinating bytes 限制）
+                batch_size = getattr(settings, "ES_BULK_BATCH_SIZE", 500)
+                max_retries = getattr(settings, "ES_BULK_MAX_RETRIES", 4)
+                base_sleep = getattr(settings, "ES_BULK_BACKOFF_BASE_SECS", 1.0)
 
-            total = len(docs)
-            batches = math.ceil(total / max(1, batch_size))
-            for b in range(batches):
-                start = b * batch_size
-                end = min(total, start + batch_size)
-                slice_docs = docs[start:end]
-                # 重试机制
-                for attempt in range(max_retries + 1):
-                    errs = self.es.insert(slice_docs, target_index)
-                    if not errs:
+                total = len(docs)
+                batches = math.ceil(total / max(1, batch_size))
+                es_had_errors = False
+                for b in range(batches):
+                    start = b * batch_size
+                    end = min(total, start + batch_size)
+                    slice_docs = docs[start:end]
+                    # 重试机制
+                    errs = []
+                    for attempt in range(max_retries + 1):
+                        if self.es is None:
+                            raise RuntimeError("ESConnection is not initialized")
+                        errs = self.es.insert(slice_docs, target_index)
+                        if not errs:
+                            break
+                        # 仅对 429 or Timeout 退避（es_conn 会把异常转字符串）
+                        err_str = "\n".join(errs)
+                        if ("429" in err_str) or ("Timeout" in err_str) or ("time out" in err_str):
+                            sleep_secs = base_sleep * (2 ** attempt)
+                            try:
+                                logging.getLogger('ragflow.es_conn').warning(
+                                    f"ES bulk retry due to transient error. attempt={attempt} sleep={sleep_secs}s batch={b+1}/{batches} size={len(slice_docs)}"
+                                )
+                            except Exception:
+                                pass
+                            time.sleep(sleep_secs)
+                            continue
+                        # 非可恢复错误，直接跳出重试
                         break
-                    # 仅对 429 or Timeout 退避（es_conn 会把异常转字符串）
-                    err_str = "\n".join(errs)
-                    if ("429" in err_str) or ("Timeout" in err_str) or ("time out" in err_str):
-                        sleep_secs = base_sleep * (2 ** attempt)
-                        try:
-                            logging.getLogger('ragflow.es_conn').warning(
-                                f"ES bulk retry due to transient error. attempt={attempt} sleep={sleep_secs}s batch={b+1}/{batches} size={len(slice_docs)}"
-                            )
-                        except Exception:
-                            pass
-                        time.sleep(sleep_secs)
-                        continue
-                    # 非可恢复错误，直接跳出重试
-                    break
+                    if errs:
+                        es_had_errors = True
+
+                if es_had_errors:
+                    logging.getLogger("ragflow.indexer").warning(
+                        "Skip pgvector shadow write because ES indexing reported errors: index=%s",
+                        target_index,
+                    )
+                else:
+                    self._shadow_write_pgvector(docs=docs, target_index=target_index)
         else:
             try:
                 import logging
@@ -244,7 +268,30 @@ class ESIndexer:
             "chunk_index": -1,
         }
 
+        if self.vector_store == "pgvector":
+            try:
+                from service.core.ingestion.pgvector_writer import PgVectorChunkWriter
+
+                PgVectorChunkWriter().upsert_chunks(
+                    records=[summary_doc],
+                    index_name=target_index,
+                )
+                logging.getLogger("ragflow.indexer").info(
+                    "Indexed pgvector document-level summary for doc_id=%s (%d chars)",
+                    document_id,
+                    len(summary_text),
+                )
+            except (SQLAlchemyError, ValueError, TypeError) as exc:
+                logging.getLogger("ragflow.indexer").warning(
+                    "pgvector document summary indexing error for doc_id=%s: %s",
+                    document_id,
+                    exc,
+                )
+            return
+
         try:
+            if self.es is None:
+                raise RuntimeError("ESConnection is not initialized")
             errs = self.es.insert([summary_doc], target_index)
             if errs:
                 logging.getLogger("ragflow.indexer").warning(
@@ -261,3 +308,49 @@ class ESIndexer:
                 "Document summary indexing error for doc_id=%s: %s",
                 document_id, exc,
             )
+
+    def _shadow_write_pgvector(self, *, docs: list[Dict], target_index: str) -> None:
+        """Optionally mirror ES chunks into pgvector without changing the primary path."""
+
+        if not getattr(settings, "SM_PGVECTOR_DUAL_WRITE_ENABLED", False):
+            return
+
+        try:
+            from service.core.ingestion.pgvector_writer import PgVectorChunkWriter
+
+            PgVectorChunkWriter().upsert_chunks(
+                records=docs,
+                index_name=target_index,
+            )
+        except (SQLAlchemyError, ValueError, TypeError) as exc:
+            logging.getLogger("ragflow.indexer").warning(
+                "pgvector shadow write failed for index=%s: %s",
+                target_index,
+                exc,
+            )
+            if getattr(settings, "SM_PGVECTOR_DUAL_WRITE_STRICT", False):
+                raise
+
+    def _write_pgvector_primary(self, *, docs: list[Dict], target_index: str) -> None:
+        """Write chunks to pgvector as the primary vector store."""
+
+        try:
+            from service.core.ingestion.pgvector_writer import PgVectorChunkWriter
+
+            written = PgVectorChunkWriter().upsert_chunks(
+                records=docs,
+                index_name=target_index,
+            )
+            logging.getLogger("ragflow.indexer").info(
+                "Indexed %s chunks into pgvector table '%s' for index '%s'",
+                written,
+                settings.SM_PGVECTOR_TABLE,
+                target_index,
+            )
+        except (SQLAlchemyError, ValueError, TypeError) as exc:
+            logging.getLogger("ragflow.indexer").exception(
+                "pgvector primary write failed for index=%s: %s",
+                target_index,
+                exc,
+            )
+            raise

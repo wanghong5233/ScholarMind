@@ -1,4 +1,4 @@
-"""Long-term memory (LTM) layer — extract, store, and recall user facts via Elasticsearch.
+"""Long-term memory (LTM) layer — extract, store, and recall user facts.
 
 This module is designed for **minimal invasiveness**: it introduces no new database
 tables, no new infrastructure dependencies (reuses the existing ES cluster and
@@ -9,8 +9,8 @@ Architecture
 ~~~~~~~~~~~~
 1. **FactExtractor** — uses the existing ``LLMClient`` to pull structured facts
    from a completed Q&A turn (runs asynchronously after response delivery).
-2. **LongTermMemoryStore** — thin wrapper around ``ESConnection`` that manages a
-   dedicated ``sm_ltm_facts`` index for per-user fact documents.
+2. **LongTermMemoryStore** — storage facade backed by pgvector or Elasticsearch
+   according to ``SM_VECTOR_STORE``.
 3. **LongTermMemoryRecaller** — at query time, embeds the user question and
    performs a filtered kNN search in the facts index to retrieve relevant memories,
    returning them as a short system-prompt segment.
@@ -27,9 +27,11 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 
+from sqlalchemy import text
+
 from core.config import settings
 from service.core.rag.nlp.model import generate_embedding
-from service.core.rag.utils.es_conn import ESConnection
+from utils.database import engine
 
 logger = logging.getLogger("rag.history.ltm")
 
@@ -215,19 +217,21 @@ class FactExtractor:
 
 
 # ---------------------------------------------------------------------------
-# 2. LongTermMemoryStore — ES-backed storage
+# 2. LongTermMemoryStore — storage backends
 # ---------------------------------------------------------------------------
 
-class LongTermMemoryStore:
+class ElasticsearchLongTermMemoryStore:
     """Manage per-user fact documents in a dedicated Elasticsearch index."""
 
     def __init__(self) -> None:
-        self._es: Optional[ESConnection] = None
+        self._es: Optional[Any] = None
         self._index_ensured = False
 
     @property
-    def es(self) -> ESConnection:
+    def es(self) -> Any:
         if self._es is None:
+            from service.core.rag.utils.es_conn import ESConnection
+
             self._es = ESConnection()
         return self._es
 
@@ -359,6 +363,217 @@ class LongTermMemoryStore:
                 score=score,
             ))
         return results
+
+
+class PgVectorLongTermMemoryStore:
+    """Manage per-user fact documents in PostgreSQL + pgvector."""
+
+    table_name = "ltm_facts"
+
+    def store_facts(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        facts: List[ExtractedFact],
+        dedup_threshold: float = 0.92,
+    ) -> int:
+        if not _ltm_enabled() or not facts:
+            return 0
+
+        stored = 0
+        for fact_obj in facts:
+            embedding = generate_embedding(fact_obj.fact)
+            if not isinstance(embedding, list):
+                continue
+            if self._is_duplicate(user_id=user_id, embedding=embedding, threshold=dedup_threshold):
+                continue
+            now_iso = datetime.now(timezone.utc).isoformat()
+            statement = text(
+                f"""
+                INSERT INTO {self.table_name} (
+                    fact_id,
+                    user_id,
+                    session_id,
+                    fact,
+                    category,
+                    embedding,
+                    importance,
+                    access_count,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    :fact_id,
+                    :user_id,
+                    :session_id,
+                    :fact,
+                    :category,
+                    CAST(:embedding AS vector),
+                    :importance,
+                    0,
+                    :created_at,
+                    :updated_at
+                )
+                ON CONFLICT (fact_id) DO UPDATE SET
+                    user_id = EXCLUDED.user_id,
+                    session_id = EXCLUDED.session_id,
+                    fact = EXCLUDED.fact,
+                    category = EXCLUDED.category,
+                    embedding = EXCLUDED.embedding,
+                    importance = EXCLUDED.importance,
+                    updated_at = EXCLUDED.updated_at
+                """
+            )
+            with engine.begin() as connection:
+                connection.execute(
+                    statement,
+                    {
+                        "fact_id": str(uuid.uuid4()),
+                        "user_id": str(user_id),
+                        "session_id": str(session_id),
+                        "fact": fact_obj.fact,
+                        "category": fact_obj.category,
+                        "embedding": self._vector_literal(embedding),
+                        "importance": float(fact_obj.importance),
+                        "created_at": now_iso,
+                        "updated_at": now_iso,
+                    },
+                )
+            stored += 1
+        return stored
+
+    def _is_duplicate(
+        self, *, user_id: str, embedding: List[float], threshold: float
+    ) -> bool:
+        try:
+            statement = text(
+                f"""
+                SELECT (1.0 - (embedding <=> CAST(:embedding AS vector))) AS score
+                FROM {self.table_name}
+                WHERE user_id = :user_id
+                ORDER BY embedding <=> CAST(:embedding AS vector)
+                LIMIT 1
+                """
+            )
+            with engine.connect() as connection:
+                row = connection.execute(
+                    statement,
+                    {
+                        "user_id": str(user_id),
+                        "embedding": self._vector_literal(embedding),
+                    },
+                ).first()
+            return bool(row and float(row.score or 0.0) >= threshold)
+        except Exception as exc:
+            logger.debug("LTM pgvector dedup check failed (non-fatal): %s", exc)
+            return False
+
+    def recall(
+        self,
+        *,
+        user_id: str,
+        query_embedding: List[float],
+        top_k: int = 3,
+        min_score: float = 0.0,
+    ) -> List[StoredFact]:
+        if not _ltm_enabled():
+            return []
+        try:
+            statement = text(
+                f"""
+                SELECT
+                    fact_id,
+                    user_id,
+                    session_id,
+                    fact,
+                    category,
+                    importance,
+                    access_count,
+                    created_at,
+                    updated_at,
+                    (1.0 - (embedding <=> CAST(:embedding AS vector))) AS score
+                FROM {self.table_name}
+                WHERE user_id = :user_id
+                  AND (1.0 - (embedding <=> CAST(:embedding AS vector))) >= :min_score
+                ORDER BY embedding <=> CAST(:embedding AS vector)
+                LIMIT :top_k
+                """
+            )
+            with engine.connect() as connection:
+                rows = connection.execute(
+                    statement,
+                    {
+                        "user_id": str(user_id),
+                        "embedding": self._vector_literal(query_embedding),
+                        "min_score": float(min_score),
+                        "top_k": int(top_k),
+                    },
+                )
+                results = [dict(row._mapping) for row in rows]
+        except Exception as exc:
+            logger.warning("LTM pgvector recall search failed: %s", exc)
+            return []
+
+        return [
+            StoredFact(
+                fact_id=str(row.get("fact_id") or ""),
+                user_id=str(row.get("user_id") or ""),
+                session_id=str(row.get("session_id") or ""),
+                fact=str(row.get("fact") or ""),
+                category=str(row.get("category") or "other"),
+                importance=float(row.get("importance") or 0.5),
+                access_count=int(row.get("access_count") or 0),
+                created_at=str(row.get("created_at") or ""),
+                updated_at=str(row.get("updated_at") or ""),
+                score=float(row.get("score") or 0.0),
+            )
+            for row in results
+        ]
+
+    def _vector_literal(self, embedding: List[float]) -> str:
+        return "[" + ",".join(str(float(item)) for item in embedding) + "]"
+
+
+class LongTermMemoryStore:
+    """Public LTM storage facade preserving the existing caller-facing API."""
+
+    def __init__(self) -> None:
+        vector_store = str(getattr(settings, "SM_VECTOR_STORE", "pgvector") or "pgvector").strip().lower()
+        if vector_store == "pgvector":
+            self._backend = PgVectorLongTermMemoryStore()
+        else:
+            self._backend = ElasticsearchLongTermMemoryStore()
+
+    def store_facts(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        facts: List[ExtractedFact],
+        dedup_threshold: float = 0.92,
+    ) -> int:
+        return self._backend.store_facts(
+            user_id=user_id,
+            session_id=session_id,
+            facts=facts,
+            dedup_threshold=dedup_threshold,
+        )
+
+    def recall(
+        self,
+        *,
+        user_id: str,
+        query_embedding: List[float],
+        top_k: int = 3,
+        min_score: float = 0.0,
+    ) -> List[StoredFact]:
+        return self._backend.recall(
+            user_id=user_id,
+            query_embedding=query_embedding,
+            top_k=top_k,
+            min_score=min_score,
+        )
 
 
 # ---------------------------------------------------------------------------

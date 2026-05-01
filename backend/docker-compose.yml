@@ -8,7 +8,7 @@ services: # 定义一系列的服务（容器）
     environment: # 设置容器内的环境变量
       HF_ENDPOINT: https://hf-mirror.com
       DATABASE_URL: postgresql://postgres:pg123456@scholarmind_db:5432/scholarmind
-      ES_HOST: http://scholarmind_vector:9200
+      SM_VECTOR_STORE: pgvector
       ROOT_PATH: http://localhost:8000
       REDIS_HOST: redis
       REDIS_PORT: 6379
@@ -42,7 +42,6 @@ services: # 定义一系列的服务（容器）
     restart: unless-stopped # 定义容器的重启策略，除非手动停止，否则容器会自动重启
     depends_on: # 定义服务间的依赖关系，确保依赖的服务先启动
       - scholarmind_db # 依赖PostgreSQL数据库服务
-      - scholarmind_vector # 依赖Elasticsearch服务
       - redis # 依赖Redis服务
       - mineru # 依赖MinerU解析服务
       - grobid # 依赖Grobid元数据服务
@@ -70,42 +69,9 @@ services: # 定义一系列的服务（容器）
     networks:
       - scholarmind_net
 
-  scholarmind_vector: # Elasticsearch服务
-    container_name: scholarmind-es-01 # 容器名称
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.3 # 使用的Elasticsearch镜像
-    volumes: # 数据卷挂载
-      - sm_esdata01:/usr/share/elasticsearch/data # 将ES数据持久化到名为sm_esdata01的数据卷
-    env_file: .env # 从.env文件加载环境变量
-    environment: # 环境变量设置
-      - node.name=es01 # ES节点名称
-      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD} # ES密码，从.env文件读取
-      - bootstrap.memory_lock=false # 是否锁定内存，开发环境通常设为false
-      - discovery.type=single-node # 设置为单节点模式
-      - xpack.security.enabled=true # 启用X-Pack安全特性
-      - xpack.security.http.ssl.enabled=false # 禁用HTTP SSL
-      - xpack.security.transport.ssl.enabled=false # 禁用传输层SSL
-      - cluster.routing.allocation.disk.watermark.low=5gb # 磁盘使用低水位线
-      - cluster.routing.allocation.disk.watermark.high=3gb # 磁盘使用高水位线
-      - cluster.routing.allocation.disk.watermark.flood_stage=2gb # 磁盘使用洪水阶段水位线
-      - TZ=${TIMEZONE:-UTC} # 时区设置，从.env文件读取，默认 UTC
-      - "ES_JAVA_OPTS=-Xms512m -Xmx512m" # 设置ES的JVM堆大小
-    mem_limit: ${MEM_LIMIT:-2g} # 内存使用限制，从.env文件读取，默认 2g
-    ulimits: # 设置容器的资源限制
-      memlock: # 内存锁定限制
-        soft: -1 # 软限制
-        hard: -1 # 硬限制
-    healthcheck: # 健康检查配置
-      test: ["CMD-SHELL", "curl http://localhost:9200"] # 检查ES是否可访问
-      interval: 10s # 检查间隔
-      timeout: 10s # 超时时间
-      retries: 120 # 重试次数
-    restart: on-failure # 重启策略，只在失败时重启
-    networks: # 连接的网络
-      - scholarmind_net
-
   scholarmind_db: # PostgreSQL数据库服务
     container_name: scholarmind_db # 容器名称
-    image: postgres:15-alpine # 使用官方的 PostgreSQL 15 镜像的轻量级版本 (alpine)
+    image: pgvector/pgvector:pg15 # PostgreSQL 15 + pgvector，用于 RAG 向量存储迁移
     ports:
       - "15432:5432"
     environment: # 环境变量
@@ -298,9 +264,6 @@ services: # 定义一系列的服务（容器）
       - scholarmind_net
 
 volumes: # 定义全局的数据卷
-  sm_esdata01: # Elasticsearch数据卷
-    name: backend_sm_esdata01
-    driver: local # 使用本地驱动
   pg_data: # PostgreSQL数据卷
     name: backend_pg_data
     driver: local # 使用本地驱动

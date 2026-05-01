@@ -9,12 +9,18 @@ import time
 from collections import defaultdict
 from pathlib import Path
 
-from elasticsearch import NotFoundError
-
 from core.config import settings
-from service.core.rag.retrieval.vector_store import ESVectoreStore, RetrieveQuery, RetrievedChunk
+from service.core.rag.retrieval.vector_store import ESVectoreStore, PgVectorStore, RetrieveQuery, RetrievedChunk
 from service.core.rag.nlp.model import generate_embedding
 from service.core.rag.llm.client import LLMClient
+
+try:
+    from elasticsearch import NotFoundError
+except ImportError:
+    class NotFoundError(RuntimeError):
+        """Placeholder used only when the legacy ES dependency is absent."""
+
+        pass
 
 
 @dataclass
@@ -26,11 +32,17 @@ class RAGResult:
 class RAGService:
     """Retrieval-only RAG engine for chunk search."""
     def __init__(self) -> None:
-        self.store = ESVectoreStore(default_index=settings.ES_DEFAULT_INDEX)
+        self.store = self._build_vector_store()
         self.llm_aux = LLMClient(task="aux")
         self.logger = logging.getLogger("rag.service")
         self._last_retrieval_debug: Dict[str, Any] | None = None
         self._last_variant_meta: Dict[str, Any] | None = None
+
+    def _build_vector_store(self) -> ESVectoreStore | PgVectorStore:
+        vector_store = str(getattr(settings, "SM_VECTOR_STORE", "pgvector") or "pgvector").strip().lower()
+        if vector_store == "pgvector":
+            return PgVectorStore(default_index=settings.ES_DEFAULT_INDEX)
+        return ESVectoreStore(default_index=settings.ES_DEFAULT_INDEX)
 
     # ------------------------------------------------------------------ #
     # Debug helpers
@@ -1348,8 +1360,9 @@ class RAGService:
                 embedding_override=variant_embeddings.get(primary_variant["text"]),
             )
 
-            from service.core.rag.utils.es_conn import ESConnection
-            es = self.store.es
+            es = getattr(self.store, "es", None)
+            if es is None:
+                return None
 
             body: dict = {
                 "size": 3,

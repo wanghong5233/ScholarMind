@@ -20,8 +20,7 @@ docker compose up -d --build
 
 This will start:
 - **API Server** (`scholarmind_api`) on port 8000
-- **PostgreSQL** (`scholarmind_db`) on port 5432
-- **Elasticsearch** (`scholarmind_vector`) on port 9200
+- **PostgreSQL + pgvector** (`scholarmind_db`) on port 5432
 - **Redis** (`scholarmind_redis`) on port 6379
 
 ### Stable Public Demo (Cloudflare Tunnel + Vercel)
@@ -117,6 +116,15 @@ docker compose exec scholarmind_api alembic revision -m "description"
 ```
 
 See **[`app/alembic/README.md`](./app/alembic/README.md)** for detailed migration guide.
+
+### Vector Store
+
+ScholarMind now uses PostgreSQL + pgvector as the default vector store:
+
+- PostgreSQL uses `pgvector/pgvector:pg15` so the `vector` extension is available.
+- `20_add_pgvector_rag_chunks.py` creates the `rag_chunks` table and vector/text indexes for RAG chunks.
+- `21_add_pgvector_ltm_facts.py` creates the `ltm_facts` table for long-term memory recall.
+- `SM_VECTOR_STORE=pgvector` is the default. `elasticsearch` remains only as a temporary rollback setting during migration.
 
 ## 📚 Further Reading
 

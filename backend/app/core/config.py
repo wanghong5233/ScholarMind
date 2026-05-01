@@ -72,6 +72,12 @@ class Settings(BaseSettings):
     SM_ES_CLIENT_TIMEOUT_SECS: int = 60
     SM_ES_SEARCH_TIMEOUT_SECS: int = 20
     SM_ES_SEARCH_RETRY_TIMES: int = 1
+    # pgvector is the default vector store. The elasticsearch option is kept only
+    # as a short-lived rollback path during the migration window.
+    SM_VECTOR_STORE: Literal["elasticsearch", "pgvector"] = "pgvector"
+    SM_PGVECTOR_TABLE: str = "rag_chunks"
+    SM_PGVECTOR_DUAL_WRITE_ENABLED: bool = False
+    SM_PGVECTOR_DUAL_WRITE_STRICT: bool = False
 
     @model_validator(mode="after")
     def build_es_url(self) -> "Settings":

@@ -5,11 +5,19 @@ from typing import Any, Dict, List, Optional
 import logging
 import time
 
-from elasticsearch import NotFoundError
+from sqlalchemy import text
 
 from core.config import settings
-from service.core.rag.utils.es_conn import ESConnection
 from service.core.rag.nlp.model import generate_embedding
+from utils.database import engine
+
+try:
+    from elasticsearch import NotFoundError
+except ImportError:
+    class NotFoundError(RuntimeError):
+        """Placeholder used only when the legacy ES dependency is absent."""
+
+        pass
 
 
 @dataclass
@@ -45,8 +53,332 @@ class VectorStore:
         raise NotImplementedError
 
 
+class PgVectorStore(VectorStore):
+    """PostgreSQL + pgvector retrieval implementation for staged ES migration."""
+
+    def __init__(self, default_index: str | None = None, table_name: str | None = None) -> None:
+        self.default_index = default_index or settings.ES_DEFAULT_INDEX
+        self.table_name = self._validate_table_name(table_name or settings.SM_PGVECTOR_TABLE)
+        self.logger = logging.getLogger("rag.retriever.pgvector")
+
+    def search(self, *, query: RetrieveQuery) -> List[RetrievedChunk]:
+        channels = query.channels or (["bm25", "vector"] if query.use_vector else ["bm25"])
+        candidates = self.search_multi_path(query=query, channels=channels)
+        return self._fuse_for_basic(candidates=candidates, top_k=query.top_k)
+
+    def search_multi_path(
+        self,
+        *,
+        query: RetrieveQuery,
+        channels: Optional[List[str]] = None,
+        candidate_multiplier: Optional[int] = None,
+    ) -> List[RetrievedChunk]:
+        resolved_channels = self._resolve_channels(channels or query.channels)
+        if not resolved_channels:
+            return []
+
+        multiplier = candidate_multiplier or max(int(getattr(settings, "SM_RECALL_CANDIDATE_MULTIPLIER", 3) or 3), 1)
+        per_channel_limit = {
+            "bm25": max(int(getattr(settings, "SM_BM25_TOPK", 0) or 0), query.top_k * multiplier),
+            "vector": max(int(getattr(settings, "SM_VECTOR_TOPK", 0) or 0), query.top_k * multiplier),
+        }
+        aggregated: List[RetrievedChunk] = []
+        index_name = self._resolve_index(query)
+        for channel in resolved_channels:
+            ch = channel.lower().strip()
+            limit = per_channel_limit.get(ch, query.top_k * multiplier)
+            limit = max(limit, query.top_k)
+            if isinstance(query.channel_topk_cap, int) and query.channel_topk_cap > 0:
+                limit = max(query.top_k, min(limit, query.channel_topk_cap))
+
+            if ch == "bm25":
+                hits = self._search_bm25(query=query, index_name=index_name, limit=limit)
+            elif ch == "vector":
+                hits = self._search_vector(query=query, index_name=index_name, limit=limit)
+            elif ch == "colbert":
+                hits = []
+            else:
+                continue
+
+            for rank, hit in enumerate(hits, start=1):
+                hit.source = ch
+                hit.query = query.text
+                hit.rank = rank
+                if query.query_tag:
+                    hit.metadata["query_tag"] = query.query_tag
+                hit.metadata["query_text"] = query.text
+                hit.metadata["query_synthetic"] = bool(query.synthetic)
+                aggregated.append(hit)
+
+        return self._filter_short_chunks(aggregated)
+
+    def index_exists(self, index_name: str) -> bool:
+        if not index_name:
+            return False
+        statement = text(
+            f"SELECT 1 FROM {self.table_name} WHERE index_name = :index_name LIMIT 1"
+        )
+        with engine.connect() as connection:
+            row = connection.execute(statement, {"index_name": index_name}).first()
+        return row is not None
+
+    def _resolve_index(self, query: RetrieveQuery) -> str:
+        return query.index_override or self.default_index or "scholarmind_default"
+
+    def _resolve_channels(self, override: Optional[List[str]]) -> List[str]:
+        if override:
+            return [c.strip() for c in override if c and c.strip()]
+        raw = getattr(settings, "SM_RECALL_SOURCES", "bm25,vector")
+        return [c.strip() for c in raw.split(",") if c.strip()]
+
+    def _search_bm25(self, *, query: RetrieveQuery, index_name: str, limit: int) -> List[RetrievedChunk]:
+        filters, params = self._filters(query=query, index_name=index_name)
+        params.update({"query_text": query.text, "limit": limit})
+        statement = text(
+            f"""
+            SELECT
+                chunk_id,
+                text,
+                metadata,
+                index_name,
+                ts_rank_cd(to_tsvector('simple', coalesce(text, '')), plainto_tsquery('simple', :query_text)) AS score
+            FROM {self.table_name}
+            WHERE {' AND '.join(filters)}
+              AND plainto_tsquery('simple', :query_text) @@ to_tsvector('simple', coalesce(text, ''))
+            ORDER BY score DESC, chunk_index ASC
+            LIMIT :limit
+            """
+        )
+        rows = self._execute_rows(statement, params)
+        return self._rows_to_chunks(rows=rows, source="bm25", boost_doc_ids=query.boost_doc_ids)
+
+    def _search_vector(self, *, query: RetrieveQuery, index_name: str, limit: int) -> List[RetrievedChunk]:
+        embedding = self._get_embedding(query)
+        if embedding is None:
+            return []
+        filters, params = self._filters(query=query, index_name=index_name)
+        params.update({"embedding": self._vector_literal(embedding), "limit": limit})
+        statement = text(
+            f"""
+            SELECT
+                chunk_id,
+                text,
+                metadata,
+                index_name,
+                (1.0 - (embedding <=> CAST(:embedding AS vector))) AS score
+            FROM {self.table_name}
+            WHERE {' AND '.join(filters)}
+              AND embedding IS NOT NULL
+            ORDER BY embedding <=> CAST(:embedding AS vector), chunk_index ASC
+            LIMIT :limit
+            """
+        )
+        rows = self._execute_rows(statement, params)
+        return self._rows_to_chunks(rows=rows, source="vector", boost_doc_ids=query.boost_doc_ids)
+
+    def _filters(self, *, query: RetrieveQuery, index_name: str) -> tuple[List[str], Dict[str, Any]]:
+        filters = ["index_name = :index_name", "kb_id = :kb_id"]
+        params: Dict[str, Any] = {"index_name": index_name, "kb_id": int(query.kb_id)}
+        if query.focus_doc_ids:
+            doc_ids = [int(doc_id) for doc_id in query.focus_doc_ids if doc_id is not None]
+            if doc_ids:
+                placeholders = []
+                for idx, doc_id in enumerate(doc_ids):
+                    name = f"doc_id_{idx}"
+                    placeholders.append(f":{name}")
+                    params[name] = doc_id
+                filters.append(f"document_id IN ({', '.join(placeholders)})")
+        return filters, params
+
+    def _execute_rows(self, statement: Any, params: Dict[str, Any]) -> List[Dict[str, Any]]:
+        with engine.connect() as connection:
+            result = connection.execute(statement, params)
+            return [dict(row._mapping) for row in result]
+
+    def _rows_to_chunks(
+        self,
+        *,
+        rows: List[Dict[str, Any]],
+        source: str,
+        boost_doc_ids: Optional[List[int]],
+    ) -> List[RetrievedChunk]:
+        boost_ids = {str(doc) for doc in (boost_doc_ids or []) if doc is not None}
+        mem_boost = float(getattr(settings, "SM_MEMORY_DOC_BOOST", 0.3) or 0.3)
+        chunks: List[RetrievedChunk] = []
+        for row in rows:
+            metadata = dict(row.get("metadata") or {})
+            metadata["index_name"] = row.get("index_name")
+            metadata["retrieval_source"] = source
+            doc_id = metadata.get("document_id")
+            score = float(row.get("score") or 0.0)
+            if doc_id is not None and str(doc_id) in boost_ids:
+                score *= 1.0 + mem_boost
+                metadata["memory_boost"] = True
+            chunks.append(
+                RetrievedChunk(
+                    chunk_id=str(row.get("chunk_id") or ""),
+                    text=str(row.get("text") or ""),
+                    score=score,
+                    metadata=metadata,
+                    source=source,
+                )
+            )
+        return chunks
+
+    def _get_embedding(self, query: RetrieveQuery) -> Optional[List[float]]:
+        if query.embedding_override is not None:
+            return query.embedding_override
+        try:
+            vecs = generate_embedding([query.text])
+            if vecs and vecs[0] is not None:
+                return vecs[0]
+        except Exception as exc:
+            self.logger.warning("PgVectorRetriever embedding generation failed: %s", exc)
+        return None
+
+    def _vector_literal(self, embedding: List[float]) -> str:
+        return "[" + ",".join(str(float(item)) for item in embedding) + "]"
+
+    def _fetch_chunks_by_ids(
+        self,
+        *,
+        chunk_ids: List[str],
+        index_name: str,
+        kb_id: int,
+    ) -> List[RetrievedChunk]:
+        if not chunk_ids:
+            return []
+        placeholders = []
+        params: Dict[str, Any] = {"index_name": index_name, "kb_id": int(kb_id)}
+        for idx, chunk_id in enumerate(chunk_ids):
+            name = f"chunk_id_{idx}"
+            placeholders.append(f":{name}")
+            params[name] = chunk_id
+        statement = text(
+            f"""
+            SELECT chunk_id, text, metadata, index_name, 0.0 AS score
+            FROM {self.table_name}
+            WHERE index_name = :index_name
+              AND kb_id = :kb_id
+              AND chunk_id IN ({', '.join(placeholders)})
+            """
+        )
+        rows = self._execute_rows(statement, params)
+        return self._rows_to_chunks(rows=rows, source="context", boost_doc_ids=None)
+
+    def _expand_equation_context(
+        self,
+        chunks: List[RetrievedChunk],
+        index_name: Optional[str],
+        kb_id: int,
+    ) -> List[RetrievedChunk]:
+        equation_chunks = [
+            chunk
+            for chunk in chunks
+            if str((chunk.metadata or {}).get("element_type") or "").lower() == "equation_latex"
+        ]
+        if not equation_chunks:
+            return chunks
+        expanded_equations = self._expand_context_by_neighbor_ids(
+            chunks=equation_chunks,
+            index_name=index_name,
+            kb_id=kb_id,
+        )
+        seen = {chunk.chunk_id for chunk in chunks}
+        result = list(chunks)
+        for chunk in expanded_equations:
+            if chunk.chunk_id in seen:
+                continue
+            seen.add(chunk.chunk_id)
+            result.append(chunk)
+        return result
+
+    def _expand_context_window(
+        self,
+        chunks: List[RetrievedChunk],
+        index_name: Optional[str],
+        kb_id: int,
+    ) -> List[RetrievedChunk]:
+        if not getattr(settings, "SM_CONTEXT_WINDOW_EXPANSION_ENABLED", False):
+            return chunks
+        return self._expand_context_by_neighbor_ids(chunks=chunks, index_name=index_name, kb_id=kb_id)
+
+    def _expand_context_by_neighbor_ids(
+        self,
+        *,
+        chunks: List[RetrievedChunk],
+        index_name: Optional[str],
+        kb_id: int,
+    ) -> List[RetrievedChunk]:
+        expanded = list(chunks)
+        seen = {chunk.chunk_id for chunk in expanded}
+        for chunk in chunks:
+            effective_index = (chunk.metadata or {}).get("index_name") or index_name
+            if not effective_index:
+                continue
+            neighbor_ids = [
+                value
+                for value in [
+                    (chunk.metadata or {}).get("prev_chunk_id"),
+                    (chunk.metadata or {}).get("next_chunk_id"),
+                ]
+                if value and value not in seen
+            ]
+            context_chunks = self._fetch_chunks_by_ids(
+                chunk_ids=[str(item) for item in neighbor_ids],
+                index_name=str(effective_index),
+                kb_id=kb_id,
+            )
+            for context_chunk in context_chunks:
+                if context_chunk.chunk_id in seen:
+                    continue
+                seen.add(context_chunk.chunk_id)
+                context_chunk.score = float(chunk.score or 0.0) * 0.4
+                context_chunk.metadata["is_context"] = True
+                context_chunk.metadata["context_for_chunk_id"] = chunk.chunk_id
+                expanded.append(context_chunk)
+        return expanded
+
+    def _filter_short_chunks(self, chunks: List[RetrievedChunk]) -> List[RetrievedChunk]:
+        min_text_chars = max(
+            int(getattr(settings, "SM_RETRIEVAL_MIN_TEXT_CHARS", 0) or getattr(settings, "SM_CHUNK_MIN_FILTER_CHARS", 0) or 0),
+            0,
+        )
+        if min_text_chars <= 0:
+            return chunks
+        allowed_multimodal = {"equation_latex", "table_json", "figure_summary"}
+        filtered = []
+        for chunk in chunks:
+            md = chunk.metadata or {}
+            element_type = str(md.get("element_type") or "").lower()
+            logical_type = str(md.get("logical_type") or "").lower()
+            if element_type in allowed_multimodal or logical_type in allowed_multimodal:
+                filtered.append(chunk)
+                continue
+            if len((chunk.text or "").strip()) >= min_text_chars:
+                filtered.append(chunk)
+        return filtered
+
+    def _fuse_for_basic(self, *, candidates: List[RetrievedChunk], top_k: int) -> List[RetrievedChunk]:
+        best_by_chunk: Dict[str, RetrievedChunk] = {}
+        for candidate in candidates:
+            existing = best_by_chunk.get(candidate.chunk_id)
+            if existing is None or candidate.score > existing.score:
+                best_by_chunk[candidate.chunk_id] = candidate
+        return sorted(best_by_chunk.values(), key=lambda item: float(item.score or 0.0), reverse=True)[:top_k]
+
+    def _validate_table_name(self, table_name: str) -> str:
+        import re
+
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table_name or ""):
+            raise ValueError(f"Invalid pgvector table name: {table_name!r}")
+        return table_name
+
+
 class ESVectoreStore(VectorStore):
     def __init__(self, default_index: str | None = None) -> None:
+        from service.core.rag.utils.es_conn import ESConnection
+
         self.es = ESConnection()
         self.default_index = default_index
         self.logger = logging.getLogger("rag.retriever.es")

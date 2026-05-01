@@ -24,7 +24,6 @@ from service.core.ingestion.chunker import RecursiveCharacterChunker
 from service.core.ingestion.constants import is_multimodal_metadata
 from service.core.ingestion.parser_orchestrator import ParserOrchestrator
 from service.core.ingestion.structured_doc_builder import StructuredDocument, StructuredDocumentBuilder
-from service.core.rag.utils.es_conn import ESConnection
 
 
 class ParsePreviewService:
@@ -233,7 +232,50 @@ class ParsePreviewService:
 
     def _load_indexed_blocks(self, kb: int, document: int) -> List[DocumentParseBlock]:
         size = int(getattr(settings, "SM_DEBUG_MAX_CHUNKS", 2000) or 2000)
+        vector_store = str(getattr(settings, "SM_VECTOR_STORE", "pgvector") or "pgvector").strip().lower()
+        if vector_store == "pgvector":
+            return self._load_indexed_blocks_from_pgvector(kb=kb, document=document, size=size)
+        return self._load_indexed_blocks_from_es(kb=kb, document=document, size=size)
+
+    def _load_indexed_blocks_from_pgvector(self, kb: int, document: int, size: int) -> List[DocumentParseBlock]:
         try:
+            from service.core.ingestion.pgvector_writer import PgVectorChunkWriter
+
+            rows = PgVectorChunkWriter().fetch_document_chunks(
+                kb_id=kb,
+                document_id=document,
+                index_name=settings.ES_DEFAULT_INDEX,
+                limit=size,
+            )
+        except Exception as exc:
+            self.logger.error("pgvector query failed for chunk preview doc=%s: %s", document, exc)
+            return []
+
+        blocks: List[DocumentParseBlock] = []
+        for idx, row in enumerate(rows, start=1):
+            metadata = dict(row.get("metadata") or {})
+            metadata["chunk_id"] = row.get("chunk_id")
+            if (not settings.SM_ENABLE_MULTIMODAL_CHUNKS) and is_multimodal_metadata(metadata):
+                continue
+            if not metadata.get("element_type") and metadata.get("logical_type"):
+                metadata["element_type"] = metadata["logical_type"]
+            metadata = {k: v for k, v in metadata.items() if v is not None}
+            page_num = self._optional_int(metadata.get("page"))
+            blocks.append(
+                DocumentParseBlock(
+                    index=idx,
+                    text=row.get("text") or "",
+                    element_type=metadata.get("element_type"),
+                    page=page_num,
+                    metadata=metadata,
+                )
+            )
+        return blocks
+
+    def _load_indexed_blocks_from_es(self, kb: int, document: int, size: int) -> List[DocumentParseBlock]:
+        try:
+            from service.core.rag.utils.es_conn import ESConnection
+
             es = ESConnection()
         except Exception as exc:
             self.logger.error("Failed to init ESConnection for chunk preview: %s", exc)
@@ -287,3 +329,11 @@ class ParsePreviewService:
                 )
             )
         return blocks
+
+    def _optional_int(self, value) -> int | None:
+        try:
+            if value is None:
+                return None
+            return int(value)
+        except (TypeError, ValueError):
+            return None
