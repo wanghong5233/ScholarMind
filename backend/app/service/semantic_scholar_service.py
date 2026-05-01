@@ -8,6 +8,7 @@ from models.document import DocumentIngestionSource
 from service.core.api.utils.ccf_whitelist import is_high_quality_venue
 from urllib.parse import quote
 from core.config import settings
+from exceptions.base import APIException
 
 
 class SemanticScholarService:
@@ -51,8 +52,8 @@ class SemanticScholarService:
         self.max_retries = max_retries
         self.backoff_factor = backoff_factor
         self.headers = {"x-api-key": self.api_key} if self.api_key else {}
-        # 如果 key 已被服务端拒绝（401/403），在当前进程内禁用该 key，
-        # 避免每次请求都先吃一次 403 再触发匿名链路。
+        # 如果 key 已被服务端拒绝（401/403），在当前进程内标记禁用，
+        # 避免后续请求继续使用失效凭证。
         self._key_disabled = False
         # 匿名模式全局退避窗口，避免短时间内连续撞 429。
         self._anonymous_next_allowed_at = 0.0
@@ -64,7 +65,6 @@ class SemanticScholarService:
         """
         url_path = endpoint if endpoint.startswith("/") else f"/{endpoint}"
         last_error: Optional[Exception] = None
-        auth_failed = False
 
         auth_headers = self.headers if self.headers and not self._key_disabled else {}
         if not auth_headers:
@@ -82,26 +82,30 @@ class SemanticScholarService:
                         logger.warning(f"Semantic Scholar rate limited (429). retry in {sleep_s:.2f}s")
                         time.sleep(sleep_s)
                         continue
+                    if response.status_code in {401, 403}:
+                        self._key_disabled = True
+                        logger.warning(
+                            f"Semantic Scholar API key auth failed ({response.status_code}); "
+                            "disable key for current process."
+                        )
+                        raise APIException(
+                            status_code=502,
+                            code=50201,
+                            message=(
+                                "Semantic Scholar API key 已失效或无权限，"
+                                "请更新 SEMANTIC_SCHOLAR_API_KEY 后重试。"
+                            ),
+                        )
                     response.raise_for_status()
                     return response.json()
+            except APIException:
+                raise
             except httpx.HTTPError as http_err:
                 last_error = http_err
-                status_code = getattr(getattr(http_err, "response", None), "status_code", None)
-                if status_code in {401, 403} and auth_headers:
-                    auth_failed = True
-                    self._key_disabled = True
-                    logger.warning(
-                        f"Semantic Scholar key auth failed ({status_code}), disable key for current process "
-                        f"and retry without API key."
-                    )
-                    break
                 # 非 429 的错误直接退避后重试（有限次）
                 sleep_s = self.backoff_factor * (2 ** attempt)
                 logger.error(f"Semantic Scholar request failed (attempt {attempt + 1}/{self.max_retries}): {http_err}")
                 time.sleep(sleep_s)
-
-        if auth_failed:
-            return self._make_request_without_api_key(url_path, params)
 
         # 所有重试失败
         if last_error is not None:
@@ -110,7 +114,7 @@ class SemanticScholarService:
         return {}
 
     def _make_request_without_api_key(self, url_path: str, params: Dict[str, Any]) -> Dict[str, Any]:
-        """当 API key 鉴权失败时，回退到匿名请求（与历史知识库链路行为一致）。"""
+        """Use anonymous requests only when no Semantic Scholar API key is configured."""
 
         last_error: Optional[Exception] = None
         for attempt in range(self.max_retries):

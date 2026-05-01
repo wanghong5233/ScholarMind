@@ -178,4 +178,86 @@ class ESIndexer:
             except Exception:
                 pass
 
+        # Hierarchical index: write a document-level summary record
+        if docs and getattr(settings, "SM_HIERARCHICAL_INDEX_ENABLED", False):
+            self._write_document_summary(
+                docs=docs,
+                kb_id=kb_id,
+                document_id=document_id,
+                target_index=session_index or self.index_name,
+            )
 
+    def _write_document_summary(
+        self,
+        *,
+        docs: list[Dict],
+        kb_id: int,
+        document_id: int,
+        target_index: str,
+    ) -> None:
+        """Write a single document-level summary record for hierarchical retrieval."""
+        title_parts = []
+        abstract_parts = []
+        keywords_parts = []
+
+        for d in docs:
+            doc_title = d.get("document_title") or d.get("title") or ""
+            if doc_title and doc_title not in title_parts:
+                title_parts.append(str(doc_title))
+
+            section = str(d.get("section_type") or d.get("section") or "").lower()
+            if section in ("abstract",):
+                abstract_parts.append(str(d.get("text") or "")[:2000])
+
+            kw = d.get("keywords") or ""
+            if kw and str(kw) not in keywords_parts:
+                keywords_parts.append(str(kw))
+
+        title_text = " ".join(title_parts)[:500]
+        abstract_text = " ".join(abstract_parts)[:3000]
+        keywords_text = " ".join(keywords_parts)[:500]
+
+        summary_text = f"{title_text}\n{abstract_text}\n{keywords_text}".strip()
+        if not summary_text or len(summary_text) < 20:
+            return
+
+        summary_id = hashlib.sha256(
+            f"doc_summary|{kb_id}|{document_id}".encode("utf-8")
+        ).hexdigest()
+
+        try:
+            from service.core.ingestion.embedder import SimpleAPIEmbedder
+            embedder = SimpleAPIEmbedder()
+            vectors = embedder.embed([summary_text])
+            vector = vectors[0] if vectors else []
+        except Exception:
+            vector = []
+
+        summary_doc = {
+            "id": summary_id,
+            "text": summary_text,
+            "vector": vector,
+            "kb_id": str(kb_id),
+            "document_id": str(document_id),
+            "level": "document",
+            "element_type": "document_summary",
+            "chunk_index": -1,
+        }
+
+        try:
+            errs = self.es.insert([summary_doc], target_index)
+            if errs:
+                logging.getLogger("ragflow.indexer").warning(
+                    "Failed to index document summary for doc_id=%s: %s",
+                    document_id, errs[:2],
+                )
+            else:
+                logging.getLogger("ragflow.indexer").info(
+                    "Indexed document-level summary for doc_id=%s (%d chars)",
+                    document_id, len(summary_text),
+                )
+        except Exception as exc:
+            logging.getLogger("ragflow.indexer").warning(
+                "Document summary indexing error for doc_id=%s: %s",
+                document_id, exc,
+            )

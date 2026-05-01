@@ -98,6 +98,8 @@ class Settings(BaseSettings):
     # 模型名称
     DASHSCOPE_MODEL_NAME: str = "qwen3-max"
     OPENAI_MODEL_NAME: str = "gpt-5.2"
+    DASHSCOPE_MODEL_CANDIDATES: str = "qwen-plus,qwen3-max,qwen-max,qwen-turbo,qwen-vl-max,qwen-vl-plus"
+    OPENAI_MODEL_CANDIDATES: str = "gpt-5.2,gpt-5,gpt-5-mini,gpt-4.1,gpt-4o"
     # 按任务拆分模型（为空时回退到 DASHSCOPE_MODEL_NAME / OPENAI_MODEL_NAME）
     SM_LLM_MODEL_ANSWER: Optional[str] = None
     SM_LLM_MODEL_AUX: Optional[str] = None
@@ -213,7 +215,7 @@ class Settings(BaseSettings):
     SM_BLOCK_LEVEL_ALLOW_CROSS_PAGE: bool = False     # 是否允许块级跨页合并（默认不允许，保障可溯源）
     SM_BLOCK_LEVEL_MAX_CHARS: int = 5600              # 与总体上限一致
     SM_BLOCK_LEVEL_LEN_MERGE_BELOW: int = 4200        # ~1050 tokens，长度优先阈值
-    SM_ENABLE_MULTIMODAL_CHUNKS: bool = False         # 是否将图/表等多模态块写入索引
+    SM_ENABLE_MULTIMODAL_CHUNKS: bool = True          # 是否将图/表等多模态块写入索引
     # 解析回退控制
     SM_FORCE_PYMUPDF_FALLBACK: bool = False                                      # 强制对 PDF 启用 PyMuPDF 兜底/补强
     # 解析器编排顺序（逗号分隔，按顺序尝试）。可选项：deepdoc, mineru, unstructured, pymupdf
@@ -312,12 +314,38 @@ class Settings(BaseSettings):
     SM_OCR_TRIGGER_CONF_LT: float = 0.8             # MinerU 置信度低于该值触发
 
     # 图像理解引擎（图表语义摘要）
-    SM_VISION_ENABLED: bool = False
-    SM_VISION_ENGINE: Literal["qwen2-vl"] = "qwen2-vl"
-    SM_VISION_ENDPOINT: Optional[str] = None        # 例如 http://qwen2-vl:8002/summarize
+    SM_VISION_ENABLED: bool = True
+    SM_VISION_TYPE: Literal["dashscope", "http"] = "dashscope"  # dashscope=DashScope API 直调, http=外部 HTTP 服务
+    SM_VISION_MODEL: str = "qwen-vl-max"                        # DashScope 多模态模型名
+    SM_VISION_ENGINE: Literal["qwen2-vl"] = "qwen2-vl"         # HTTP 模式引擎（兼容旧配置）
+    SM_VISION_ENDPOINT: Optional[str] = None                    # HTTP 模式端点
     SM_VISION_TIMEOUT_SECS: int = 60
-    SM_VISION_MAX_TOKENS: int = 128
+    SM_VISION_MAX_TOKENS: int = 256
     SM_VISION_MAX_PER_2PAGES: int = 1               # 每2页最多处理的图表数
+
+    # 公式描述增强（摄入时用 LLM 为 LaTeX 生成自然语言描述，改善嵌入质量）
+    SM_EQUATION_DESCRIPTION_ENABLED: bool = True
+
+    # 自适应检索决策（意图分类：自动判断是否需要检索及检索策略）
+    SM_ADAPTIVE_RETRIEVAL_ENABLED: bool = True
+
+    # 通用上下文窗口扩展（检索时对所有命中块附带前后邻居块）
+    SM_CONTEXT_WINDOW_EXPANSION_ENABLED: bool = True
+    SM_CONTEXT_WINDOW_EXPANSION_PREV: int = 1       # 向前扩展块数
+    SM_CONTEXT_WINDOW_EXPANSION_NEXT: int = 1       # 向后扩展块数
+
+    # 相关性网关（精排后低分过滤，防止不相关检索结果导致幻觉）
+    SM_RELEVANCE_GATE_ENABLED: bool = True
+    SM_RELEVANCE_GATE_THRESHOLD: float = 0.3        # top-1 chunk 分数低于此值则不注入上下文
+
+    # 分层检索（文档级摘要索引 → chunk 级精检）
+    SM_HIERARCHICAL_INDEX_ENABLED: bool = True       # 摄入时是否写入文档级摘要记录
+    SM_HIERARCHICAL_RETRIEVAL_ENABLED: bool = True   # 检索时是否先做文档级预检
+
+    # 逐块上下文压缩（精排后用 LLM 提取与查询相关的核心句子）
+    SM_CONTEXT_COMPRESSION_ENABLED: bool = True
+    SM_COMPRESSION_MAX_CHUNKS: int = 8               # 最多压缩前 N 个块
+    SM_COMPRESSION_MODEL: Optional[str] = None       # 压缩用模型（为空时回退到 SM_LLM_MODEL_AUX）
 
     # Deepdoc/XGBoost 模型定制（用于修复旧二进制模型不兼容问题）
     DEEPDOC_XGB_MODEL_PATH: Optional[str] = "/app/service/core/rag/res/deepdoc/updown_concat_xgb.json"  # 指向 updown_concat_xgb.json/ubj 的绝对路径

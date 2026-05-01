@@ -518,6 +518,19 @@ class RAGService:
         if not index_plan:
             index_plan.append({"label": "global", "index": None, "fallback": None})
 
+        # Hierarchical retrieval: optional document-level pre-filter
+        if getattr(settings, "SM_HIERARCHICAL_RETRIEVAL_ENABLED", False) and not focus_doc_ids:
+            doc_level_ids = self._hierarchical_doc_prefetch(
+                query=query,
+                kb_id=kb_id,
+                index_plan=index_plan,
+                default_index_name=default_index_name,
+                variant_embeddings=variant_embeddings,
+                variants=variants,
+            )
+            if doc_level_ids:
+                focus_doc_ids = doc_level_ids
+
         channels = None  # use store defaults
         path_hits: Dict[str, List[RetrievedChunk]] = {}
         total_candidates = 0
@@ -662,6 +675,24 @@ class RAGService:
         else:
             context_only = []
         context_preview = [self._serialize_chunk_preview(chunk) for chunk in context_only[:sample_limit]]
+
+        # 通用上下文窗口扩展（对非公式块也附带前后邻居）
+        if getattr(settings, "SM_CONTEXT_WINDOW_EXPANSION_ENABLED", False):
+            win_augmented = self.store._expand_context_window(  # type: ignore[attr-defined]
+                chunks=mmr_selected + context_only,
+                index_name=primary_index_hint,
+                kb_id=kb_id,
+            )
+            win_base_ids = {c.chunk_id for c in mmr_selected}
+            win_ctx_ids = {c.chunk_id for c in context_only}
+            win_new_ctx = [
+                c for c in win_augmented
+                if c.chunk_id not in win_base_ids and c.chunk_id not in win_ctx_ids
+            ]
+            for wc in win_new_ctx:
+                if wc.chunk_id not in fused_scores:
+                    fused_scores[wc.chunk_id] = float(wc.score or 0.0)
+            context_only = context_only + win_new_ctx
 
         # 阶段2（精排）：在 MMR 输出的候选上进行元数据处理，准备给精排
         # 注意：精排会在外部（session_rt.py/debug_rt.py）进行，这里只准备候选
@@ -1284,6 +1315,98 @@ class RAGService:
     def _token_set(self, text: str) -> set[str]:
         tokens = re.split(r"[^\w]+", text.lower())
         return {t for t in tokens if t}
+
+    def _hierarchical_doc_prefetch(
+        self,
+        *,
+        query: str,
+        kb_id: int,
+        index_plan: List[Dict[str, Optional[str]]],
+        default_index_name: str,
+        variant_embeddings: Dict[str, List[float]],
+        variants: List[Dict[str, Any]],
+    ) -> Optional[List[int]]:
+        """Document-level pre-retrieval: search level=document records first, return top doc IDs."""
+        try:
+            primary_variant = next((v for v in variants if v.get("tag") == "original"), None) or (variants[0] if variants else None)
+            if not primary_variant:
+                return None
+
+            plan_index = index_plan[0].get("index") if index_plan else None
+            effective_index = plan_index or default_index_name
+
+            rq = RetrieveQuery(
+                text=primary_variant["text"],
+                kb_id=kb_id,
+                top_k=3,
+                focus_doc_ids=None,
+                index_override=plan_index,
+                use_vector=True,
+                channels=None,
+                query_tag="hierarchical_doc",
+                synthetic=False,
+                embedding_override=variant_embeddings.get(primary_variant["text"]),
+            )
+
+            from service.core.rag.utils.es_conn import ESConnection
+            es = self.store.es
+
+            body: dict = {
+                "size": 3,
+                "query": {
+                    "bool": {
+                        "must": [
+                            {"term": {"kb_id": str(kb_id)}},
+                            {"term": {"level": "document"}},
+                        ],
+                    }
+                },
+                "_source": ["document_id"],
+            }
+
+            embedding = rq.embedding_override
+            if embedding:
+                body["knn"] = {
+                    "field": "vector",
+                    "query_vector": embedding,
+                    "k": 3,
+                    "num_candidates": 10,
+                    "filter": {
+                        "bool": {
+                            "must": [
+                                {"term": {"kb_id": str(kb_id)}},
+                                {"term": {"level": "document"}},
+                            ]
+                        }
+                    },
+                }
+
+            resp = es.es.search(index=effective_index, body=body)
+            hits = resp.get("hits", {}).get("hits", [])
+            doc_ids = []
+            for hit in hits:
+                src = hit.get("_source", {})
+                did = src.get("document_id")
+                if did is not None:
+                    try:
+                        doc_ids.append(int(did))
+                    except (ValueError, TypeError):
+                        pass
+            if doc_ids:
+                try:
+                    self.logger.info(
+                        "[HIERARCHICAL_PREFETCH] found %d doc(s): %s",
+                        len(doc_ids), doc_ids,
+                    )
+                except Exception:
+                    pass
+                return doc_ids
+        except Exception as exc:
+            try:
+                self.logger.debug("Hierarchical doc prefetch skipped: %s", exc)
+            except Exception:
+                pass
+        return None
 
     def _apply_metadata_stage(
         self,

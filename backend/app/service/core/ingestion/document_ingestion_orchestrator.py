@@ -176,7 +176,7 @@ class DocumentIngestionOrchestrator:
             )
         except APIException as exc:
             raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)
+                status_code=exc.status_code, detail=exc.message
             ) from exc
         except Exception as exc:
             raise HTTPException(

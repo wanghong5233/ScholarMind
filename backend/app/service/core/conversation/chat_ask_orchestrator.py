@@ -35,6 +35,10 @@ from service.core.rag.utils.retrieval_stats import build_provider_stats
 from service import knowledgebase_service
 from service.memory_service import LongTermMemoryService
 from service.session_service import SessionService
+from service.core.rag.history.long_term_memory import (
+    FactExtractor,
+    LongTermMemoryStore,
+)
 from utils.ask_logger import AskEventLogger
 from utils.experiments import assign_variant
 from utils.get_logger import logger
@@ -203,6 +207,25 @@ class ChatAskOrchestrator:
             effective_index_mode = "disabled"
         index_mode = requested_index_mode or effective_index_mode
         retrieval_disabled = index_mode == "disabled"
+
+        # Adaptive retrieval: LLM-based intent classification
+        if (
+            not retrieval_disabled
+            and requested_index_mode != "disabled"
+            and retrieval_plan
+            and getattr(settings, "SM_ADAPTIVE_RETRIEVAL_ENABLED", False)
+        ):
+            intent = self._classify_query_intent(question, retrieval_plan)
+            if intent.get("need_retrieval") is False:
+                retrieval_disabled = True
+                try:
+                    logger.info(
+                        "[ADAPTIVE_RETRIEVAL] query_type=%s → skip retrieval",
+                        intent.get("query_type", "chat"),
+                    )
+                except Exception:
+                    pass
+
         primary_kb_for_debug: Optional[int] = session_kb_id if session_kb_id is not None else user_kb_id
         kb_ids_for_debug = [kb for _, kb in retrieval_plan]
         if not kb_ids_for_debug:
@@ -355,6 +378,25 @@ class ChatAskOrchestrator:
                 + deep_research_context_text
             )
 
+        ltm_facts_extra_system = None
+        ltm_facts_debug_raw: Dict[str, Any] = {"enabled": False}
+        try:
+            ltm_segment, ltm_debug = self.conversation_service.recall_ltm_facts(
+                user_id=self.current_user.id,
+                question=question,
+                language=self.chat_service.prompt.language or "zh",
+            )
+            ltm_facts_debug_raw = {
+                "enabled": ltm_debug.enabled,
+                "facts_retrieved": ltm_debug.facts_retrieved,
+                "elapsed_ms": ltm_debug.elapsed_ms,
+                "details": ltm_debug.details,
+            }
+            if ltm_segment:
+                ltm_facts_extra_system = ltm_segment
+        except Exception as ltm_recall_exc:
+            logger.debug("LTM recall failed (non-fatal): %s", ltm_recall_exc)
+
         def compose_extra_system(*segments: Optional[str]) -> Optional[str]:
             merged = [str(item).strip() for item in segments if isinstance(item, str) and item.strip()]
             if not merged:
@@ -363,6 +405,7 @@ class ChatAskOrchestrator:
 
         if stream:
             def gen():
+                nonlocal retrieval_disabled
                 run_id = self._resolve_run_id(requested_run_id)
                 replay_buffer = None
                 run_control = None
@@ -627,6 +670,9 @@ class ChatAskOrchestrator:
                             yield frame
                         return
                     _ensure_deadline("after_rerank")
+                    chunks0, rag_gate_pass = self._apply_relevance_gate(chunks0)
+                    if not rag_gate_pass:
+                        retrieval_disabled = True
                     progress_payload = {
                         "stage": "retrieved",
                         "hits": len(chunks0),
@@ -647,6 +693,7 @@ class ChatAskOrchestrator:
                     }
 
                     answer_accum: list[str] = []
+                    runtime_model_emitted = False
                     effective_chunks = chunks0
                     extra_system_prompt = None
                     if context_text_for_llm and index_mode == "disabled":
@@ -673,6 +720,7 @@ class ChatAskOrchestrator:
                     extra_system_prompt = compose_extra_system(
                         extra_system_prompt,
                         deep_research_extra_system,
+                        ltm_facts_extra_system,
                     )
 
                     t_generate = time.perf_counter()
@@ -694,6 +742,11 @@ class ChatAskOrchestrator:
                             cancelled_during_generation = True
                             break
                         _ensure_deadline("generation")
+                        if not runtime_model_emitted:
+                            runtime_model = self.chat_service.get_last_runtime_model()
+                            if runtime_model:
+                                runtime_model_emitted = True
+                                yield _emit("runtime_model", runtime_model)
                         answer_accum.append(part)
                         yield _emit("delta", {"content": part})
                     generation_ms = int((time.perf_counter() - t_generate) * 1000)
@@ -716,6 +769,7 @@ class ChatAskOrchestrator:
                         "completion_tokens": 0,
                         "total_tokens": 0,
                     }
+                    runtime_model_tail = self.chat_service.get_last_runtime_model()
                     debug_tail = {
                         "kb_id": primary_kb_for_debug,
                         "kb_ids": kb_ids_for_debug,
@@ -779,6 +833,7 @@ class ChatAskOrchestrator:
                         "type": "completion",
                         "citations": citations_tail,
                         "usage": usage_tail,
+                        "runtime_model": runtime_model_tail,
                         "cancelled": bool(cancelled_during_generation),
                         "message_id": str(message_uuid),
                         "persisted": False,
@@ -798,16 +853,24 @@ class ChatAskOrchestrator:
                                 question=question,
                                 citations=citations_tail,
                             )
+                            self._extract_and_store_ltm_facts_async(
+                                user_id=self.current_user.id,
+                                session_id=session_id,
+                                question=question,
+                                answer=full_answer,
+                            )
                             retrieval_data = {
                                 "citations": citations_tail,
                                 "retrieval": retrieval_debug,
                                 "memory": memory_debug_raw,
+                                "ltm_facts": ltm_facts_debug_raw,
                                 "rerank": rerank_status_stream,
                                 "timing": debug_tail.get("timing"),
                                 "knowledge_base_id": s.knowledge_base_id,
                                 "usage": usage_tail,
-                                "llm_model": llm_model_override,
-                                "llm_provider": llm_provider_override,
+                                "llm_model": (runtime_model_tail or {}).get("actual_model") or llm_model_override,
+                                "llm_provider": (runtime_model_tail or {}).get("actual_provider") or llm_provider_override,
+                                "runtime_model": runtime_model_tail,
                                 "cancelled": bool(cancelled_during_generation),
                                 "deep_research_context": deep_research_context_debug,
                             }
@@ -841,18 +904,16 @@ class ChatAskOrchestrator:
                     yield _emit("completion", completion_payload)
                 except Exception as e:
                     try:
-                        logger.error(
-                            "ASK stream error user=%s session=%s: %s",
-                            self.current_user.id,
-                            session_id,
-                            e,
+                        logger.exception(
+                            f"ASK stream error user={self.current_user.id} "
+                            f"session={session_id}: {type(e).__name__}: {e}"
                         )
                     except Exception:
                         pass
                     yield _emit(
                         "error",
                         {
-                            "message": "Stream Error",
+                            "message": str(e) or "Stream Error",
                             "code": "ask_stream_failed",
                         },
                     )
@@ -1003,6 +1064,10 @@ class ChatAskOrchestrator:
         except TimeoutError as exc:
             raise HTTPException(status_code=504, detail=str(exc)) from exc
 
+        chunks, rag_gate_pass_ns = self._apply_relevance_gate(chunks)
+        if not rag_gate_pass_ns:
+            retrieval_disabled = True
+
         try:
             effective_chunks_non_stream = chunks
             extra_system_prompt_non_stream = None
@@ -1026,6 +1091,7 @@ class ChatAskOrchestrator:
             extra_system_prompt_non_stream = compose_extra_system(
                 extra_system_prompt_non_stream,
                 deep_research_extra_system,
+                ltm_facts_extra_system,
             )
 
             try:
@@ -1106,6 +1172,12 @@ class ChatAskOrchestrator:
                 session_id=session_id,
                 question=question,
                 citations=citations,
+            )
+            self._extract_and_store_ltm_facts_async(
+                user_id=self.current_user.id,
+                session_id=session_id,
+                question=question,
+                answer=answer,
             )
         memory_success = bool((retrieval_debug.get("memory") or {}).get("top_hit"))
         if persist_history and not memory_debug_raw.get("disabled"):
@@ -1449,6 +1521,42 @@ class ChatAskOrchestrator:
 
         threading.Thread(target=_worker, daemon=True).start()
 
+    def _extract_and_store_ltm_facts_async(
+        self,
+        *,
+        user_id: int | str,
+        session_id: str,
+        question: str,
+        answer: str,
+    ) -> None:
+        """Asynchronously extract facts from a completed turn and store them in ES."""
+
+        def _worker() -> None:
+            try:
+                language = getattr(self.chat_service.prompt, "language", "zh") or "zh"
+                extractor = FactExtractor(language=language)
+                facts = extractor.extract(question=question, answer=answer)
+                if not facts:
+                    return
+                store = LongTermMemoryStore()
+                stored = store.store_facts(
+                    user_id=str(user_id),
+                    session_id=str(session_id),
+                    facts=facts,
+                )
+                if stored:
+                    logger.info(
+                        "LTM facts stored: user=%s session=%s extracted=%s stored=%s",
+                        user_id, session_id, len(facts), stored,
+                    )
+            except Exception as exc:
+                try:
+                    logger.warning("LTM fact extraction/storage failed: %s", exc)
+                except Exception:
+                    pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     def _persist_message_async(
         self,
         *,
@@ -1550,3 +1658,100 @@ class ChatAskOrchestrator:
         except Exception:
             self.db.rollback()
             raise
+
+    @staticmethod
+    def _apply_relevance_gate(
+        chunks: List[Dict[str, Any]],
+    ) -> tuple[List[Dict[str, Any]], bool]:
+        """Check top chunk score against threshold; return (chunks, rag_mode_override).
+
+        If the best score is below threshold, return empty chunks + rag_mode=False
+        so the generation falls back to chat mode without injecting low-quality context.
+        """
+        if not getattr(settings, "SM_RELEVANCE_GATE_ENABLED", False):
+            return chunks, True
+
+        if not chunks:
+            return chunks, False
+
+        threshold = float(getattr(settings, "SM_RELEVANCE_GATE_THRESHOLD", 0.3) or 0.3)
+
+        def _best_score(chunk: Dict[str, Any]) -> float:
+            md = chunk.get("metadata") or {}
+            for key in ("rerank_score", "retrieval_score", "fused_score"):
+                val = md.get(key)
+                if val is not None:
+                    try:
+                        return float(val)
+                    except (TypeError, ValueError):
+                        continue
+            try:
+                return float(chunk.get("score") or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        top_score = max(_best_score(c) for c in chunks)
+        if top_score < threshold:
+            try:
+                logger.info(
+                    "[RELEVANCE_GATE] top_score=%.4f < threshold=%.4f → fallback to chat mode",
+                    top_score, threshold,
+                )
+            except Exception:
+                pass
+            return [], False
+
+        return chunks, True
+
+    @staticmethod
+    def _classify_query_intent(
+        question: str,
+        retrieval_plan: list[tuple[str, int]],
+    ) -> Dict[str, Any]:
+        """Classify query intent to decide retrieval necessity and strategy.
+
+        Returns dict with:
+            need_retrieval (bool): whether to perform knowledge base retrieval
+            query_type (str): factual | analytical | comparative | chat
+        """
+        if not question or not question.strip():
+            return {"need_retrieval": False, "query_type": "chat"}
+        if not retrieval_plan:
+            return {"need_retrieval": False, "query_type": "chat"}
+
+        try:
+            from service.core.rag.llm.client import LLMClient
+
+            llm = LLMClient(task="aux")
+            prompt = (
+                "你是查询意图分类器。判断以下用户问题是否需要从学术知识库中检索文档来回答。\n"
+                "输出严格 JSON：{\"need_retrieval\": true/false, \"query_type\": \"factual|analytical|comparative|chat\"}\n"
+                "- factual: 需要查找具体事实、数据、定义\n"
+                "- analytical: 需要分析、解释某个概念或方法\n"
+                "- comparative: 需要比较多个概念或方法\n"
+                "- chat: 闲聊、问候、与知识库无关的通用问题\n\n"
+                "仅当问题明显是闲聊/问候/通用知识时 need_retrieval=false，其余一律 true。\n\n"
+                f"用户问题：{question[:300]}"
+            )
+            messages = [{"role": "user", "content": prompt}]
+            result = llm.generate(messages, temperature=0.0, max_tokens=64, stream=False)
+            if not isinstance(result, str):
+                result = "".join(result)
+
+            import json as _json
+            text = result.strip()
+            start = text.find("{")
+            end = text.rfind("}") + 1
+            if start >= 0 and end > start:
+                parsed = _json.loads(text[start:end])
+                return {
+                    "need_retrieval": bool(parsed.get("need_retrieval", True)),
+                    "query_type": str(parsed.get("query_type", "factual")),
+                }
+        except Exception as exc:
+            try:
+                logger.warning("[ADAPTIVE_RETRIEVAL] intent classification failed: %s", exc)
+            except Exception:
+                pass
+
+        return {"need_retrieval": True, "query_type": "factual"}

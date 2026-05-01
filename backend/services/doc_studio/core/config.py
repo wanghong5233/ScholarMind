@@ -20,10 +20,12 @@ class Settings(BaseSettings):
     DASHSCOPE_API_KEY: Optional[str] = None  # 从 .env 加载
     DASHSCOPE_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     DASHSCOPE_MODEL_NAME: str = "qwen3-max"  # 基础模型（API 调用）
+    DASHSCOPE_MODEL_CANDIDATES: str = "qwen-plus,qwen3-max,qwen-max,qwen-turbo"
     DASHSCOPE_VISION_MODEL_NAME: str = "qwen-vl-max"  # 图片问答默认模型
     OPENAI_API_KEY: Optional[str] = None  # 可选：OpenAI API Key
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
     OPENAI_MODEL_NAME: str = "gpt-5.2"
+    OPENAI_MODEL_CANDIDATES: str = "gpt-5.2,gpt-5-mini,gpt-4.1,gpt-4o"
 
     # LLM 请求超时与健康策略
     LLM_REQUEST_TIMEOUT: int = 75

@@ -114,11 +114,16 @@ const DEEP_RESEARCH_PERSIST_REPORT_CHARS = 6000
 const DEEP_RESEARCH_PERSIST_QUEUE_BLOCKS_LIMIT = 24
 
 const FRIENDLY_MODEL_UNAVAILABLE = '当前模型暂时不可用，请稍后重试或尝试切换其他模型。'
+const FRIENDLY_MODEL_FALLBACK_FAILED =
+  '当前模型不可用，系统已尝试自动切换候选模型但仍失败。请检查 API 余额、额度或切换其他模型。'
 
 /** 将 LLM API 错误（如 400、模型不存在、流式错误等）转为半生产环境的友好提示 */
 function toFriendlyChatError(raw: string | undefined): string {
   if (!raw || !String(raw).trim()) return FRIENDLY_MODEL_UNAVAILABLE
   const lower = String(raw).toLowerCase()
+  if (lower.includes('all llm fallback candidates failed')) {
+    return FRIENDLY_MODEL_FALLBACK_FAILED
+  }
   const isModelOrApiError =
     lower.includes('400') ||
     (lower.includes('invalid') && lower.includes('model')) ||
@@ -161,6 +166,10 @@ type LlmModelOption = {
   value: string
   provider: LlmProviderValue
   isVision: boolean
+  available?: boolean
+  status?: string
+  reason?: string | null
+  contextWindow?: number | null
 }
 type ChatUsageStats = {
   prompt_tokens: number
@@ -194,6 +203,23 @@ const LLM_MODEL_SET = new Set<string>(LLM_MODEL_OPTIONS.map((item) => item.value
 const LLM_MODEL_OPTION_MAP = new Map<string, LlmModelOption>(
   LLM_MODEL_OPTIONS.map((item) => [item.value, item]),
 )
+const buildLlmModelOptionsFromCatalog = (
+  catalog: api.config.LlmModelCatalog | null,
+): LlmModelOption[] => {
+  const remote = (catalog?.models ?? [])
+    .filter((item) => item.provider === 'dashscope' || item.provider === 'openai')
+    .map((item) => ({
+      label: item.label,
+      value: item.model,
+      provider: item.provider,
+      isVision: Boolean(item.isVision),
+      available: item.available,
+      status: item.status,
+      reason: item.reason,
+      contextWindow: item.contextWindow,
+    }))
+  return remote.length ? remote : LLM_MODEL_OPTIONS
+}
 const MODEL_CONTEXT_WINDOW_HINTS: Record<string, number> = {
   'qwen-plus': 200000,
   'qwen3-max': 200000,
@@ -984,6 +1010,83 @@ export default function Index() {
     const saved = localStorage.getItem(DEEP_CHAT_LLM_LOCAL_STORAGE_KEY)
     return normalizeLlmModel(saved, 'openai')
   })
+  const [llmModelCatalog, setLlmModelCatalog] =
+    useState<api.config.LlmModelCatalog | null>(null)
+  const llmModelOptions = useMemo(
+    () => buildLlmModelOptionsFromCatalog(llmModelCatalog),
+    [llmModelCatalog],
+  )
+  const llmModelOptionMap = useMemo(
+    () => new Map<string, LlmModelOption>(llmModelOptions.map((item) => [item.value, item])),
+    [llmModelOptions],
+  )
+  const llmModelSet = useMemo(
+    () => new Set<string>(llmModelOptions.map((item) => item.value)),
+    [llmModelOptions],
+  )
+  const defaultRuntimeModelByProvider = useCallback(
+    (provider: LlmProviderValue): LlmModelValue => {
+      const catalogDefault = llmModelCatalog?.defaultModel
+      if (catalogDefault && llmModelSet.has(catalogDefault)) {
+        return catalogDefault
+      }
+      const matched = llmModelOptions.find(
+        (item) => item.provider === provider && !item.isVision && item.available !== false,
+      )
+      return matched?.value || defaultModelByProvider(provider)
+    },
+    [llmModelCatalog?.defaultModel, llmModelOptions, llmModelSet],
+  )
+  const defaultRuntimeVisionModelByProvider = useCallback(
+    (provider: LlmProviderValue): LlmModelValue => {
+      const catalogDefault = llmModelCatalog?.defaultVisionModel
+      if (catalogDefault && llmModelSet.has(catalogDefault)) {
+        return catalogDefault
+      }
+      const matched = llmModelOptions.find(
+        (item) => item.provider === provider && item.isVision && item.available !== false,
+      )
+      return matched?.value || defaultVisionModelByProvider(provider)
+    },
+    [llmModelCatalog?.defaultVisionModel, llmModelOptions, llmModelSet],
+  )
+  const resolveRuntimeProviderByModel = useCallback(
+    (value: unknown): LlmProviderValue => {
+      if (typeof value === 'string') {
+        return llmModelOptionMap.get(value)?.provider || resolveProviderByModel(value)
+      }
+      return normalizeLlmProvider(llmModelCatalog?.preferredProvider)
+    },
+    [llmModelCatalog?.preferredProvider, llmModelOptionMap],
+  )
+  const normalizeRuntimeLlmModel = useCallback(
+    (value: unknown, providerHint?: unknown): LlmModelValue => {
+      if (typeof value === 'string' && llmModelSet.has(value)) {
+        const option = llmModelOptionMap.get(value)
+        if (option?.available !== false) return value
+      }
+      const fallbackProvider =
+        providerHint === undefined
+          ? normalizeLlmProvider(llmModelCatalog?.preferredProvider)
+          : normalizeLlmProvider(providerHint)
+      return defaultRuntimeModelByProvider(fallbackProvider)
+    },
+    [
+      defaultRuntimeModelByProvider,
+      llmModelCatalog?.preferredProvider,
+      llmModelOptionMap,
+      llmModelSet,
+    ],
+  )
+  const isRuntimeVisionModel = useCallback(
+    (value: string) =>
+      Boolean(llmModelOptionMap.get(value)?.isVision ?? isVisionModel(value)),
+    [llmModelOptionMap],
+  )
+  const resolveRuntimeModelLabel = useCallback(
+    (value: string) => llmModelOptionMap.get(value)?.label || resolveModelLabel(value),
+    [llmModelOptionMap],
+  )
   const [composerValue, setComposerValue] = useState('')
   const [composerFocusKey, setComposerFocusKey] = useState(0)
   const [sessionDisplayTitle, setSessionDisplayTitle] = useState('新对话')
@@ -1497,6 +1600,35 @@ export default function Index() {
     },
   )
 
+  const modelCatalogReq = useRequest(
+    async () => {
+      const { data } = await api.config.fetchLlmModels({
+        loading: false,
+        errorToast: false,
+      })
+      return data
+    },
+    {
+      onSuccess(data) {
+        const nextCatalog = data ?? null
+        setLlmModelCatalog(nextCatalog)
+        const nextOptions = buildLlmModelOptionsFromCatalog(nextCatalog)
+        const nextSet = new Set(nextOptions.map((item) => item.value))
+        const nextMap = new Map(nextOptions.map((item) => [item.value, item]))
+        const fallback =
+          nextCatalog?.defaultModel ||
+          nextOptions.find((item) => item.available !== false && !item.isVision)?.value ||
+          DEFAULT_OPENAI_MODEL
+        setLlmModel((current) => {
+          const option = nextMap.get(current)
+          if (option && option.available !== false) return current
+          if (nextSet.has(fallback)) return fallback
+          return normalizeRuntimeLlmModel(fallback, nextCatalog?.preferredProvider)
+        })
+      },
+    },
+  )
+
   const defaultsReq = useRequest(
     async () => {
       if (!id) return null
@@ -1520,7 +1652,7 @@ export default function Index() {
           typeof window === 'undefined'
             ? DEFAULT_OPENAI_MODEL
             : localStorage.getItem(DEEP_CHAT_LLM_LOCAL_STORAGE_KEY)
-        const nextModel = normalizeLlmModel(
+        const nextModel = normalizeRuntimeLlmModel(
           next?.llmModel || fallbackModel,
           next?.llmProvider,
         )
@@ -1633,8 +1765,8 @@ export default function Index() {
 
   const handleLlmModelChange = useCallback(
     async (value: string) => {
-      const normalized = normalizeLlmModel(value)
-      const provider = resolveProviderByModel(normalized)
+      const normalized = normalizeRuntimeLlmModel(value)
+      const provider = resolveRuntimeProviderByModel(normalized)
       setLlmModel(normalized)
       if (!sessionDefaults || updatingDefaults) return
       if (
@@ -1652,7 +1784,13 @@ export default function Index() {
         // applyDefaults 内已统一提示，这里不重复弹窗
       }
     },
-    [sessionDefaults, updatingDefaults, applyDefaults],
+    [
+      sessionDefaults,
+      updatingDefaults,
+      applyDefaults,
+      normalizeRuntimeLlmModel,
+      resolveRuntimeProviderByModel,
+    ],
   )
 
   const handleToggleUserKb = useCallback(
@@ -1920,6 +2058,7 @@ export default function Index() {
       let streamRunId = requestRunId
       let replayAttempts = 0
       let sawCompletion = false
+      let runtimeModelSwitchHandled = false
       const requestRetrievalDisabled = extra?.useRag === false
       activeAskRunIdRef.current = requestRunId
       abortControllerRef.current = new AbortController()
@@ -2160,6 +2299,37 @@ export default function Index() {
           sawCompletion = true
         }
 
+        const runtimeModel =
+          json?.type === 'runtime_model'
+            ? json
+            : json?.runtime_model && typeof json.runtime_model === 'object'
+            ? json.runtime_model
+            : null
+        if (
+          runtimeModel &&
+          runtimeModel.fallback_applied &&
+          !runtimeModelSwitchHandled
+        ) {
+          const actualModel = String(runtimeModel.actual_model || '').trim()
+          const actualProvider = normalizeLlmProvider(runtimeModel.actual_provider)
+          if (actualModel) {
+            runtimeModelSwitchHandled = true
+            setLlmModel(actualModel)
+            const requestedModel = String(runtimeModel.requested_model || extra?.llmModel || '').trim()
+            const fromLabel = requestedModel ? resolveRuntimeModelLabel(requestedModel) : '所选模型'
+            const toLabel = resolveRuntimeModelLabel(actualModel)
+            window.$app?.message?.warning?.(
+              `所选模型不可用，已自动切换为真实使用模型：${fromLabel} → ${toLabel}`,
+            )
+            void applyDefaults({
+              llmProvider: actualProvider,
+              llmModel: actualModel,
+            }).catch(() => {
+              // applyDefaults 已负责错误提示，这里避免打断流式输出
+            })
+          }
+        }
+
         const nextTarget = { ...(chat.list[targetIndex] as API.ChatItem) }
         const totalMsFromPayload =
           Number(json?.timing?.total_ms) ||
@@ -2350,6 +2520,8 @@ export default function Index() {
       history,
       rollbackPendingSendToComposer,
       sessionDefaults,
+      applyDefaults,
+      resolveRuntimeModelLabel,
     ],
   )
 
@@ -2619,9 +2791,9 @@ export default function Index() {
         return
       }
       let effectiveLlmModel: LlmModelValue = llmModel
-      if (imagesSnapshot.length > 0 && !isVisionModel(effectiveLlmModel)) {
-        effectiveLlmModel = defaultVisionModelByProvider(
-          resolveProviderByModel(effectiveLlmModel),
+      if (imagesSnapshot.length > 0 && !isRuntimeVisionModel(effectiveLlmModel)) {
+        effectiveLlmModel = defaultRuntimeVisionModelByProvider(
+          resolveRuntimeProviderByModel(effectiveLlmModel),
         )
         message.info(`检测到图片输入，本次请求自动切换模型为 ${effectiveLlmModel}`)
       }
@@ -2785,7 +2957,7 @@ export default function Index() {
         const result = await sendChat(target, normalizedMessage, {
           userItem: userMessage,
           replaceMessageId: effectiveReplaceMessageId || undefined,
-          llmProvider: resolveProviderByModel(effectiveLlmModel),
+          llmProvider: resolveRuntimeProviderByModel(effectiveLlmModel),
           llmModel: effectiveLlmModel,
           useRag: usingRag,
         })
@@ -3976,7 +4148,7 @@ export default function Index() {
             {
               surface: 'deep_chat',
               defaults: {
-                llmProvider: resolveProviderByModel(llmModel),
+                llmProvider: resolveRuntimeProviderByModel(llmModel),
                 llmModel,
                 useSessionKnowledgeBase: draftRagEnabled,
                 useUserKnowledgeBase: draftRagEnabled,
@@ -4497,12 +4669,12 @@ export default function Index() {
   }, [sessionDisplayTitle, list])
 
   const activeLlmModel = useMemo(
-    () => normalizeLlmModel(sessionDefaults?.llmModel || llmModel, sessionDefaults?.llmProvider),
-    [sessionDefaults?.llmModel, sessionDefaults?.llmProvider, llmModel],
+    () => normalizeRuntimeLlmModel(sessionDefaults?.llmModel || llmModel, sessionDefaults?.llmProvider),
+    [sessionDefaults?.llmModel, sessionDefaults?.llmProvider, llmModel, normalizeRuntimeLlmModel],
   )
   const activeLlmProvider = useMemo(
-    () => resolveProviderByModel(activeLlmModel),
-    [activeLlmModel],
+    () => resolveRuntimeProviderByModel(activeLlmModel),
+    [activeLlmModel, resolveRuntimeProviderByModel],
   )
 
   const sessionUsageTotals = useMemo(() => {
@@ -4529,8 +4701,11 @@ export default function Index() {
   }, [list])
 
   const modelContextWindowHint = useMemo(
-    () => MODEL_CONTEXT_WINDOW_HINTS[activeLlmModel] || 0,
-    [activeLlmModel],
+    () =>
+      llmModelOptionMap.get(activeLlmModel)?.contextWindow ||
+      MODEL_CONTEXT_WINDOW_HINTS[activeLlmModel] ||
+      0,
+    [activeLlmModel, llmModelOptionMap],
   )
 
   const contextUsagePercent = useMemo(() => {
@@ -4539,8 +4714,8 @@ export default function Index() {
   }, [contextTokenEstimate, modelContextWindowHint])
 
   const autoVisionHint = useMemo(
-    () => chatImageAttachments.length > 0 && !isVisionModel(activeLlmModel),
-    [chatImageAttachments.length, activeLlmModel],
+    () => chatImageAttachments.length > 0 && !isRuntimeVisionModel(activeLlmModel),
+    [chatImageAttachments.length, activeLlmModel, isRuntimeVisionModel],
   )
 
   const [read, setRead] = useState<API.Reference | null>(null)
@@ -4686,20 +4861,30 @@ export default function Index() {
 
   const modelControl = useMemo(
     () => {
-      const options = LLM_MODEL_OPTIONS.map((item) => ({
-        label: item.label,
+      const options = llmModelOptions.map((item) => ({
+        label: item.available === false ? `${item.label}（不可用）` : item.label,
         value: item.value,
+        disabled: item.available === false,
       }))
-      const currentLabel = resolveModelLabel(activeLlmModel)
+      const currentLabel = resolveRuntimeModelLabel(activeLlmModel)
       return {
         value: activeLlmModel,
         options,
         width: calcCompactSelectWidth(currentLabel, 120, 220),
+        loading: modelCatalogReq.loading,
         disabled: updatingDefaults || defaultsLoading,
         onChange: handleLlmModelChange,
       }
     },
-    [activeLlmModel, updatingDefaults, defaultsLoading, handleLlmModelChange],
+    [
+      activeLlmModel,
+      defaultsLoading,
+      handleLlmModelChange,
+      llmModelOptions,
+      modelCatalogReq.loading,
+      resolveRuntimeModelLabel,
+      updatingDefaults,
+    ],
   )
 
   const systemStatusControl = useMemo(
@@ -4910,11 +5095,11 @@ export default function Index() {
             <Space wrap>
               <Tag color="blue">Provider: {activeLlmProvider}</Tag>
               <Tag color="geekblue">模型: {activeLlmModel}</Tag>
-              {isVisionModel(activeLlmModel) ? <Tag color="purple">视觉模型</Tag> : <Tag>文本模型</Tag>}
+              {isRuntimeVisionModel(activeLlmModel) ? <Tag color="purple">视觉模型</Tag> : <Tag>文本模型</Tag>}
               {autoVisionHint ? (
                 <Tag color="orange">
                   当前输入含图片，发送时将自动切换到{' '}
-                  {defaultVisionModelByProvider(activeLlmProvider)}
+                  {defaultRuntimeVisionModelByProvider(activeLlmProvider)}
                 </Tag>
               ) : null}
             </Space>

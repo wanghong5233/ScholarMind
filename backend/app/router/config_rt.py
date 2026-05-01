@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from typing import Any, Dict
 
 from service.core.system.config_service import ConfigService
@@ -19,3 +19,11 @@ def parsing_health() -> Dict[str, Any]:
     """
     service = ConfigService()
     return service.parsing_health()
+
+
+@router.get("/llm-models")
+def llm_models(refresh: bool = Query(False, description="是否跳过缓存重新探测 provider 模型目录")) -> Dict[str, Any]:
+    """Return LLM model options and availability for frontend selectors."""
+
+    service = ConfigService()
+    return service.llm_models(refresh=refresh)

@@ -63,6 +63,7 @@ import { AgentDiffReview, type AgentDiffReviewRef } from './AgentDiffReview'
 import DocStudioWelcome from './component/doc-studio-welcome'
 import { ChatMarkdown } from '@/components/markdown/ChatMarkdown'
 import Recorder from '@/components/sender/recorder'
+import { fetchLlmModels, type LlmModelCatalog } from '@/api/config'
 import type React from 'react'
 import type { TextAreaRef } from 'antd/es/input/TextArea'
 import {
@@ -719,6 +720,10 @@ type LlmModelOption = {
   value: string
   provider: LlmProviderValue
   isVision: boolean
+  available?: boolean
+  status?: string
+  reason?: string | null
+  contextWindow?: number | null
 }
 
 const DEFAULT_DASHSCOPE_MODEL = 'qwen3-max'
@@ -744,10 +749,26 @@ const LLM_MODEL_OPTIONS: LlmModelOption[] = [
     isVision: OPENAI_VISION_MODEL_SET.has(item.value),
   })),
 ]
-const LLM_MODEL_SET = new Set<string>(LLM_MODEL_OPTIONS.map((item) => item.value))
 const LLM_MODEL_OPTION_MAP = new Map<string, LlmModelOption>(
   LLM_MODEL_OPTIONS.map((item) => [item.value, item]),
 )
+const buildLlmModelOptionsFromCatalog = (
+  catalog: LlmModelCatalog | null,
+): LlmModelOption[] => {
+  const remote = (catalog?.models ?? [])
+    .filter((item) => item.provider === 'dashscope' || item.provider === 'openai')
+    .map((item) => ({
+      label: item.label,
+      value: item.model,
+      provider: item.provider,
+      isVision: Boolean(item.isVision),
+      available: item.available,
+      status: item.status,
+      reason: item.reason,
+      contextWindow: item.contextWindow,
+    }))
+  return remote.length ? remote : LLM_MODEL_OPTIONS
+}
 const MIN_LEFT_SIDER_WIDTH = 200
 const MAX_LEFT_SIDER_WIDTH = 600
 const MIN_RIGHT_SIDER_WIDTH = 260
@@ -771,13 +792,6 @@ const defaultModelByProvider = (provider: LlmProviderValue): LlmModelValue =>
 
 const defaultVisionModelByProvider = (provider: LlmProviderValue): LlmModelValue =>
   provider === 'openai' ? DEFAULT_OPENAI_VISION_MODEL : DEFAULT_DASHSCOPE_VISION_MODEL
-
-const normalizeLlmModel = (value: unknown, providerHint?: unknown): LlmModelValue => {
-  if (typeof value === 'string' && LLM_MODEL_SET.has(value)) {
-    return value
-  }
-  return defaultModelByProvider(normalizeLlmProvider(providerHint))
-}
 
 const isVisionModel = (value: string) => Boolean(LLM_MODEL_OPTION_MAP.get(value)?.isVision)
 
@@ -932,6 +946,79 @@ const LatexEditorPage = () => {
     return localStorage.getItem('doc_studio_left_panel_closed') === 'true'
   })
   const [llmModel, setLlmModel] = useState<LlmModelValue>(DEFAULT_OPENAI_MODEL)
+  const [llmModelCatalog, setLlmModelCatalog] = useState<LlmModelCatalog | null>(null)
+  const [llmModelCatalogLoading, setLlmModelCatalogLoading] = useState(false)
+  const llmModelOptions = useMemo(
+    () => buildLlmModelOptionsFromCatalog(llmModelCatalog),
+    [llmModelCatalog],
+  )
+  const llmModelOptionMap = useMemo(
+    () => new Map<string, LlmModelOption>(llmModelOptions.map((item) => [item.value, item])),
+    [llmModelOptions],
+  )
+  const llmModelSet = useMemo(
+    () => new Set<string>(llmModelOptions.map((item) => item.value)),
+    [llmModelOptions],
+  )
+  const defaultRuntimeModelByProvider = useCallback(
+    (provider: LlmProviderValue): LlmModelValue => {
+      const catalogDefault = llmModelCatalog?.defaultModel
+      if (catalogDefault && llmModelSet.has(catalogDefault)) return catalogDefault
+      const matched = llmModelOptions.find(
+        (item) => item.provider === provider && !item.isVision && item.available !== false,
+      )
+      return matched?.value || defaultModelByProvider(provider)
+    },
+    [llmModelCatalog?.defaultModel, llmModelOptions, llmModelSet],
+  )
+  const defaultRuntimeVisionModelByProvider = useCallback(
+    (provider: LlmProviderValue): LlmModelValue => {
+      const catalogDefault = llmModelCatalog?.defaultVisionModel
+      if (catalogDefault && llmModelSet.has(catalogDefault)) return catalogDefault
+      const matched = llmModelOptions.find(
+        (item) => item.provider === provider && item.isVision && item.available !== false,
+      )
+      return matched?.value || defaultVisionModelByProvider(provider)
+    },
+    [llmModelCatalog?.defaultVisionModel, llmModelOptions, llmModelSet],
+  )
+  const resolveRuntimeProviderByModel = useCallback(
+    (value: unknown): LlmProviderValue => {
+      if (typeof value === 'string') {
+        return llmModelOptionMap.get(value)?.provider || resolveProviderByModel(value)
+      }
+      return normalizeLlmProvider(llmModelCatalog?.preferredProvider)
+    },
+    [llmModelCatalog?.preferredProvider, llmModelOptionMap],
+  )
+  const normalizeRuntimeLlmModel = useCallback(
+    (value: unknown, providerHint?: unknown): LlmModelValue => {
+      if (typeof value === 'string' && llmModelSet.has(value)) {
+        const option = llmModelOptionMap.get(value)
+        if (option?.available !== false) return value
+      }
+      const fallbackProvider =
+        providerHint === undefined
+          ? normalizeLlmProvider(llmModelCatalog?.preferredProvider)
+          : normalizeLlmProvider(providerHint)
+      return defaultRuntimeModelByProvider(fallbackProvider)
+    },
+    [
+      defaultRuntimeModelByProvider,
+      llmModelCatalog?.preferredProvider,
+      llmModelOptionMap,
+      llmModelSet,
+    ],
+  )
+  const isRuntimeVisionModel = useCallback(
+    (value: string) =>
+      Boolean(llmModelOptionMap.get(value)?.isVision ?? isVisionModel(value)),
+    [llmModelOptionMap],
+  )
+  const resolveRuntimeModelLabel = useCallback(
+    (value: string) => llmModelOptionMap.get(value)?.label || resolveModelLabel(value),
+    [llmModelOptionMap],
+  )
   const [interactionMode, setInteractionMode] = useState<InteractionMode>('agent')
   const [ragEnabled, setRagEnabled] = useState<boolean>(() => {
     if (typeof window === 'undefined') return true
@@ -1032,7 +1119,7 @@ const LatexEditorPage = () => {
     if (!raw) return
     try {
       const parsed = JSON.parse(raw)
-      setLlmModel(normalizeLlmModel(parsed?.llm_model, parsed?.llm_provider))
+      setLlmModel(normalizeRuntimeLlmModel(parsed?.llm_model, parsed?.llm_provider))
       const parsedMode = parsed?.interaction_mode
       if (parsedMode === 'ask' || parsedMode === 'agent') {
         setInteractionMode(parsedMode)
@@ -1040,36 +1127,69 @@ const LatexEditorPage = () => {
     } catch (error) {
       console.warn('Failed to load Doc Studio LLM options', error)
     }
+  }, [normalizeRuntimeLlmModel])
+
+  useEffect(() => {
+    let cancelled = false
+    setLlmModelCatalogLoading(true)
+    fetchLlmModels({ loading: false, errorToast: false })
+      .then(({ data }) => {
+        if (cancelled) return
+        const nextCatalog = data ?? null
+        setLlmModelCatalog(nextCatalog)
+        const nextOptions = buildLlmModelOptionsFromCatalog(nextCatalog)
+        const nextSet = new Set(nextOptions.map((item) => item.value))
+        const nextMap = new Map(nextOptions.map((item) => [item.value, item]))
+        const fallback =
+          nextCatalog?.defaultModel ||
+          nextOptions.find((item) => item.available !== false && !item.isVision)?.value ||
+          DEFAULT_OPENAI_MODEL
+        setLlmModel((current) => {
+          const option = nextMap.get(current)
+          if (option && option.available !== false) return current
+          if (nextSet.has(fallback)) return fallback
+          return normalizeRuntimeLlmModel(fallback, nextCatalog?.preferredProvider)
+        })
+      })
+      .catch((error) => {
+        console.warn('Failed to load LLM model catalog', error)
+      })
+      .finally(() => {
+        if (!cancelled) setLlmModelCatalogLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
-    const provider = resolveProviderByModel(llmModel)
+    const provider = resolveRuntimeProviderByModel(llmModel)
     const payload = {
       llm_provider: provider,
       llm_model: llmModel,
       interaction_mode: interactionMode,
     }
     localStorage.setItem('doc_studio_llm_options', JSON.stringify(payload))
-  }, [interactionMode, llmModel])
+  }, [interactionMode, llmModel, resolveRuntimeProviderByModel])
 
   const llmOptions = useMemo(() => {
-    const provider = resolveProviderByModel(llmModel)
+    const provider = resolveRuntimeProviderByModel(llmModel)
     return {
       llm_provider: provider,
       llm_model: llmModel,
       interaction_mode: interactionMode,
     }
-  }, [interactionMode, llmModel])
+  }, [interactionMode, llmModel, resolveRuntimeProviderByModel])
 
   const llmOptionsConfig = useMemo(() => {
-    const provider = resolveProviderByModel(llmModel)
+    const provider = resolveRuntimeProviderByModel(llmModel)
     return {
       llm_provider: provider,
       llm_model: llmModel,
       interaction_mode: interactionMode,
     }
-  }, [interactionMode, llmModel])
+  }, [interactionMode, llmModel, resolveRuntimeProviderByModel])
 
   const applyLlmOptionsFromConfig = useCallback(
     (config?: Record<string, any>) => {
@@ -1080,12 +1200,12 @@ const LatexEditorPage = () => {
       if (!hasAny) return
 
       const nextProvider = normalizeLlmProvider(raw.llm_provider)
-      const nextModel = normalizeLlmModel(raw.llm_model ?? llmModel, nextProvider)
+      const nextModel = normalizeRuntimeLlmModel(raw.llm_model ?? llmModel, nextProvider)
       const nextInteractionMode: InteractionMode =
         raw.interaction_mode === 'ask' ? 'ask' : 'agent'
 
       const normalized = {
-        llm_provider: resolveProviderByModel(nextModel),
+        llm_provider: resolveRuntimeProviderByModel(nextModel),
         llm_model: nextModel,
         interaction_mode: nextInteractionMode,
       }
@@ -1093,7 +1213,7 @@ const LatexEditorPage = () => {
       setLlmModel(nextModel)
       setInteractionMode(nextInteractionMode)
     },
-    [llmModel],
+    [llmModel, normalizeRuntimeLlmModel, resolveRuntimeProviderByModel],
   )
 
   useEffect(() => {
@@ -1325,9 +1445,9 @@ const LatexEditorPage = () => {
     [interactionMode],
   )
   const modelSelectWidth = useMemo(() => {
-    const label = resolveModelLabel(llmModel)
+    const label = resolveRuntimeModelLabel(llmModel)
     return calcCompactSelectWidth(label, 108, 220)
-  }, [llmModel])
+  }, [llmModel, resolveRuntimeModelLabel])
   const ragSelectWidth = useMemo(() => {
     const label = selectedKnowledgeBase?.name || '知识库'
     return calcCompactSelectWidth(label, 66, 150)
@@ -5445,15 +5565,15 @@ const LatexEditorPage = () => {
 
     let effectiveModel: LlmModelValue = llmModel
     if (sourceImages.length > 0) {
-      if (!isVisionModel(effectiveModel)) {
-        effectiveModel = defaultVisionModelByProvider(resolveProviderByModel(effectiveModel))
+      if (!isRuntimeVisionModel(effectiveModel)) {
+        effectiveModel = defaultRuntimeVisionModelByProvider(resolveRuntimeProviderByModel(effectiveModel))
         message.info(`检测到图片输入，本次请求自动切换模型为 ${effectiveModel}`)
       }
     }
     const effectiveLlmOptions = {
       ...llmOptions,
       interaction_mode: interactionMode,
-      llm_provider: resolveProviderByModel(effectiveModel),
+      llm_provider: resolveRuntimeProviderByModel(effectiveModel),
       llm_model: effectiveModel,
     }
     
@@ -5570,6 +5690,7 @@ const LatexEditorPage = () => {
         setLiveAgentStatus('任务已提交，等待执行...')
         const url = getAgentAsyncEventsUrl(snap.workspaceId, asyncResult.runId)
         const source = new EventSource(url)
+        let runtimeModelSwitchHandled = false
         asyncStreamRef.current = source
 
         source.addEventListener('start', (event) => {
@@ -5672,6 +5793,29 @@ const LatexEditorPage = () => {
             }
           } catch (error) {
             console.warn('Failed to parse status event', error)
+          }
+        })
+        source.addEventListener('runtime_model', (event) => {
+          try {
+            if (runtimeModelSwitchHandled) return
+            const messageEvent = event as MessageEvent<string>
+            const payload = JSON.parse(messageEvent.data || '{}')
+            if (!payload?.fallback_applied) return
+            const actualModel = String(payload.actual_model || '').trim()
+            if (!actualModel) return
+            runtimeModelSwitchHandled = true
+            setLlmModel(actualModel)
+            const requestedModel = String(payload.requested_model || llmModel || '').trim()
+            const fromLabel = requestedModel ? resolveRuntimeModelLabel(requestedModel) : '所选模型'
+            const toLabel = resolveRuntimeModelLabel(actualModel)
+            message.warning(`所选模型不可用，已自动切换为真实使用模型：${fromLabel} → ${toLabel}`)
+            appendLiveTimelineEvent({
+              text: `模型已切换：${fromLabel} → ${toLabel}`,
+              eventType: 'runtime_model',
+              level: 'warning',
+            })
+          } catch (error) {
+            console.warn('Failed to parse runtime_model event', error)
           }
         })
         source.addEventListener('plan', (event) => {
@@ -6036,6 +6180,20 @@ const LatexEditorPage = () => {
             const meta = parseLiveEventMeta(messageEvent, payload)
             pendingSendRef.current = null
             if (payload?.result) {
+              const runtimeModel = payload.result.runtime_model
+              if (
+                runtimeModel?.fallback_applied &&
+                !runtimeModelSwitchHandled &&
+                runtimeModel.actual_model
+              ) {
+                runtimeModelSwitchHandled = true
+                const actualModel = String(runtimeModel.actual_model).trim()
+                setLlmModel(actualModel)
+                const requestedModel = String(runtimeModel.requested_model || llmModel || '').trim()
+                const fromLabel = requestedModel ? resolveRuntimeModelLabel(requestedModel) : '所选模型'
+                const toLabel = resolveRuntimeModelLabel(actualModel)
+                message.warning(`所选模型不可用，已自动切换为真实使用模型：${fromLabel} → ${toLabel}`)
+              }
               setLiveAgentStatus('结果已生成，正在应用变更...')
               appendLiveTimelineEvent({
                 text: '结果已生成，正在应用变更...',
@@ -7757,11 +7915,13 @@ const LatexEditorPage = () => {
                             popupMatchSelectWidth={false}
                             style={{ width: modelSelectWidth }}
                             value={llmModel}
-                            options={LLM_MODEL_OPTIONS.map((item) => ({
-                              label: item.label,
+                            loading={llmModelCatalogLoading}
+                            options={llmModelOptions.map((item) => ({
+                              label: item.available === false ? `${item.label}（不可用）` : item.label,
                               value: item.value,
+                              disabled: item.available === false,
                             }))}
-                            onChange={(value) => setLlmModel(normalizeLlmModel(value))}
+                            onChange={(value) => setLlmModel(normalizeRuntimeLlmModel(value))}
                           />
                           {!chatToolbarCompact && ragEnabled && (
                             <Select

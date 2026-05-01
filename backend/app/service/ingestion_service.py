@@ -70,7 +70,7 @@ class IngestionService:
 
                 if papers is None:  # None 表示请求最终失败
                     raise APIException(
-                        "Failed to fetch papers from Semantic Scholar after multiple retries."
+                        message="Failed to fetch papers from Semantic Scholar after multiple retries."
                     )
 
                 return papers
@@ -87,6 +87,8 @@ class IngestionService:
                                 year=year,
                             )
                         )
+                    except APIException as exc:
+                        errors.append(f"semantic_scholar: {exc.message}")
                     except Exception as exc:
                         errors.append(f"semantic_scholar: {exc}")
                 elif provider == "arxiv":
@@ -105,15 +107,17 @@ class IngestionService:
             if not results:
                 if errors:
                     error_text = "; ".join(errors)
-                    raise APIException(f"Online paper search failed: {error_text}")
+                    raise APIException(message=f"Online paper search failed: {error_text}")
                 return []
 
             deduped = self._dedupe_results(results)
             ranked = self._rank_results(deduped, rank_by)
             return ranked[: max(1, int(limit or 1))]
 
+        except APIException:
+            raise
         except Exception as e:
-            raise APIException(f"An error occurred during online paper search: {e}")
+            raise APIException(message=f"An error occurred during online paper search: {e}")
 
     @staticmethod
     def _normalize_providers(providers: Optional[List[str]]) -> List[str]:
