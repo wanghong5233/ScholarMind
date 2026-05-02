@@ -493,6 +493,7 @@ class StructuredDocumentBuilder:
             if original_element != logical:
                 meta.setdefault("original_element_type", original_element)
             meta["element_type"] = logical
+            source = str(meta.get("parser_engine") or "parser")
             path = f"orphan.{logical}.{idx}"
             page_val = meta.get("page")
             page_int = None
@@ -501,6 +502,8 @@ class StructuredDocumentBuilder:
                     page_int = int(page_val)
             except (TypeError, ValueError):
                 page_int = None
+            if page_int is None:
+                page_int = 1
             bbox = meta.get("bbox")
             orphan_blocks.append(
                 StructuredBlock(
@@ -512,8 +515,8 @@ class StructuredDocumentBuilder:
                     structure_path=path,
                     metadata={
                         **meta,
-                        "source": meta.get("parser_engine") or "mineru",
-                        "alignment_status": "mineru_only",
+                        "source": source,
+                        "alignment_status": f"{source}_only",
                         "page": page_int,
                         "page_range": [page_int] if isinstance(page_int, int) else meta.get("page_range", []),
                         "bbox_list": meta.get("bbox_list") or ([bbox] if bbox else []),

@@ -11,7 +11,7 @@ This directory contains the backend service for ScholarMind, an AI-powered resea
 - Docker and Docker Compose installed
 - A configured `.env` file (copy from `.env.example` and fill in your API keys)
 
-### Launch All Services
+### Launch Low-Cost Demo Services
 
 ```bash
 # From the backend directory
@@ -22,6 +22,18 @@ This will start:
 - **API Server** (`scholarmind_api`) on port 8000
 - **PostgreSQL + pgvector** (`scholarmind_db`) on port 5432
 - **Redis** (`scholarmind_redis`) on port 6379
+
+Heavy local services are disabled by default. MinerU, Grobid, and the local
+reranker remain available for full local demos:
+
+```bash
+docker compose --profile heavy-local up -d --build
+```
+
+The default parser order prefers remote/lightweight parsing
+(`llamaparse,unstructured_api,unstructured,pymupdf`) and keeps citation
+metadata such as page, page range, bounding boxes, and structure labels when the
+selected parser provides them.
 
 ### Stable Public Demo (Cloudflare Tunnel + Vercel)
 

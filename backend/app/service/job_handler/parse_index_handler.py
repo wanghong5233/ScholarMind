@@ -1,5 +1,6 @@
 from __future__ import annotations
 import os
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List
 from service.job_handler.interfaces import BaseJobHandler, JobResult
@@ -61,12 +62,14 @@ class ParseIndexHandler(BaseJobHandler):
 
         for doc_id in doc_ids:
             try:
+                doc_started_at = time.perf_counter()
                 doc = document_service.get_document_by_id(db, doc_id, user_id, kb_id)
                 if not doc.local_pdf_path or not os.path.exists(doc.local_pdf_path):
                     raise Exception("local file not found")
 
                 # 解析阶段 - 详细日志
                 try:
+                    stage_started_at = time.perf_counter()
                     log.info(f"[PARSE_START] doc_id={doc_id} file={doc.local_pdf_path} kb_id={kb_id}")
                     blocks = orchestrator.parse(file_path=doc.local_pdf_path)
                     
@@ -86,23 +89,30 @@ class ParseIndexHandler(BaseJobHandler):
                     
                     log.info(
                         f"[PARSE_OK] doc_id={doc_id} total_blocks={total_blocks} nonempty={nonempty_blocks} "
-                        f"total_chars={total_chars} element_types={element_types} parser_engines={parser_engines}"
+                        f"total_chars={total_chars} element_types={element_types} parser_engines={parser_engines} "
+                        f"elapsed_ms={int((time.perf_counter() - stage_started_at) * 1000)}"
                     )
                 except Exception as e:
                     log.error(f"[PARSE_FAIL] doc_id={doc_id} path={doc.local_pdf_path} error={e}")
                     raise
                 # 元数据提取阶段
+                stage_started_at = time.perf_counter()
                 log.info(f"[METADATA_START] doc_id={doc_id}")
                 doc = metadata_extractor.extract_and_enrich(db=db, document=doc, blocks=blocks)
-                log.info(f"[METADATA_OK] doc_id={doc_id} title={doc.title[:50] if doc.title else 'N/A'} doi={doc.doi or 'N/A'}")
+                log.info(
+                    f"[METADATA_OK] doc_id={doc_id} title={doc.title[:50] if doc.title else 'N/A'} "
+                    f"doi={doc.doi or 'N/A'} elapsed_ms={int((time.perf_counter() - stage_started_at) * 1000)}"
+                )
                 
                 # 结构化阶段
+                stage_started_at = time.perf_counter()
                 log.info(f"[STRUCT_START] doc_id={doc_id}")
                 structured_doc = structured_builder.build(document=doc, mineru_blocks=blocks)
                 structured_blocks = structured_doc.to_parsed_blocks()
                 log.info(
                     f"[STRUCT_OK] doc_id={doc_id} structured_blocks={len(structured_blocks)} "
-                    f"logical_types={self._summarize_logical_types(structured_blocks)}"
+                    f"logical_types={self._summarize_logical_types(structured_blocks)} "
+                    f"elapsed_ms={int((time.perf_counter() - stage_started_at) * 1000)}"
                 )
                 snapshot = self._build_structure_snapshot(structured_doc)
                 try:
@@ -115,6 +125,7 @@ class ParseIndexHandler(BaseJobHandler):
 
                 # 分块阶段 - 详细日志
                 try:
+                    stage_started_at = time.perf_counter()
                     log.info(f"[CHUNK_START] doc_id={doc_id} input_blocks={len(structured_blocks)}")
                     chunks = chunker.chunk(blocks=structured_blocks)
                     
@@ -150,16 +161,21 @@ class ParseIndexHandler(BaseJobHandler):
                     
                     log.info(
                         f"[CHUNK_OK] doc_id={doc_id} output_chunks={total_chunks} "
-                        f"element_types={chunk_element_types}"
+                        f"element_types={chunk_element_types} "
+                        f"elapsed_ms={int((time.perf_counter() - stage_started_at) * 1000)}"
                     )
                 except Exception as e:
                     log.error(f"[CHUNK_FAIL] doc_id={doc_id} error={e}")
                     raise
                 # 嵌入阶段 - 详细日志
                 try:
+                    stage_started_at = time.perf_counter()
                     log.info(f"[EMBED_START] doc_id={doc_id} input_chunks={len(chunks)}")
                     records = embedder.embed(chunks=chunks)
-                    log.info(f"[EMBED_OK] doc_id={doc_id} output_records={len(records)}")
+                    log.info(
+                        f"[EMBED_OK] doc_id={doc_id} output_records={len(records)} "
+                        f"elapsed_ms={int((time.perf_counter() - stage_started_at) * 1000)}"
+                    )
                 except Exception as e:
                     log.error(f"[EMBED_FAIL] doc_id={doc_id} error={e}")
                     raise
@@ -186,6 +202,7 @@ class ParseIndexHandler(BaseJobHandler):
                 
                 # 索引阶段 - 详细日志（包含多模态统计）
                 try:
+                    stage_started_at = time.perf_counter()
                     # 统计多模态字段
                     multimodal_stats = {
                         "table_json": 0,
@@ -218,7 +235,10 @@ class ParseIndexHandler(BaseJobHandler):
                         session_index=session_index,
                         enable_multimodal_chunks=enable_multimodal,
                     )
-                    log.info(f"[INDEX_OK] doc_id={doc_id}")
+                    log.info(
+                        f"[INDEX_OK] doc_id={doc_id} "
+                        f"elapsed_ms={int((time.perf_counter() - stage_started_at) * 1000)}"
+                    )
                 except Exception as e:
                     log.error(f"[INDEX_FAIL] doc_id={doc_id} error={e}")
                     raise
@@ -238,7 +258,10 @@ class ParseIndexHandler(BaseJobHandler):
                 except Exception as e:
                     log.warning(f"[GRAPH_FAIL] doc_id={doc_id} error={e}")
                 
-                log.info(f"[DOC_COMPLETE] doc_id={doc_id} chunks={len(records)}")
+                log.info(
+                    f"[DOC_COMPLETE] doc_id={doc_id} chunks={len(records)} "
+                    f"elapsed_ms={int((time.perf_counter() - doc_started_at) * 1000)}"
+                )
                 result.details.append({"doc_id": doc_id, "status": "ok", "chunks": len(records)})
                 result.succeeded += 1
             except Exception as e:

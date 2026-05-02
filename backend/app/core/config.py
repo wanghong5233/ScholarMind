@@ -216,6 +216,10 @@ class Settings(BaseSettings):
     SM_CHUNK_MAX_CHARS: int = 5600     # 最大大小：~1400 tokens（控制上限）
     SM_CHUNK_OVERLAP: int = 250        # 重叠：~60 tokens
     SM_SEMANTIC_SIMILARITY_THRESHOLD: float = 0.65  # 稍收紧，避免过度合并
+    # 富版面解析器的混合分块：短 layout block 保留，长正文块内部再做句级语义切分。
+    SM_LAYOUT_AWARE_CHUNKING_ENABLED: bool = True
+    SM_LAYOUT_SEMANTIC_SPLIT_ENABLED: bool = True
+    SM_LAYOUT_SEMANTIC_MIN_CHARS: int = 1800
     # 预合并/块级合并阈值（可灰度调参）
     SM_PREMERGE_MAX_CHARS: int = 10000                # MinerU 预合并单块最大字符数（默认 10k）
     SM_BLOCK_LEVEL_ALLOW_CROSS_PAGE: bool = False     # 是否允许块级跨页合并（默认不允许，保障可溯源）
@@ -224,9 +228,25 @@ class Settings(BaseSettings):
     SM_ENABLE_MULTIMODAL_CHUNKS: bool = True          # 是否将图/表等多模态块写入索引
     # 解析回退控制
     SM_FORCE_PYMUPDF_FALLBACK: bool = False                                      # 强制对 PDF 启用 PyMuPDF 兜底/补强
-    # 解析器编排顺序（逗号分隔，按顺序尝试）。可选项：deepdoc, mineru, unstructured, pymupdf
-    # 默认保持与现有逻辑兼容，优先 deepdoc；后续可切换为 "mineru,unstructured,pymupdf"
-    SM_PARSER_ORDER: str = "mineru,unstructured,pymupdf"
+    # 解析器编排顺序（逗号分隔，按顺序尝试）。
+    # 默认优先远程/轻量解析，避免低成本演示环境依赖本地 GPU/Java 重服务。
+    # 可选项：llamaparse, unstructured_api, mineru, unstructured, pymupdf
+    SM_PARSER_ORDER: str = "llamaparse,unstructured_api,unstructured,pymupdf"
+
+    # 远程解析 API 配置。未配置 key 时对应 parser 会自动跳过，并降级到后续解析器。
+    SM_REMOTE_PARSER_STRICT_FAIL: bool = True
+    SM_REMOTE_PARSER_REQUIRE_PAGE: bool = True
+    SM_REMOTE_PARSER_REQUIRE_BBOX: bool = True
+    SM_LLAMA_PARSE_API_KEY: Optional[str] = None
+    SM_LLAMA_PARSE_BASE_URL: str = "https://api.cloud.llamaindex.ai"
+    SM_LLAMA_PARSE_TIMEOUT_SECS: int = 120
+    SM_LLAMA_PARSE_POLL_INTERVAL_SECS: float = 2.0
+    SM_LLAMA_PARSE_MAX_POLL_ATTEMPTS: int = 60
+    SM_UNSTRUCTURED_API_KEY: Optional[str] = None
+    SM_UNSTRUCTURED_API_URL: str = "https://api.unstructuredapp.io/general/v0/general"
+    SM_UNSTRUCTURED_STRATEGY: str = "hi_res"
+    SM_UNSTRUCTURED_HI_RES_MODEL_NAME: Optional[str] = None
+    SM_UNSTRUCTURED_TIMEOUT_SECS: int = 180
 
     # MinerU 集成配置
     SM_MINERU_MODE: Literal["auto", "http", "cli"] = "auto"                    # 自动优先 HTTP，其次 CLI
@@ -240,10 +260,10 @@ class Settings(BaseSettings):
     SM_MINERU_CLI_BIN: str = "mineru"
     SM_MINERU_CLI_CMD: str = "{bin} -p \"{input}\" -o \"{output}\""
 
-    # Grobid 集成配置（Docker Compose 会自动设置为 http://grobid:8070）
-    SM_GROBID_ENDPOINT: Optional[str] = "http://grobid:8070"                     # Grobid 服务地址
+    # Grobid 集成配置。低成本默认关闭；heavy-local profile 可显式开启。
+    SM_GROBID_ENDPOINT: Optional[str] = None                                      # Grobid 服务地址
     SM_GROBID_TIMEOUT_SECS: int = 60                                              # Grobid 请求超时
-    SM_GROBID_ENABLED: bool = True                                                # 是否启用 Grobid 元数据增强
+    SM_GROBID_ENABLED: bool = False                                               # 是否启用 Grobid 元数据增强
 
     # RAG 超参数
     SM_RAG_TOPK_MIN: int = 4                                           # RAG 最少 chunk 数

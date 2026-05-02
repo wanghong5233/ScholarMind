@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Dict, Iterable, List
 from service.core.ingestion.interfaces import ParsedBlock, Embedder
 from service.core.rag.nlp.model import generate_embedding
@@ -38,10 +39,12 @@ class SimpleAPIEmbedder(Embedder):
 
     def embed(self, *, chunks: Iterable[ParsedBlock]) -> List[Dict[str, object]]:
         logger = logging.getLogger("ingestion.embedder")
+        started_at = time.perf_counter()
         chunk_list = list(chunks)
         if not chunk_list:
             logger.info("SimpleAPIEmbedder: no texts to embed (0 chunks)")
             return []
+        total_chars = sum(len((chunk.text or "")) for chunk in chunk_list)
         # 先读取预嵌入，缺失的再批量请求
         pre_vecs: List[List[float] | None] = []
         missing_indices: List[int] = []
@@ -54,6 +57,14 @@ class SimpleAPIEmbedder(Embedder):
                 pre_vecs.append(None)
                 missing_indices.append(i)
 
+        logger.info(
+            "SimpleAPIEmbedder.start chunks=%s chars=%s preembedded=%s missing=%s batch_size=%s",
+            len(chunk_list),
+            total_chars,
+            len(chunk_list) - len(missing_indices),
+            len(missing_indices),
+            self.batch_size,
+        )
         embeddings: List[List[float] | None] = [None] * len(chunk_list)
         # 批量嵌入缺失部分
         if missing_indices:
@@ -71,7 +82,6 @@ class SimpleAPIEmbedder(Embedder):
             if pre_vecs[i] is not None:
                 embeddings[i] = pre_vecs[i]
 
-        logger.info(f"SimpleAPIEmbedder: chunks={len(chunk_list)} embeddings_miss={len(missing_indices)}")
         # 兜底：若返回不足，填充空向量
         dim = 1024
         for v in embeddings:
@@ -87,7 +97,12 @@ class SimpleAPIEmbedder(Embedder):
                 "vector": vec,
                 "metadata": c.metadata,
             })
-        logger.info(f"SimpleAPIEmbedder: records_built={len(records)} dim={dim}")
+        logger.info(
+            "SimpleAPIEmbedder.finish records=%s dim=%s elapsed_ms=%s",
+            len(records),
+            dim,
+            int((time.perf_counter() - started_at) * 1000),
+        )
         return records
 
 

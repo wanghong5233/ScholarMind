@@ -5,6 +5,7 @@ from llama_index.postprocessor.dashscope_rerank import DashScopeRerank
 import numpy as np
 import logging
 import threading
+import time
 from typing import List, Optional
 
 from core.config import settings
@@ -124,18 +125,43 @@ def _generate_remote_embedding(
 
     if isinstance(text, list):
         all_embeddings: List[List[float] | None] = []
+        total = len(text)
+        batches = (total + max_batch_size - 1) // max_batch_size if max_batch_size > 0 else 0
+        started_at = time.perf_counter()
+        logger.info(
+            "Remote embedding batches start total=%s batches=%s batch_size=%s model=%s",
+            total,
+            batches,
+            max_batch_size,
+            model_name,
+        )
         for i in range(0, len(text), max_batch_size):
             batch = text[i : i + max_batch_size]
+            batch_started_at = time.perf_counter()
+            batch_no = i // max_batch_size + 1
             try:
                 completion = _request_one(batch)
                 batch_embeddings = [item.embedding for item in completion.data]
                 all_embeddings.extend(batch_embeddings)
+                logger.info(
+                    "Remote embedding batch ok batch=%s/%s size=%s elapsed_ms=%s",
+                    batch_no,
+                    batches,
+                    len(batch),
+                    int((time.perf_counter() - batch_started_at) * 1000),
+                )
             except Exception as e:
                 try:
-                    logger.warning("Remote embedding batch failed (batch %s): %s", i // max_batch_size + 1, e)
+                    logger.warning("Remote embedding batch failed (batch %s): %s", batch_no, e)
                 except Exception:
                     pass
                 all_embeddings.extend([None] * len(batch))
+        logger.info(
+            "Remote embedding batches finish total=%s returned=%s elapsed_ms=%s",
+            total,
+            len(all_embeddings),
+            int((time.perf_counter() - started_at) * 1000),
+        )
         return all_embeddings
     return None
 

@@ -15,10 +15,9 @@ services: # 定义一系列的服务（容器）
       REDIS_DB: 0
       SEMANTIC_SCHOLAR_API_KEY: ${SEMANTIC_SCHOLAR_API_KEY:-}
       RAG_PROJECT_BASE: /app/service/core
-      SM_MINERU_MODE: http
-      SM_MINERU_ENDPOINT: http://mineru:8001
-      SM_GROBID_ENDPOINT: http://grobid:8070
-      SM_RERANKER_ENDPOINT: http://reranker:8002  # 精排服务端点
+      SM_PARSER_ORDER: ${SM_PARSER_ORDER:-llamaparse,unstructured_api,unstructured,pymupdf}
+      SM_GROBID_ENABLED: ${SM_GROBID_ENABLED:-false}
+      SM_RERANKER_TYPE: ${SM_RERANKER_TYPE:-dashscope}
       PYTHONUNBUFFERED: 1
     extra_hosts: # 添加额外的主机名到IP地址的映射，类似于/etc/hosts文件
       - "host.docker.internal:host-gateway" # 允许容器连接到宿主机的特殊地址
@@ -43,9 +42,6 @@ services: # 定义一系列的服务（容器）
     depends_on: # 定义服务间的依赖关系，确保依赖的服务先启动
       - scholarmind_db # 依赖PostgreSQL数据库服务
       - redis # 依赖Redis服务
-      - mineru # 依赖MinerU解析服务
-      - grobid # 依赖Grobid元数据服务
-      - reranker # 依赖精排服务
     networks: # 指定服务连接的网络
       - scholarmind_net # 连接到名为scholarmind_net的自定义网络
 
@@ -96,6 +92,7 @@ services: # 定义一系列的服务（容器）
 
   mineru: # MinerU PDF 解析服务（GPU 加速）
     container_name: scholarmind_mineru
+    profiles: ["heavy-local"]
     build:
       context: ./services/mineru
       dockerfile: Dockerfile.gpu  # 使用 GPU 版本的 Dockerfile
@@ -128,6 +125,7 @@ services: # 定义一系列的服务（容器）
 
   grobid: # Grobid 学术元数据抽取服务
     container_name: scholarmind_grobid
+    profiles: ["heavy-local"]
     image: lfoppiano/grobid:0.8.0
     hostname: grobid
     environment:
@@ -144,6 +142,7 @@ services: # 定义一系列的服务（容器）
 
   reranker: # BGE Reranker 精排服务（GPU 加速）
     container_name: scholarmind_reranker
+    profiles: ["heavy-local"]
     build:
       context: ./services/reranker
       dockerfile: Dockerfile.gpu  # 使用 GPU 版本的 Dockerfile

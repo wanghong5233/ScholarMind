@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Any, Dict, Iterable, List, Optional
 
 from sqlalchemy import text
@@ -29,6 +30,7 @@ class PgVectorChunkWriter:
     ) -> int:
         """Upsert chunk rows using the same index namespace semantics as ES."""
 
+        started_at = time.perf_counter()
         rows = [self._build_row(record=record, index_name=index_name) for record in records]
         if not rows:
             return 0
@@ -91,9 +93,10 @@ class PgVectorChunkWriter:
         with engine.begin() as connection:
             connection.execute(statement, rows)
         self.logger.info(
-            "pgvector shadow upsert completed: index=%s chunks=%s",
+            "pgvector upsert completed: index=%s chunks=%s elapsed_ms=%s",
             index_name,
             len(rows),
+            int((time.perf_counter() - started_at) * 1000),
         )
         return len(rows)
 

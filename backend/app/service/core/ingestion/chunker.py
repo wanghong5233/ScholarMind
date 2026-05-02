@@ -351,14 +351,130 @@ class SemanticAwareChunker(Chunker):
             return 1.0
         dot = sum(x * y for x, y in zip(a, b))
         return max(-1.0, min(1.0, dot / (da * db)))
+
+    def _is_semantic_split_candidate(self, block: ParsedBlock) -> bool:
+        """Only long prose-like layout blocks should pay the sentence-embedding cost."""
+
+        metadata = block.metadata or {}
+        block_type = str(
+            metadata.get("logical_type") or metadata.get("element_type") or ""
+        ).strip().lower()
+        non_prose_types = {
+            "title",
+            "heading",
+            "header",
+            "footer",
+            "table",
+            "tablechunk",
+            "image",
+            "figure",
+            "code",
+            "equation",
+            "formula",
+            "link",
+            "reference",
+            "caption",
+        }
+        return block_type not in non_prose_types
+
+    def _semantic_split_block(self, block: ParsedBlock) -> List[ParsedBlock]:
+        """Split one long prose block by adjacent sentence embedding similarity."""
+
+        text = (block.text or "").strip()
+        if not text:
+            return []
+        sents = self._split_sentences(text)
+        if not sents:
+            return self._split_block_sliding(block)
+        if len(sents) == 1 and len(text) > self.max_chunk_chars:
+            return self._split_block_sliding(block)
+
+        embs = self._embed(sents)
+        buf: List[str] = []
+        buf_vecs: List[List[float]] = []
+        last_vec: List[float] | None = None
+        chunk_payloads: List[Tuple[str, Dict[str, Any]]] = []
+
+        def _flush_buffer() -> None:
+            if not buf:
+                return
+            override_md: Dict[str, Any] = {}
+            if buf_vecs:
+                try:
+                    dim = len(buf_vecs[0])
+                    acc = [0.0] * dim
+                    for vv in buf_vecs:
+                        if len(vv) == dim:
+                            for j in range(dim):
+                                acc[j] += float(vv[j])
+                    override_md["pre_embedding"] = [x / max(len(buf_vecs), 1) for x in acc]
+                except Exception:
+                    pass
+            chunk_payloads.append(("\n".join(buf), override_md))
+
+        for i, sent in enumerate(sents):
+            if not buf:
+                buf.append(sent)
+                first_vec = embs[i] if i < len(embs) else None
+                if isinstance(first_vec, list) and first_vec:
+                    buf_vecs.append(first_vec)
+                    last_vec = first_vec
+                else:
+                    last_vec = None
+                continue
+
+            cur_vec = embs[i] if i < len(embs) else None
+            sim = self._cos(last_vec or [], cur_vec or [])
+            buf_len = sum(len(x) for x in buf)
+            next_len = buf_len + 1 + len(sent)
+            force_split = next_len >= self.max_chunk_chars
+            soft_split = (next_len >= self.target_chars) and (sim < self.similarity_threshold)
+            can_split = (buf_len >= self.min_chunk_chars) or force_split
+
+            if can_split and (force_split or soft_split):
+                _flush_buffer()
+                buf = [sent]
+                buf_vecs = [cur_vec] if isinstance(cur_vec, list) and cur_vec else []
+            else:
+                buf.append(sent)
+                if isinstance(cur_vec, list) and cur_vec:
+                    buf_vecs.append(cur_vec)
+            last_vec = cur_vec
+
+        if buf:
+            _flush_buffer()
+
+        total = len(chunk_payloads)
+        return [
+            _produce_chunk(
+                block=block,
+                text=chunk_text,
+                index=idx,
+                total=total,
+                start=0,
+                end=len(chunk_text),
+                override_metadata=override_md,
+            )
+            for idx, (chunk_text, override_md) in enumerate(chunk_payloads, start=1)
+        ]
     
     def _chunk_block_level(self, blocks: List[ParsedBlock]) -> List[ParsedBlock]:
-        """块级保护模式：保持已有结构块，仅对过长块做内部切分。"""
+        """Hybrid layout-aware mode: preserve layout blocks, semantically split long prose."""
+
         valid_blocks = [b for b in blocks if (b.text or "").strip()]
         if not valid_blocks:
             return []
 
         final_results: List[ParsedBlock] = []
+        preserved_blocks = 0
+        semantic_split_blocks = 0
+        semantic_split_chunks = 0
+        sliding_split_blocks = 0
+        layout_semantic_enabled = bool(getattr(settings, "SM_LAYOUT_SEMANTIC_SPLIT_ENABLED", True))
+        semantic_min_chars = max(
+            int(getattr(settings, "SM_LAYOUT_SEMANTIC_MIN_CHARS", self.min_chunk_chars)),
+            self.min_chunk_chars,
+        )
         for block in valid_blocks:
             text = (block.text or "").strip()
             if not text:
@@ -377,6 +493,18 @@ class SemanticAwareChunker(Chunker):
                         end=len(text),
                     )
                 )
+                preserved_blocks += 1
+                continue
+
+            if (
+                layout_semantic_enabled
+                and len(text) >= semantic_min_chars
+                and self._is_semantic_split_candidate(block)
+            ):
+                split_chunks = self._semantic_split_block(block)
+                final_results.extend(split_chunks)
+                semantic_split_blocks += 1
+                semantic_split_chunks += len(split_chunks)
                 continue
 
             if len(text) <= self.max_chunk_chars:
@@ -390,42 +518,20 @@ class SemanticAwareChunker(Chunker):
                         end=len(text),
                     )
                 )
+                preserved_blocks += 1
                 continue
 
-            # 回退策略：按句子切分，保持 target/max 约束；若分句失败则使用滑窗
-            sents = self._split_sentences(text)
-            if not sents:
-                final_results.extend(self._split_block_sliding(block))
-                continue
-
-            chunk_texts: List[str] = []
-            buf: List[str] = []
-            for sent in sents:
-                tentative = ("\n".join(buf) + ("\n" if buf else "") + sent) if buf else sent
-                if len(tentative) > self.max_chunk_chars and buf:
-                    chunk_texts.append("\n".join(buf))
-                    buf = [sent]
-                    continue
-                buf.append(sent)
-            if buf:
-                chunk_texts.append("\n".join(buf))
-
-            total = len(chunk_texts)
-            for idx, chunk_text in enumerate(chunk_texts, start=1):
-                final_results.append(
-                    _produce_chunk(
-                        block=block,
-                        text=chunk_text,
-                        index=idx,
-                        total=total,
-                        start=0,
-                        end=len(chunk_text),
-                    )
-                )
+            split_chunks = self._split_block_sliding(block)
+            final_results.extend(split_chunks)
+            sliding_split_blocks += 1
 
         try:
             log.info(
-                f"SemanticAwareChunker.block_level: input={len(valid_blocks)} output={len(final_results)}"
+                "SemanticAwareChunker.hybrid_layout: "
+                f"input={len(valid_blocks)} output={len(final_results)} "
+                f"preserved={preserved_blocks} semantic_blocks={semantic_split_blocks} "
+                f"semantic_chunks={semantic_split_chunks} sliding_blocks={sliding_split_blocks} "
+                f"semantic_min_chars={semantic_min_chars}"
             )
         except Exception:
             pass
@@ -442,11 +548,30 @@ class SemanticAwareChunker(Chunker):
         except Exception:
             pass
         
-        # 【优化】检查是否来自 MinerU 预合并（通过 metadata 中的 parser_engine）
-        # 如果是预合并块，则采用"块级语义合并"而非"句子级重新切分"
-        is_pre_merged = any(b.metadata.get("parser_engine") == "mineru" for b in _blocks)
+        # Rich layout parsers already produce citation-aware blocks. Preserve those
+        # boundaries first, then apply sentence-level semantic splitting only inside
+        # long prose blocks.
+        layout_preserving_engines = {"mineru", "llamaparse", "unstructured_api"}
+        is_layout_preserving = any(
+            (b.metadata or {}).get("parser_engine") in layout_preserving_engines
+            for b in _blocks
+        )
         
-        if is_pre_merged:
+        if is_layout_preserving and getattr(settings, "SM_LAYOUT_AWARE_CHUNKING_ENABLED", True):
+            try:
+                engines = sorted(
+                    {
+                        str((b.metadata or {}).get("parser_engine"))
+                        for b in _blocks
+                        if (b.metadata or {}).get("parser_engine")
+                    }
+                )
+                log.info(
+                    f"SemanticAwareChunker.hybrid_layout_mode engines={engines} "
+                    f"blocks={len(_blocks)}"
+                )
+            except Exception:
+                pass
             block_level = self._chunk_block_level(_blocks)
             return _merge_short_chunks(block_level)
         
@@ -475,81 +600,7 @@ class SemanticAwareChunker(Chunker):
                     )
                 )
                 continue
-            embs = self._embed(sents)
-            buf: List[str] = []
-            buf_vecs: List[List[float]] = []
-            last_vec: List[float] | None = None
-            chunk_payloads: List[Tuple[str, Dict[str, Any]]] = []
-
-            def _flush_buffer():
-                if not buf:
-                    return
-                override_md: Dict[str, Any] = {}
-                if buf_vecs:
-                    try:
-                        dim = len(buf_vecs[0])
-                        acc = [0.0] * dim
-                        for vv in buf_vecs:
-                            if len(vv) == dim:
-                                for j in range(dim):
-                                    acc[j] += float(vv[j])
-                        override_md["pre_embedding"] = [x / max(len(buf_vecs), 1) for x in acc]
-                    except Exception:
-                        pass
-                chunk_payloads.append(("\n".join(buf), override_md))
-
-            for i, s in enumerate(sents):
-                cur = s
-                if not buf:
-                    buf.append(cur)
-                    v0 = embs[i] if i < len(embs) else None
-                    if isinstance(v0, list) and v0:
-                        buf_vecs.append(v0)
-                        last_vec = v0
-                    else:
-                        last_vec = None
-                    continue
-                cur_vec = embs[i] if i < len(embs) else None
-                sim = self._cos(last_vec or [], cur_vec or [])
-                # 计算当前缓冲区长度
-                buf_len = sum(len(x) for x in buf)
-                next_len = buf_len + 1 + len(cur)
-                
-                # 三级切分策略（SOTA 实践）
-                # 1. 硬上限：超过 max_chunk_chars 必须切分
-                force_split = next_len >= self.max_chunk_chars
-                # 2. 软目标：达到 target_chars 且相似度低于阈值时切分
-                soft_split = (next_len >= self.target_chars) and (sim < self.similarity_threshold)
-                # 3. 最小保护：未达到 min_chunk_chars 不切分（除非硬上限）
-                can_split = (buf_len >= self.min_chunk_chars) or force_split
-                
-                should_split = can_split and (force_split or soft_split)
-                
-                if should_split:
-                    _flush_buffer()
-                    buf = [cur]
-                    buf_vecs = [cur_vec] if isinstance(cur_vec, list) and cur_vec else []
-                else:
-                    buf.append(cur)
-                    if isinstance(cur_vec, list) and cur_vec:
-                        buf_vecs.append(cur_vec)
-                last_vec = cur_vec
-            if buf:
-                _flush_buffer()
-
-            total = len(chunk_payloads)
-            for idx, (chunk_text, override_md) in enumerate(chunk_payloads, start=1):
-                results.append(
-                    _produce_chunk(
-                        block=b,
-                        text=chunk_text,
-                        index=idx,
-                        total=total,
-                        start=0,
-                        end=len(chunk_text),
-                        override_metadata=override_md,
-                    )
-                )
+            results.extend(self._semantic_split_block(b))
         results = _merge_short_chunks(results)
 
         try:

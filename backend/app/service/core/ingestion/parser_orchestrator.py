@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from typing import List
+import requests
+
 from utils.get_logger import log
 from core.config import settings
 from service.core.ingestion.interfaces import DocumentParser, ParsedBlock
 from service.core.ingestion.document_parser import LightweightDocumentParser
 from service.core.ingestion.mineru_parser import MinerUParser
+from service.core.ingestion.remote_parsers import LlamaParseParser, UnstructuredApiParser
 from service.core.ingestion.unstructured_parser import UnstructuredParser
 
 
@@ -18,9 +21,57 @@ def _build_parser(name: str) -> DocumentParser:
         return LightweightDocumentParser()
     if key == "unstructured":
         return UnstructuredParser()
+    if key == "unstructured_api":
+        return UnstructuredApiParser()
+    if key == "llamaparse":
+        return LlamaParseParser()
     if key == "mineru":
         return MinerUParser()
     return LightweightDocumentParser()
+
+
+def _skip_reason(name: str) -> str | None:
+    key = name.strip().lower()
+    if key == "unstructured_api" and not (settings.SM_UNSTRUCTURED_API_KEY or "").strip():
+        return "missing SM_UNSTRUCTURED_API_KEY"
+    if key == "llamaparse" and not (settings.SM_LLAMA_PARSE_API_KEY or "").strip():
+        return "missing SM_LLAMA_PARSE_API_KEY"
+    return None
+
+
+def _is_strict_remote_parser(name: str) -> bool:
+    if not getattr(settings, "SM_REMOTE_PARSER_STRICT_FAIL", True):
+        return False
+    key = name.strip().lower()
+    if key == "unstructured_api":
+        return bool((settings.SM_UNSTRUCTURED_API_KEY or "").strip())
+    if key == "llamaparse":
+        return bool((settings.SM_LLAMA_PARSE_API_KEY or "").strip())
+    return False
+
+
+def _validate_remote_metadata(parser_name: str, blocks: List[ParsedBlock]) -> None:
+    text_blocks = [block for block in blocks if (block.text or "").strip()]
+    if not text_blocks:
+        raise RuntimeError(f"{parser_name} returned no text blocks")
+
+    missing_page = [
+        idx for idx, block in enumerate(text_blocks)
+        if (block.metadata or {}).get("page") is None and not (block.metadata or {}).get("page_range")
+    ]
+    if getattr(settings, "SM_REMOTE_PARSER_REQUIRE_PAGE", True) and missing_page:
+        raise RuntimeError(
+            f"{parser_name} returned {len(missing_page)} text blocks without page/page_range metadata"
+        )
+
+    missing_bbox = [
+        idx for idx, block in enumerate(text_blocks)
+        if not ((block.metadata or {}).get("bbox_list") or (block.metadata or {}).get("bbox"))
+    ]
+    if getattr(settings, "SM_REMOTE_PARSER_REQUIRE_BBOX", True) and missing_bbox:
+        raise RuntimeError(
+            f"{parser_name} returned {len(missing_bbox)} text blocks without bbox/bbox_list metadata"
+        )
 
 
 class ParserOrchestrator:
@@ -35,17 +86,29 @@ class ParserOrchestrator:
         log.info(f"[PARSER_ORCHESTRATOR_START] file={file_path} order={','.join(self.order)}")
         last_err: Exception | None = None
         for idx, name in enumerate(self.order, 1):
+            skip_reason = _skip_reason(name)
+            if skip_reason:
+                log.info(f"[PARSER_SKIP_{idx}] {name.strip()} reason={skip_reason}")
+                continue
             parser = _build_parser(name)
             try:
                 log.info(f"[PARSER_TRY_{idx}] {parser.__class__.__name__}")
                 blocks = parser.parse(file_path=file_path)
                 if any((b.text or "").strip() for b in blocks):
+                    if _is_strict_remote_parser(name):
+                        _validate_remote_metadata(parser.__class__.__name__, blocks)
                     log.info(f"[PARSER_SUCCESS] {parser.__class__.__name__} blocks={len(blocks)}")
                     return blocks
                 log.warning(f"[PARSER_EMPTY] {parser.__class__.__name__}")
-            except Exception as e:
+                if _is_strict_remote_parser(name):
+                    raise RuntimeError(f"{parser.__class__.__name__} returned empty parse result")
+            except (RuntimeError, TimeoutError, ValueError, requests.RequestException, OSError) as e:
                 last_err = e
                 log.error(f"[PARSER_FAIL] {parser.__class__.__name__} err={e}")
+                if _is_strict_remote_parser(name):
+                    raise RuntimeError(
+                        f"{parser.__class__.__name__} failed in strict remote parser mode: {e}"
+                    ) from e
                 # MinerU 失败：按配置决定是否允许降级
                 if "MinerU" in parser.__class__.__name__:
                     if getattr(settings, "SM_MINERU_STRICT_FAIL", False):
