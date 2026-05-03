@@ -51,6 +51,7 @@ export const routes: IRouteObject[] = [
   {
     path: '/chat',
     Component: Chat,
+    auth: false,
   },
   ...(ENABLE_ADMIN_UI
     ? [

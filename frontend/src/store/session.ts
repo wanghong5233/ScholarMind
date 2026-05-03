@@ -18,6 +18,10 @@ const actions = {
   updateKey() {
     state.updateKey += 1
   },
+  clear() {
+    state.list = []
+    state.updateKey += 1
+  },
 }
 
 export const sessionState = state

@@ -38,6 +38,13 @@ export default function Login() {
     return value
   }, [location.search])
 
+  useEffect(() => {
+    const query = new URLSearchParams(location.search)
+    if (query.get('tab') === 'register') {
+      setActiveTab('register')
+    }
+  }, [location.search])
+
   const [form] = Form.useForm<{
     username: string
     password: string
@@ -117,7 +124,7 @@ export default function Login() {
           {isDemoEntryEnabled() && (
             <Form.Item style={{ marginBottom: 0 }}>
               <Link to="/demo" className={styles['demo-link']}>
-                免登录进入演示
+                一键体验 Demo（含预置数据）
               </Link>
             </Form.Item>
           )}

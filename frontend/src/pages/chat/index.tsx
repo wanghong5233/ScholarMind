@@ -7,6 +7,7 @@ import { ChatRole, ChatType } from '@/configs'
 import { deviceActions } from '@/store/device'
 import { userState } from '@/store/user'
 import { setPageTransport, usePageTransport } from '@/utils'
+import { requireLogin } from '@/utils/auth'
 import { NOTEBOOK_WORKSPACE_ID, createNotebookNoteFile } from '@/utils/notebook'
 import { MenuUnfoldOutlined } from '@ant-design/icons'
 import { useMount, useRequest, useUnmount } from 'ahooks'
@@ -965,6 +966,7 @@ export default function Index() {
   const { id } = useParams()
   const navigate = useNavigate()
   const { data: ctx } = usePageTransport(transportToChatEnter)
+  const user = useSnapshot(userState)
 
   const [chat] = useState(() => {
     return proxy({
@@ -1270,7 +1272,7 @@ export default function Index() {
   )
 
   useEffect(() => {
-    if (!id) return
+    if (!id || !user.token) return
     autoTitledSessionRef.current = {}
     let cancelled = false
     api.session
@@ -1292,12 +1294,12 @@ export default function Index() {
     return () => {
       cancelled = true
     }
-  }, [id])
+  }, [id, user.token])
 
   const tryAutoRenameSession = useCallback(
     async (prompt?: string) => {
       const sessionId = String(id || '').trim()
-      if (!sessionId) return
+      if (!sessionId || !user.token) return
       if (autoTitledSessionRef.current[sessionId]) return
       const nextTitle = buildSessionTitleFromPrompt(prompt)
       if (!nextTitle) return
@@ -1335,7 +1337,7 @@ export default function Index() {
         // 不影响主流程
       }
     },
-    [id],
+    [id, user.token],
   )
 
   const history = useRequest(
@@ -1631,7 +1633,7 @@ export default function Index() {
 
   const defaultsReq = useRequest(
     async () => {
-      if (!id) return null
+      if (!id || !user.token) return null
       const { data } = await api.session.getDefaults(
         { sessionId: id },
         { loading: false, errorToast: false },
@@ -1663,6 +1665,7 @@ export default function Index() {
 
   const kbReq = useRequest(
     async () => {
+      if (!user.token) return [] as KnowledgeBase[]
       const { data } = await api.repository.listKnowledgeBases({
         loading: false,
         errorToast: false,
@@ -1713,6 +1716,11 @@ export default function Index() {
     deepResearchSubmitLockRef.current.clear()
     lastSuggestionTopicRef.current = ''
     setLocalReplaceContext(null)
+    if (!user.token) {
+      researchRestorePendingRef.current = false
+      setKnowledgeBases([])
+      return
+    }
     if (id) {
       researchRestorePendingRef.current = false
       runLoadDefaults()
@@ -1720,7 +1728,7 @@ export default function Index() {
       researchRestorePendingRef.current = false
     }
     runLoadKnowledgeBases()
-  }, [id, runLoadDefaults, runLoadKnowledgeBases])
+  }, [id, runLoadDefaults, runLoadKnowledgeBases, user.token])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -2525,9 +2533,18 @@ export default function Index() {
     ],
   )
 
-  const handleFileSelected = useCallback((file: File) => {
-    setPendingFiles((prev) => [...prev, file])
-  }, [])
+  const handleFileSelected = useCallback(
+    (file: File) => {
+      if (!requireLogin(user.token, navigate, {
+        redirectPath: '/chat',
+        message: '请先登录后上传文档',
+      })) {
+        return
+      }
+      setPendingFiles((prev) => [...prev, file])
+    },
+    [navigate, user.token],
+  )
 
   const handleRemovePendingAttachment = useCallback((id: number) => {
     setPendingFiles((prev) => prev.filter((_, index) => index !== id))
@@ -2561,6 +2578,12 @@ export default function Index() {
   const appendChatImageFiles = useCallback(
     async (files: File[]) => {
       if (!files.length) return
+      if (!requireLogin(user.token, navigate, {
+        redirectPath: '/chat',
+        message: '请先登录后上传图片',
+      })) {
+        return
+      }
       const remain = MAX_CHAT_IMAGE_COUNT - chatImageAttachments.length
       if (remain <= 0) {
         message.warning(`最多可添加 ${MAX_CHAT_IMAGE_COUNT} 张图片`)
@@ -2588,7 +2611,7 @@ export default function Index() {
         setChatImageProcessing(false)
       }
     },
-    [buildChatImageAttachmentsFromFiles, chatImageAttachments.length],
+    [buildChatImageAttachmentsFromFiles, chatImageAttachments.length, navigate, user.token],
   )
 
   const handleRemoveChatImageAttachment = useCallback((id: string) => {
@@ -2780,6 +2803,12 @@ export default function Index() {
       },
     ) => {
       if (loadingRef.current) return
+      if (!requireLogin(user.token, navigate, {
+        redirectPath: '/chat',
+        message: '请先登录后开始对话',
+      })) {
+        return
+      }
       const normalizedMessage = String(promptText || '').trim()
       const bootstrap = options?.bootstrap
       const imagesSnapshot = Array.isArray(bootstrap?.imageAttachments)
@@ -2988,6 +3017,8 @@ export default function Index() {
       setDocuments,
       resolveBranchReplaceMessageId,
       resolveKeepMessagesBeforeIndex,
+      navigate,
+      user.token,
     ],
   )
 
@@ -4115,6 +4146,12 @@ export default function Index() {
         message.warning('请先输入问题，再附带图片发送')
         return
       }
+      if (!requireLogin(user.token, navigate, {
+        redirectPath: '/chat',
+        message: '请先登录后开始对话',
+      })) {
+        return
+      }
       const deepResearchPromptLeak = looksLikeDeepResearchInternalPrompt(normalizedText)
       const deepResearchLeakTopic = sanitizeDeepResearchTopic(normalizedText)
       const shouldDeepResearch = researchMode === 'deep' && !editingContext
@@ -4227,6 +4264,7 @@ export default function Index() {
       knowledgeBases,
       llmModel,
       navigate,
+      user.token,
       pendingAttachments,
       pendingFiles,
       localReplaceContext,

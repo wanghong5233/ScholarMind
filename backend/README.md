@@ -1,8 +1,6 @@
-# ScholarMind - Backend Service
+# ScholarMind Backend
 
-> **Note**: For comprehensive technical documentation, architecture diagrams, and detailed API references, please refer to **[`readme/readme.md`](./readme/readme.md)**.
-
-This directory contains the backend service for ScholarMind, an AI-powered research assistant for academic literature.
+> The root [`README.md`](../README.md) is the public project entry point. This file is only a backend-side quick reference for local development and service operations.
 
 ## 🚀 Quick Start
 
@@ -11,7 +9,7 @@ This directory contains the backend service for ScholarMind, an AI-powered resea
 - Docker and Docker Compose installed
 - A configured `.env` file (copy from `.env.example` and fill in your API keys)
 
-### Launch Low-Cost Demo Services
+### Launch Default Backend Services
 
 ```bash
 # From the backend directory
@@ -35,7 +33,7 @@ The default parser order prefers remote/lightweight parsing
 metadata such as page, page range, bounding boxes, and structure labels when the
 selected parser provides them.
 
-### Stable Public Demo (Cloudflare Tunnel + Vercel)
+### Local Public Tunnel (Optional)
 
 To avoid intermittent `Network Error` caused by unstable QUIC(UDP), the compose file includes a
 `cloudflared` service (profile: `public`) pinned to a fixed version and forced to use `http2` (TCP).
@@ -114,7 +112,7 @@ docker compose logs -f
 docker compose exec scholarmind_api bash
 
 # Connect to PostgreSQL
-docker compose exec scholarmind_db psql -U postgres -d gsk
+docker compose exec scholarmind_db psql -U postgres -d scholarmind
 ```
 
 ### Database Migrations
@@ -136,10 +134,10 @@ ScholarMind now uses PostgreSQL + pgvector as the default vector store:
 - PostgreSQL uses `pgvector/pgvector:pg15` so the `vector` extension is available.
 - `20_add_pgvector_rag_chunks.py` creates the `rag_chunks` table and vector/text indexes for RAG chunks.
 - `21_add_pgvector_ltm_facts.py` creates the `ltm_facts` table for long-term memory recall.
-- `SM_VECTOR_STORE=pgvector` is the default. `elasticsearch` remains only as a temporary rollback setting during migration.
+- `SM_VECTOR_STORE=pgvector` is the default. Elasticsearch is no longer part of the default Compose stack.
 
 ## 📚 Further Reading
 
-- **[Technical Architecture & Flow Diagrams](./readme/readme.md)** - In-depth system design
+- **[Project Overview](../README.md)** - Public project overview and main documentation
 - **[Alembic Migrations Guide](./app/alembic/README.md)** - Database schema management
 - **[API Reference](http://localhost:8000/docs)** - Interactive Swagger documentation

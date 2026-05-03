@@ -6,6 +6,7 @@ import * as api from '@/api'
 import { NOTEBOOK_WORKSPACE_ID, ensureNotebookWorkspace } from '@/utils/notebook'
 import { deviceActions, deviceState } from '@/store/device'
 import { userState } from '@/store/user'
+import { requireLogin } from '@/utils/auth'
 import { isDemoEntryEnabled } from '@/utils/demo'
 import { BookOutlined, BulbOutlined, MenuFoldOutlined, MenuUnfoldOutlined } from '@ant-design/icons'
 import { Button, Tooltip, message } from 'antd'
@@ -33,6 +34,9 @@ export function BaseLayout({ children }: { children?: React.ReactNode }) {
 
   const handleOpenNotebook = useCallback(async () => {
     if (device.chatting) return
+    if (!requireLogin(user.token, navigate, { redirectPath: `/doc-studio/${NOTEBOOK_WORKSPACE_ID}` })) {
+      return
+    }
     try {
       await ensureNotebookWorkspace()
       navigate(`/doc-studio/${NOTEBOOK_WORKSPACE_ID}`)
@@ -40,7 +44,7 @@ export function BaseLayout({ children }: { children?: React.ReactNode }) {
       const detail = error?.response?.data?.detail || error?.response?.data?.message || error?.message
       message.error(detail ? `打开笔记本失败：${detail}` : '打开笔记本失败')
     }
-  }, [device.chatting, navigate])
+  }, [device.chatting, navigate, user.token])
 
   const handleOpenIdeaGen = useCallback(() => {
     if (device.chatting) return
@@ -48,8 +52,9 @@ export function BaseLayout({ children }: { children?: React.ReactNode }) {
       message.info(IDEAGEN_DISABLED_TIP)
       return
     }
+    if (!requireLogin(user.token, navigate, { redirectPath: '/idea-generation' })) return
     navigate('/idea-generation')
-  }, [device.chatting, navigate])
+  }, [device.chatting, navigate, user.token])
 
   useEffect(() => {
     document.title = TITLE || 'ScholarMind'
@@ -118,7 +123,11 @@ export function BaseLayout({ children }: { children?: React.ReactNode }) {
 
             <div
               className={`base-layout__nav-header ${isActive('/repository') ? 'is-active' : ''}`}
-              onClick={() => (device.chatting ? null : navigate('/repository'))}
+              onClick={() => {
+                if (device.chatting) return
+                if (!requireLogin(user.token, navigate, { redirectPath: '/repository' })) return
+                navigate('/repository')
+              }}
             >
               <img
                 className="base-layout__nav-header-icon"
@@ -149,7 +158,11 @@ export function BaseLayout({ children }: { children?: React.ReactNode }) {
 
             <div
               className={`base-layout__nav-header ${isDocStudioRoute ? 'is-active' : ''}`}
-              onClick={() => (device.chatting ? null : navigate('/doc-studio'))}
+              onClick={() => {
+                if (device.chatting) return
+                if (!requireLogin(user.token, navigate, { redirectPath: '/doc-studio' })) return
+                navigate('/doc-studio')
+              }}
             >
               <img
                 className="base-layout__nav-header-icon"

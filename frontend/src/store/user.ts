@@ -18,11 +18,15 @@ const state = proxyWithPersist({
 })
 
 const actions = {
-  setToken(token: string) {
+  setToken(token: string | null) {
     state.token = token
   },
-  setUsername(username: string) {
+  setUsername(username: string | null) {
     state.username = username
+  },
+  clear() {
+    state.token = null
+    state.username = null
   },
 }
 

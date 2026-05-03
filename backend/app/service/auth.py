@@ -356,6 +356,8 @@ def get_current_user(subject: "JwtAuthorizationCredentials" = Depends(access_sec
                 detail="User is disabled",
             )
         
+        token_use = str(payload.get("token_use") or "").strip().lower()
+        setattr(user, "_token_use", token_use)
         return user
     except HTTPException:
         raise
@@ -387,6 +389,32 @@ def is_user_admin(user: User) -> bool:
         if user_id_int is not None and user_id_int in _admin_user_id_allowlist():
             return True
     return False
+
+
+def is_demo_entry_principal(user: User) -> bool:
+    """Check whether current principal comes from demo-entry token."""
+    token_use = str(getattr(user, "_token_use", "") or "").strip().lower()
+    return token_use == "demo_entry"
+
+
+def ensure_not_demo_readonly(
+    user: User,
+    *,
+    action: str = "write",
+) -> None:
+    """
+    Block destructive operations for demo-entry users.
+
+    Demo mode is intentionally read-mostly for shared portfolio environments.
+    """
+    if not bool(getattr(settings, "SM_DEMO_ENTRY_ENABLED", False)):
+        return
+    if not is_demo_entry_principal(user):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=f"Demo account is read-only. '{action}' is disabled.",
+    )
 
 
 def get_current_admin_user(
@@ -499,6 +527,8 @@ def get_current_user_optional_query_token(
                 detail="User is disabled",
             )
         
+        token_use = str((payload or {}).get("token_use") or "").strip().lower()
+        setattr(user, "_token_use", token_use)
         return user
     finally:
         db.close()

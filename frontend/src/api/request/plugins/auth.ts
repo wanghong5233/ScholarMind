@@ -1,4 +1,5 @@
 import { userActions, userState } from '@/store/user'
+import { buildLoginPath } from '@/utils/auth'
 import { ResponseError } from '../error'
 import { IRequestPlugin } from './plugin'
 import { MESSAGE_KEY } from './service'
@@ -56,14 +57,14 @@ export const authPlugin: IRequestPlugin = {
 
         let message: string
         switch (code) {
-          case 401:
+          case 401: {
             if (url.includes('/admin/') || url.startsWith('admin/')) {
               return Promise.reject(error)
             }
             // token 失效
-            userActions.setToken('')
+            userActions.clear()
             const router = await getRouter()
-            router.navigate('/login')
+            router.navigate(buildLoginPath())
 
             message =
               AUTH_ERROR_MAP[code as keyof typeof AUTH_ERROR_MAP] ||
@@ -71,13 +72,15 @@ export const authPlugin: IRequestPlugin = {
               '请求发生错误'
 
             return Promise.reject(new ResponseError(message, response))
-          case 461:
+          }
+          case 461: {
             // 知识库中没有文档
             message = '请先上传文档'
             const router461 = await getRouter()
             router461.navigate('/repository')
 
             return Promise.reject(new ResponseError(message, response))
+          }
           default:
             return Promise.reject(error)
         }

@@ -9,6 +9,7 @@ from schemas.document import (
     CriticalQuestionsResponse,
 )
 from service.auth import (
+    ensure_not_demo_readonly,
     get_current_user,
     get_current_user_optional_query_token,
 )
@@ -194,6 +195,7 @@ def delete_document(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    ensure_not_demo_readonly(current_user, action="delete_document")
     try:
         # kb_id is used for permission checks
         deleted_document = document_service.delete_document(db, doc_id, current_user.id, kb_id)

@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy.orm import Session
 from models.user import User
 from schemas.knowledge_base import KnowledgeBaseInDB, KnowledgeBaseCreate, KnowledgeBaseUpdate
-from service.auth import get_current_user
+from service.auth import ensure_not_demo_readonly, get_current_user
 from utils.database import get_db
 from pydantic import BaseModel
 
@@ -70,6 +70,7 @@ def delete_knowledge_base(
     """
     删除指定ID的知识库。
     """
+    ensure_not_demo_readonly(current_user, action="delete_knowledge_base")
     service = KnowledgeBaseOrchestrator(db=db, current_user=current_user)
     return service.delete(kb_id)
 
@@ -87,6 +88,7 @@ def cleanup_ephemeral_kbs(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    ensure_not_demo_readonly(current_user, action="cleanup_ephemeral_kbs")
     service = KnowledgeBaseOrchestrator(db=db, current_user=current_user)
     return service.cleanup_ephemeral(older_than_hours=payload.olderThanHours)
 

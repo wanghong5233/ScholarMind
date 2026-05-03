@@ -17,7 +17,7 @@ from schemas.session import (
     CompareRequest,
     CompareResponse,
 )
-from service.auth import get_current_user
+from service.auth import ensure_not_demo_readonly, get_current_user
 from service.core.conversation.chat_ask_orchestrator import ChatAskOrchestrator
 from service.core.conversation.chat_compare_orchestrator import ChatCompareOrchestrator
 from service.core.conversation.session_management_service import SessionManagementService
@@ -182,6 +182,7 @@ def delete_session(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    ensure_not_demo_readonly(current_user, action="delete_session")
     service = SessionManagementService(db=db, current_user=current_user)
     return service.delete_session(session_id=session_id)
 
@@ -193,6 +194,7 @@ def rewind_session_messages(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
+    ensure_not_demo_readonly(current_user, action="rewind_session")
     service = SessionManagementService(db=db, current_user=current_user)
     if payload.before_message_id:
         return service.rewind_messages(

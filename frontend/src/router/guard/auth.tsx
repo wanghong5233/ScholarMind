@@ -84,7 +84,7 @@ export function AuthGuard({ children }: { children?: React.ReactNode }) {
   }
 
   if (!user.token) {
-    return <Navigate to="/login" replace />
+    return <Navigate to={`/login?redirect=${encodeURIComponent(redirectPath)}`} replace />
   }
 
   return children

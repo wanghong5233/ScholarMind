@@ -1,5 +1,6 @@
 import * as api from '@/api'
 import { sessionActions, sessionState } from '@/store/session'
+import { userState } from '@/store/user'
 import { useRequest } from 'ahooks'
 import { DeleteOutlined, EditOutlined, SearchOutlined } from '@ant-design/icons'
 import { Button, Dropdown, Input, Modal, Popconfirm, message } from 'antd'
@@ -83,6 +84,7 @@ export function Nav() {
   const navigate = useNavigate()
   const location = useLocation()
   const session = useSnapshot(sessionState)
+  const user = useSnapshot(userState)
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchKeyword, setSearchKeyword] = useState('')
   const [renameModalOpen, setRenameModalOpen] = useState(false)
@@ -267,12 +269,19 @@ export function Nav() {
       return data
     },
     {
-      refreshDeps: [session.updateKey],
+      ready: Boolean(user.token),
+      refreshDeps: [session.updateKey, user.token],
       onSuccess(data) {
         sessionActions.setList(data?.sessions || [])
       },
     },
   )
+
+  useEffect(() => {
+    if (!user.token) {
+      sessionActions.clear()
+    }
+  }, [user.token])
 
   useEffect(() => {
     if (!searchOpen && searchKeyword) {
