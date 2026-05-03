@@ -133,6 +133,48 @@ def parse_index_documents(
     )
 
 
+@router.post(
+    "/{doc_id}/retry",
+    response_model=JobInDB,
+    summary="重试单个文档的解析入库",
+    description=(
+        "适用于 processing_status='failed' 的文档。"
+        "先把状态重置为 pending，再调度 ParseIndexHandler 重新跑解析、分块、嵌入、索引。"
+    ),
+)
+def retry_document(
+    kb_id: int,
+    doc_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    ensure_not_demo_readonly(current_user)
+    try:
+        doc = document_service.get_document_by_id(db, doc_id, current_user.id, kb_id)
+    except ResourceNotFoundException as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except PermissionDeniedException as e:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
+
+    if not doc.local_pdf_path:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="文档没有本地 PDF 文件，无法重试解析。请重新上传或重新导入。",
+        )
+
+    from service.document_lifecycle import reset_for_retry
+    reset_for_retry(db, doc)
+
+    orchestrator = DocumentIngestionOrchestrator(db=db, current_user=current_user)
+    return orchestrator.parse_index_documents(
+        kb_id=kb_id,
+        doc_ids=[doc.id],
+        background_tasks=background_tasks,
+        session_id=None,
+    )
+
+
 @router.get(
     "/",
     response_model=List[DocumentInDB],
@@ -145,13 +187,7 @@ def list_documents(
     current_user: User = Depends(get_current_user)
 ):
     try:
-        documents = document_service.list_documents_by_kb_id(db, kb_id, current_user.id)
-        parser_pipeline = getattr(settings, "SM_PARSER_ORDER", "")
-        enriched: List[DocumentInDB] = []
-        for doc in documents:
-            model = DocumentInDB.model_validate(doc)
-            enriched.append(model.model_copy(update={"parser_pipeline": parser_pipeline}))
-        return enriched
+        return document_service.list_documents_by_kb_id(db, kb_id, current_user.id)
     except ResourceNotFoundException as e:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
     except PermissionDeniedException as e:

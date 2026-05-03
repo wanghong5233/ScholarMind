@@ -138,29 +138,85 @@ class IngestionService:
     @staticmethod
     def _dedupe_results(results: List[DocumentCreate]) -> List[DocumentCreate]:
         deduped: List[DocumentCreate] = []
-        seen: set[str] = set()
+        seen: dict[str, DocumentCreate] = {}
         for doc in results:
-            key = IngestionService._paper_key(doc)
-            if key in seen:
+            keys = IngestionService._paper_keys(doc)
+            matched = next((seen[key] for key in keys if key in seen), None)
+            if matched:
+                IngestionService._merge_document_candidate(matched, doc)
+                for key in keys:
+                    seen[key] = matched
                 continue
-            seen.add(key)
             deduped.append(doc)
+            for key in keys:
+                seen[key] = doc
         return deduped
 
     @staticmethod
-    def _paper_key(doc: DocumentCreate) -> str:
+    def _paper_keys(doc: DocumentCreate) -> set[str]:
+        keys: set[str] = set()
         doi = (doc.doi or "").strip().lower()
         if doi:
-            return doi
+            keys.add(f"doi:{doi}")
         semantic_id = (doc.semantic_scholar_id or "").strip().lower()
         if semantic_id:
-            return semantic_id
+            keys.add(f"s2:{semantic_id}")
         url = (doc.source_url or "").strip().lower()
         if url:
-            return url
+            keys.add(f"url:{url}")
+            arxiv_id = IngestionService._extract_arxiv_id(url)
+            if arxiv_id:
+                keys.add(f"arxiv:{arxiv_id}")
         title = (doc.title or "").strip().lower()
         title = re.sub(r"[^a-z0-9]+", " ", title).strip()
-        return title or str(doc)
+        if title:
+            keys.add(f"title:{title}")
+        return keys or {str(doc)}
+
+    @staticmethod
+    def _extract_arxiv_id(url: str) -> Optional[str]:
+        match = re.search(r"arxiv\.org/(?:abs|pdf)/([^?#/]+)", url, flags=re.IGNORECASE)
+        if not match:
+            return None
+        return match.group(1).removesuffix(".pdf").lower()
+
+    @staticmethod
+    def _merge_document_candidate(target: DocumentCreate, incoming: DocumentCreate) -> None:
+        """Merge duplicate candidates while preserving richer metadata."""
+
+        def is_pdf_url(value: Optional[str]) -> bool:
+            lowered = (value or "").lower()
+            return lowered.endswith(".pdf") or "/pdf/" in lowered
+
+        if not target.source_url or (not is_pdf_url(target.source_url) and is_pdf_url(incoming.source_url)):
+            target.source_url = incoming.source_url
+        if not target.doi and incoming.doi:
+            target.doi = incoming.doi
+        if not target.semantic_scholar_id and incoming.semantic_scholar_id:
+            target.semantic_scholar_id = incoming.semantic_scholar_id
+        if target.citation_count is None and incoming.citation_count is not None:
+            target.citation_count = incoming.citation_count
+        if not target.abstract and incoming.abstract:
+            target.abstract = incoming.abstract
+        if not target.authors and incoming.authors:
+            target.authors = incoming.authors
+        if not target.keywords and incoming.keywords:
+            target.keywords = incoming.keywords
+        if not target.fields_of_study and incoming.fields_of_study:
+            target.fields_of_study = incoming.fields_of_study
+        target.highLight = bool(target.highLight or incoming.highLight)
+        if not target.quality_label and incoming.quality_label:
+            target.quality_source = incoming.quality_source
+            target.quality_rank = incoming.quality_rank
+            target.quality_label = incoming.quality_label
+            target.quality_score = incoming.quality_score
+        if not target.quality_labels and incoming.quality_labels:
+            target.quality_labels = incoming.quality_labels
+
+        current_venue = (target.journal_or_conference or "").strip().lower()
+        incoming_venue = (incoming.journal_or_conference or "").strip()
+        if incoming_venue and current_venue in {"", "arxiv", "preprint", "arxiv preprint"}:
+            target.journal_or_conference = incoming_venue
 
     @staticmethod
     def _rank_results(
@@ -180,7 +236,10 @@ class IngestionService:
                 recency = 1.0 / (1.0 + age)
             citations = doc.citation_count or 0
             citation_score = math.log1p(max(0, int(citations))) / math.log1p(500)
-            quality = 0.1 if getattr(doc, "highLight", None) else 0.0
+            # quality_score is now an explicit ordinal (CCF-A=7, ..., JCR-Q4=2).
+            # Normalise against the top of RANK_ORDER (7) to keep the weighted
+            # combination roughly in [0,1].
+            quality = min(1.0, float(getattr(doc, "quality_score", 0) or 0) / 7.0)
             if strategy == "recent":
                 score = recency + quality
             elif strategy == "citations":

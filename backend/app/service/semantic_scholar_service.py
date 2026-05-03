@@ -5,7 +5,7 @@ import httpx
 from schemas.document import DocumentCreate
 from utils.get_logger import logger
 from models.document import DocumentIngestionSource
-from service.core.api.utils.ccf_whitelist import is_high_quality_venue
+from service.core.api.utils.ccf_whitelist import classify_venue_quality
 from urllib.parse import quote
 from core.config import settings
 from exceptions.base import APIException
@@ -27,6 +27,7 @@ class SemanticScholarService:
         "abstract",
         "authors.name",
         "venue",
+        "publicationVenue",
         "publicationDate",
         "tldr",
         "externalIds",
@@ -222,11 +223,22 @@ class SemanticScholarService:
             external_ids = paper.get("externalIds", {}) or {}
             open_access_pdf = (paper.get("openAccessPdf") or {})
             pdf_url = open_access_pdf.get("url") or None
+            arxiv_id = external_ids.get("ArXiv")
+            if not pdf_url and arxiv_id:
+                pdf_url = f"https://arxiv.org/pdf/{str(arxiv_id).strip()}.pdf"
             # 兜底：若无 openAccessPdf.url，保留页面 URL 以便前端跳转
             page_url = paper.get("url")
             venue = paper.get("venue")
-            high_light = is_high_quality_venue(venue)
-            kws = paper.get("keywords")  # 不再用 fieldsOfStudy 充当关键词
+            publication_venue = paper.get("publicationVenue") or {}
+            alt_names = publication_venue.get("alternate_names") or []
+            quality = classify_venue_quality(
+                venue or publication_venue.get("name"),
+                alternate_names=alt_names,
+                issn=publication_venue.get("issn"),
+            )
+            high_light = quality["source"] == "CCF" and quality["rank"] in {"A", "B"}
+            fields_of_study = paper.get("fieldsOfStudy")
+            kws = paper.get("keywords")
             transformed.append(DocumentCreate(
                 title=paper.get("title") or "N/A",
                 authors=[a.get("name") for a in (paper.get("authors") or []) if a.get("name")],
@@ -235,7 +247,7 @@ class SemanticScholarService:
                 journal_or_conference=venue,
                 keywords=kws,
                 citation_count=paper.get("citationCount"),
-                fields_of_study=paper.get("fieldsOfStudy"),
+                fields_of_study=fields_of_study,
                 doi=external_ids.get("DOI"),
                 semantic_scholar_id=paper.get("paperId"),
                 source_url=pdf_url or page_url,
@@ -243,6 +255,11 @@ class SemanticScholarService:
                 file_hash=None,
                 ingestion_source=DocumentIngestionSource.ONLINE_IMPORT,
                 highLight=high_light,
+                quality_source=quality["source"],
+                quality_rank=quality["rank"],
+                quality_label=quality["label"],
+                quality_score=quality["score"],
+                quality_labels=quality.get("labels") or None,
             ))
         return transformed
 

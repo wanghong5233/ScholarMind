@@ -7,7 +7,7 @@ import type {
 } from '@/api/repository'
 import IconDelete from '@/assets/repository/action/delete.svg'
 import { PlusOutlined } from '@ant-design/icons'
-import { Button, Modal, Popconfirm, Space, Table, Tag, Typography, message, Spin, Form, Input, Select } from 'antd'
+import { Button, Modal, Popconfirm, Space, Table, Tag, Tooltip, Typography, message, Spin, Form, Input, Select } from 'antd'
 import type { ColumnsType } from 'antd/es/table'
 import type { TableRowSelection } from 'antd/es/table/interface'
 import dayjs from 'dayjs'
@@ -62,6 +62,9 @@ export default function Index() {
     const { data } = await api.repository.listKnowledgeBases()
     const list = (data ?? []) as RepositoryKnowledgeBase[]
     return list.filter((kb: RepositoryKnowledgeBase) => !kb.is_ephemeral)
+  }, {
+    ready: Boolean(user.token),
+    refreshDeps: [user.token],
   })
 
   const [currentKbId, setCurrentKbId] = useState<number | null>(null)
@@ -99,20 +102,35 @@ export default function Index() {
     }
   }, [kbList, currentKbId])
 
+  // Conditional polling: while any doc is still pending/parsing we refresh
+  // every 3s so the KB list stays in sync with the background parse job.
+  // Once everything has settled to ready/failed the polling stops, avoiding
+  // wasted requests on idle KBs.
+  const [docPollingMs, setDocPollingMs] = useState<number | undefined>(undefined)
   const {
     data: documents,
     refresh: refreshDocuments,
     loading: documentsLoading,
   } = useRequest(
     async () => {
-      if (!currentKbId) return [] as RepositoryDoc[]
+      if (!currentKbId || !user.token) return [] as RepositoryDoc[]
       const { data } = await api.repository.listDocuments({ kbId: currentKbId })
       return data ?? []
     },
     {
-      refreshDeps: [currentKbId],
+      ready: Boolean(user.token),
+      refreshDeps: [currentKbId, user.token],
+      pollingInterval: docPollingMs,
+      pollingWhenHidden: false,
     },
   )
+
+  useEffect(() => {
+    const hasInflight = (documents ?? []).some(
+      (doc) => doc.processing_status === 'pending' || doc.processing_status === 'parsing',
+    )
+    setDocPollingMs(hasInflight ? 3000 : undefined)
+  }, [documents])
 
   const currentKb = useMemo(() => {
     if (!kbList) return null
@@ -125,8 +143,6 @@ export default function Index() {
 
   type TableItem = RepositoryDoc & {
     $suffix: FileIcon
-    status: 'success' | 'failed' | 'unparsed' | 'cancel'
-    parser_pipeline?: string | null
   }
 
   const tableData = useMemo<TableItem[]>(
@@ -134,7 +150,6 @@ export default function Index() {
       (documents ?? []).map((item: RepositoryDoc) => ({
         ...item,
         $suffix: 'pdf' as FileIcon,
-        status: 'success',
       })),
     [documents],
   )
@@ -435,41 +450,61 @@ export default function Index() {
         },
       },
       {
-        title: '解析方案',
-        dataIndex: 'parser_pipeline',
-        width: 220,
-        ellipsis: true,
-        render(value: TableItem['parser_pipeline']) {
-          if (!value) return '默认解析流水线'
-          const map: Record<string, string> = {
-            mineru: 'MinerU',
-            unstructured: 'Unstructured',
-            pymupdf: 'PyMuPDF',
-          }
-          const readable = value
-            .split(',')
-            .map((item) => item.trim())
-            .filter(Boolean)
-            .map((item) => map[item] || item)
-            .join(' → ')
-          return readable || value
-        },
-      },
-      {
         title: '状态',
-        dataIndex: 'status',
-        width: 100,
-        render(value: TableItem['status']) {
-          return <Status status={value} />
+        dataIndex: 'processing_status',
+        width: 130,
+        render(_value: unknown, row: TableItem) {
+          const status = row.processing_status || 'pending'
+          if (status === 'failed' && row.failure_reason) {
+            const stage = row.failure_stage ? `${row.failure_stage} 阶段` : '处理过程中'
+            return (
+              <Tooltip
+                title={
+                  <div style={{ maxWidth: 320 }}>
+                    <div style={{ fontWeight: 600, marginBottom: 4 }}>{stage}失败：</div>
+                    <div style={{ whiteSpace: 'pre-wrap' }}>{row.failure_reason}</div>
+                  </div>
+                }
+              >
+                <span><Status status={status} /></span>
+              </Tooltip>
+            )
+          }
+          if (status === 'ready' && row.chunk_count > 0) {
+            return (
+              <Tooltip title={`已索引 ${row.chunk_count} 块`}>
+                <span><Status status={status} /></span>
+              </Tooltip>
+            )
+          }
+          return <Status status={status} />
         },
       },
       {
         title: '操作',
         dataIndex: 'action',
-        width: 100,
+        width: 140,
         render(_: unknown, row: TableItem) {
           return (
             <Space>
+              {row.processing_status === 'failed' && row.local_pdf_path && (
+                <Button
+                  type="link"
+                  size="small"
+                  onClick={async () => {
+                    if (!currentKbId) return
+                    try {
+                      await api.repository.retryDocument({ kbId: currentKbId, docId: row.id })
+                      message.success('已重新加入解析队列')
+                      refreshDocuments()
+                    } catch (e: any) {
+                      message.error(e?.response?.data?.detail || '重试失败')
+                    }
+                  }}
+                >
+                  重试
+                </Button>
+              )}
               <Popconfirm
                 title="确定要删除该文件吗？"
                 onConfirm={async () => {
@@ -665,11 +700,26 @@ export default function Index() {
         },
       },
       {
-        title: '成功/失败',
+        title: '进度',
         dataIndex: 'succeeded',
         width: 140,
         render(_: unknown, record: JobInfo) {
-          return `${record.succeeded ?? 0} / ${record.failed ?? 0}`
+          const succeeded = record.succeeded ?? 0
+          const failed = record.failed ?? 0
+          const total = record.total ?? succeeded + failed
+          if (total <= 0) return '-'
+          return (
+            <Space size={6}>
+              <span>
+                {succeeded} / {total}
+              </span>
+              {failed > 0 && (
+                <Tag color="error" style={{ marginInlineEnd: 0 }}>
+                  失败 {failed}
+                </Tag>
+              )}
+            </Space>
+          )
         },
       },
       {

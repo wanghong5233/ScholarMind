@@ -291,6 +291,11 @@ class FileStorageUtil:
 
         local_path = os.path.join(storage_dir, filename)
 
+        # Smallest plausible PDF; anything below this is almost certainly a
+        # placeholder / error page returned in disguise.
+        MIN_PDF_BYTES = 1024
+        PDF_MAGIC = b"%PDF-"
+
         last_exc: Optional[Exception] = None
         for attempt in range(retries + 1):
             try:
@@ -300,20 +305,68 @@ class FileStorageUtil:
                 except Exception:
                     url_to_fetch = url
 
-                with httpx.stream("GET", url_to_fetch, timeout=timeout) as resp:
+                # follow_redirects=True is critical: hosts like figshare,
+                # researchgate and IEEE issue 302/303 to a CDN before serving
+                # bytes. Without it httpx returns the redirect itself and
+                # downstream code happily writes an empty body.
+                with httpx.stream(
+                    "GET",
+                    url_to_fetch,
+                    timeout=timeout,
+                    follow_redirects=True,
+                ) as resp:
+                    # 202 Accepted is figshare's "file is being prepared" code:
+                    # raise_for_status() lets it pass, but the body is empty,
+                    # so we MUST treat it as a failure here.
+                    if resp.status_code == 202:
+                        raise httpx.HTTPStatusError(
+                            "Remote returned 202 Accepted (file not ready, retry later or download manually)",
+                            request=resp.request,
+                            response=resp,
+                        )
                     resp.raise_for_status()
+
                     content_type = resp.headers.get("content-type", "").lower()
                     if "application/pdf" not in content_type and not str(resp.url).lower().endswith(".pdf"):
                         raise ValueError(f"URL does not seem to be a PDF: content-type={content_type}")
 
                     hasher = hashlib.sha256()
+                    size = 0
+                    head = b""
                     with open(local_path, "wb") as f:
                         for chunk in resp.iter_bytes():
                             if not chunk:
                                 continue
+                            if len(head) < len(PDF_MAGIC):
+                                head += chunk[: len(PDF_MAGIC) - len(head)]
                             hasher.update(chunk)
                             f.write(chunk)
+                            size += len(chunk)
+
+                # Post-download integrity check: drop placeholder/HTML payloads
+                # that slipped past the content-type check (e.g. 202 prep page,
+                # CDN error HTML, captive portals).
+                if size < MIN_PDF_BYTES or not head.startswith(PDF_MAGIC):
+                    try:
+                        os.remove(local_path)
+                    except OSError:
+                        pass
+                    raise ValueError(
+                        f"Downloaded payload is not a valid PDF (size={size}B, "
+                        f"head={head[:8]!r}); remote likely returned a placeholder"
+                    )
+
                 return local_path, hasher.hexdigest()
+            except httpx.HTTPStatusError as e:
+                # Persistent client-side states aren't worth retrying;
+                # surface them to the handler for "需手动下载" routing.
+                if e.response is not None and e.response.status_code in {202, 403, 404}:
+                    raise
+                last_exc = e
+                if attempt < retries:
+                    time.sleep(backoff ** attempt)
+                else:
+                    raise last_exc
             except Exception as e:
                 last_exc = e
                 if attempt < retries:

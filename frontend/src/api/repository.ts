@@ -14,6 +14,8 @@ export interface KnowledgeBase {
   updated_at: string
 }
 
+export type DocumentProcessingStatus = 'pending' | 'parsing' | 'ready' | 'failed'
+
 export interface RepositoryDocument {
   id: number
   knowledge_base_id: number
@@ -33,8 +35,13 @@ export interface RepositoryDocument {
   ingestion_source: string
   created_at: string
   updated_at: string
-  parser_pipeline?: string | null
   structure_metadata?: Record<string, any> | null
+  // Lifecycle fields populated by the document state machine.
+  processing_status: DocumentProcessingStatus
+  chunk_count: number
+  failure_stage?: string | null
+  failure_reason?: string | null
+  last_processed_at?: string | null
 }
 
 export interface OnlineSearchParams {
@@ -59,6 +66,11 @@ export interface OnlineDocumentCandidate {
   source_url?: string | null
   ingestion_source: string
   highLight?: boolean | null
+  quality_source?: string | null
+  quality_rank?: string | null
+  quality_label?: string | null
+  quality_score?: number | null
+  quality_labels?: Array<{ source: string; rank: string; label: string }> | null
 }
 
 export interface JobDetail {
@@ -175,7 +187,7 @@ export function listDocuments(
   options?: AxiosRequestConfig,
 ) {
   const { kbId, ...rest } = params
-  return request.get<RepositoryDocument[]>(`knowledgebases/${kbId}/documents`, {
+  return request.get<RepositoryDocument[]>(`knowledgebases/${kbId}/documents/`, {
     ...options,
     params: rest,
   })
@@ -241,6 +253,18 @@ export function parseIndexDocuments(
   return request.post<JobInfo>(
     `knowledgebases/${kbId}/documents/parse-index`,
     payload ?? {},
+    options,
+  )
+}
+
+export function retryDocument(
+  params: { kbId: number; docId: number },
+  options?: AxiosRequestConfig,
+) {
+  const { kbId, docId } = params
+  return request.post<JobInfo>(
+    `knowledgebases/${kbId}/documents/${docId}/retry`,
+    {},
     options,
   )
 }

@@ -51,26 +51,64 @@ def _is_strict_remote_parser(name: str) -> bool:
 
 
 def _validate_remote_metadata(parser_name: str, blocks: List[ParsedBlock]) -> None:
+    """Quality-gate a remote parser's output.
+
+    Industry experience: even high-quality OCR/parsing services emit a small
+    fraction of fragments (headers, footers, form-feed marks, isolated page
+    numbers) that lack bbox or page anchors. all-or-nothing rejection turns a
+    99% successful parse into a hard failure, which is wrong. We instead apply
+    a configurable tolerance ratio: above the threshold the call is rejected
+    (and the orchestrator falls through to the next parser); below it the
+    parse is accepted and the offending blocks simply degrade to "no anchor"
+    (the downstream chunker / UI handle missing bbox by falling back to
+    page-level highlighting).
+    """
+
     text_blocks = [block for block in blocks if (block.text or "").strip()]
-    if not text_blocks:
+    total = len(text_blocks)
+    if total == 0:
         raise RuntimeError(f"{parser_name} returned no text blocks")
 
-    missing_page = [
-        idx for idx, block in enumerate(text_blocks)
-        if (block.metadata or {}).get("page") is None and not (block.metadata or {}).get("page_range")
-    ]
-    if getattr(settings, "SM_REMOTE_PARSER_REQUIRE_PAGE", True) and missing_page:
+    require_page = getattr(settings, "SM_REMOTE_PARSER_REQUIRE_PAGE", True)
+    require_bbox = getattr(settings, "SM_REMOTE_PARSER_REQUIRE_BBOX", True)
+    max_missing_page_ratio = float(
+        getattr(settings, "SM_REMOTE_PARSER_MAX_MISSING_PAGE_RATIO", 0.02)
+    )
+    max_missing_bbox_ratio = float(
+        getattr(settings, "SM_REMOTE_PARSER_MAX_MISSING_BBOX_RATIO", 0.05)
+    )
+
+    missing_page = sum(
+        1 for block in text_blocks
+        if (block.metadata or {}).get("page") is None
+        and not (block.metadata or {}).get("page_range")
+    )
+    missing_bbox = sum(
+        1 for block in text_blocks
+        if not ((block.metadata or {}).get("bbox_list") or (block.metadata or {}).get("bbox"))
+    )
+
+    page_ratio = missing_page / total
+    bbox_ratio = missing_bbox / total
+    log.info(
+        f"[REMOTE_PARSER_QUALITY] {parser_name} blocks={total} "
+        f"missing_page={missing_page} ({page_ratio:.1%}) "
+        f"missing_bbox={missing_bbox} ({bbox_ratio:.1%}) "
+        f"tolerance(page<={max_missing_page_ratio:.1%}, bbox<={max_missing_bbox_ratio:.1%})"
+    )
+
+    if require_page and page_ratio > max_missing_page_ratio:
         raise RuntimeError(
-            f"{parser_name} returned {len(missing_page)} text blocks without page/page_range metadata"
+            f"{parser_name} quality gate failed: {missing_page}/{total} "
+            f"({page_ratio:.1%}) text blocks missing page anchor "
+            f"(tolerance {max_missing_page_ratio:.1%})"
         )
 
-    missing_bbox = [
-        idx for idx, block in enumerate(text_blocks)
-        if not ((block.metadata or {}).get("bbox_list") or (block.metadata or {}).get("bbox"))
-    ]
-    if getattr(settings, "SM_REMOTE_PARSER_REQUIRE_BBOX", True) and missing_bbox:
+    if require_bbox and bbox_ratio > max_missing_bbox_ratio:
         raise RuntimeError(
-            f"{parser_name} returned {len(missing_bbox)} text blocks without bbox/bbox_list metadata"
+            f"{parser_name} quality gate failed: {missing_bbox}/{total} "
+            f"({bbox_ratio:.1%}) text blocks missing bbox anchor "
+            f"(tolerance {max_missing_bbox_ratio:.1%})"
         )
 
 

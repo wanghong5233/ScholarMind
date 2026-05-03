@@ -17,11 +17,23 @@ from service import knowledgebase_service
 from service.core.ingestion.metadata_extractor import DefaultMetadataExtractor
 from service.core.ingestion.structured_doc_builder import StructuredDocumentBuilder
 from service import document_service
+from service.document_lifecycle import (
+    count_chunks,
+    mark_failed,
+    mark_parsing,
+    mark_ready,
+)
 
 class ParseIndexHandler(BaseJobHandler):
     def run(self, *, db, user_id: int, kb_id: int, payload: Dict[str, Any]) -> JobResult:
         doc_ids = (payload or {}).get("docs", [])
-        result = JobResult(total=len(doc_ids))
+        # ParseIndex is the canonical "to ready" handler; its success count
+        # must match documents.processing_status='ready' for these doc_ids.
+        result = JobResult(
+            total=len(doc_ids),
+            touched_doc_ids=list(doc_ids),
+            reconcile_with_lifecycle=True,
+        )
         # 使用全局 loguru，保证输出格式一致
 
         orchestrator = ParserOrchestrator()
@@ -61,13 +73,21 @@ class ParseIndexHandler(BaseJobHandler):
             enable_multimodal = True
 
         for doc_id in doc_ids:
+            doc = None
+            current_stage = "load"
             try:
                 doc_started_at = time.perf_counter()
                 doc = document_service.get_document_by_id(db, doc_id, user_id, kb_id)
                 if not doc.local_pdf_path or not os.path.exists(doc.local_pdf_path):
                     raise Exception("local file not found")
 
+                # Transition to 'parsing' so the UI/job-status reflects work in
+                # progress and so downstream readers can distinguish between
+                # "queued" and "actually being processed".
+                mark_parsing(db, doc)
+
                 # 解析阶段 - 详细日志
+                current_stage = "parse"
                 try:
                     stage_started_at = time.perf_counter()
                     log.info(f"[PARSE_START] doc_id={doc_id} file={doc.local_pdf_path} kb_id={kb_id}")
@@ -96,6 +116,7 @@ class ParseIndexHandler(BaseJobHandler):
                     log.error(f"[PARSE_FAIL] doc_id={doc_id} path={doc.local_pdf_path} error={e}")
                     raise
                 # 元数据提取阶段
+                current_stage = "metadata"
                 stage_started_at = time.perf_counter()
                 log.info(f"[METADATA_START] doc_id={doc_id}")
                 doc = metadata_extractor.extract_and_enrich(db=db, document=doc, blocks=blocks)
@@ -103,8 +124,9 @@ class ParseIndexHandler(BaseJobHandler):
                     f"[METADATA_OK] doc_id={doc_id} title={doc.title[:50] if doc.title else 'N/A'} "
                     f"doi={doc.doi or 'N/A'} elapsed_ms={int((time.perf_counter() - stage_started_at) * 1000)}"
                 )
-                
+
                 # 结构化阶段
+                current_stage = "structure"
                 stage_started_at = time.perf_counter()
                 log.info(f"[STRUCT_START] doc_id={doc_id}")
                 structured_doc = structured_builder.build(document=doc, mineru_blocks=blocks)
@@ -124,6 +146,7 @@ class ParseIndexHandler(BaseJobHandler):
                     log.warning(f"[STRUCT_SNAPSHOT_SAVE_FAIL] doc_id={doc_id} err={exc}")
 
                 # 分块阶段 - 详细日志
+                current_stage = "chunk"
                 try:
                     stage_started_at = time.perf_counter()
                     log.info(f"[CHUNK_START] doc_id={doc_id} input_blocks={len(structured_blocks)}")
@@ -168,6 +191,7 @@ class ParseIndexHandler(BaseJobHandler):
                     log.error(f"[CHUNK_FAIL] doc_id={doc_id} error={e}")
                     raise
                 # 嵌入阶段 - 详细日志
+                current_stage = "embed"
                 try:
                     stage_started_at = time.perf_counter()
                     log.info(f"[EMBED_START] doc_id={doc_id} input_chunks={len(chunks)}")
@@ -201,6 +225,7 @@ class ParseIndexHandler(BaseJobHandler):
                         md.setdefault("doi", doc.doi)
                 
                 # 索引阶段 - 详细日志（包含多模态统计）
+                current_stage = "index"
                 try:
                     stage_started_at = time.perf_counter()
                     # 统计多模态字段
@@ -262,12 +287,33 @@ class ParseIndexHandler(BaseJobHandler):
                     f"[DOC_COMPLETE] doc_id={doc_id} chunks={len(records)} "
                     f"elapsed_ms={int((time.perf_counter() - doc_started_at) * 1000)}"
                 )
-                result.details.append({"doc_id": doc_id, "status": "ok", "chunks": len(records)})
+                # Authoritative chunk count comes from the indexer's actual
+                # writes, not from in-memory record list (which may include
+                # records that the indexer dedup-skipped).
+                final_count = count_chunks(db, doc_id)
+                mark_ready(db, doc, chunk_count=final_count)
+                result.details.append({"doc_id": doc_id, "status": "ok", "chunks": final_count})
                 result.succeeded += 1
             except Exception as e:
-                result.details.append({"doc_id": doc_id, "status": "failed", "error": str(e)})
+                # State-machine: any uncaught error in any stage moves the
+                # doc to 'failed' with a stage tag. The lifecycle helper also
+                # purges any half-written rag_chunks rows so the
+                # invariant "ready <=> chunk_count > 0" holds.
+                if doc is not None:
+                    try:
+                        mark_failed(db, doc, stage=current_stage, reason=str(e))
+                    except Exception as lifecycle_err:
+                        log.warning(
+                            f"[LIFECYCLE_WRITE_FAIL] doc_id={doc_id} err={lifecycle_err}"
+                        )
+                result.details.append({
+                    "doc_id": doc_id,
+                    "status": "failed",
+                    "error": str(e),
+                    "stage": current_stage,
+                })
                 result.failed += 1
-        
+
         return result
 
     def _summarize_logical_types(self, blocks: list[ParsedBlock]) -> dict[str, int]:

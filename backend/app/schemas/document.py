@@ -33,6 +33,13 @@ class DocumentCreate(DocumentBase):
     knowledge_base_id 将从URL路径参数中获取，而不是在请求体中。
     """
     highLight: bool | None = None
+    quality_source: Optional[str] = None
+    quality_rank: Optional[str] = None
+    quality_label: Optional[str] = None
+    quality_score: Optional[int] = None
+    # All matched venue ranks (CCF + JCR may co-occur). Each item:
+    # ``{"source": "CCF"|"JCR", "rank": "A"/"Q1"/..., "label": "CCF-A"/"JCR-Q1"}``.
+    quality_labels: Optional[List[dict]] = None
 
 class DocumentUpdate(BaseModel):
     """
@@ -61,8 +68,14 @@ class DocumentInDB(DocumentBase):
     knowledge_base_id: int
     created_at: datetime
     updated_at: datetime
-    parser_pipeline: Optional[str] = None
     structure_metadata: Optional[Dict[str, Any]] = None
+
+    # Lifecycle fields - drive UI status badge / retry button / failure tooltip.
+    processing_status: str = "pending"
+    chunk_count: int = 0
+    failure_stage: Optional[str] = None
+    failure_reason: Optional[str] = None
+    last_processed_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True

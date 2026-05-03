@@ -237,6 +237,14 @@ class Settings(BaseSettings):
     SM_REMOTE_PARSER_STRICT_FAIL: bool = True
     SM_REMOTE_PARSER_REQUIRE_PAGE: bool = True
     SM_REMOTE_PARSER_REQUIRE_BBOX: bool = True
+    # Tolerance for partial metadata loss in remote parsers. Real-world PDFs
+    # virtually always produce a handful of fragments (page headers/footers,
+    # form-feed glyphs, footnote markers) that LlamaParse / Unstructured emit
+    # without bbox or page anchors. all-or-nothing rejection on these would
+    # discard 99.x% perfectly indexable content. Defaults are conservative:
+    # bbox is harder to extract than page numbers, hence the higher tolerance.
+    SM_REMOTE_PARSER_MAX_MISSING_BBOX_RATIO: float = 0.05
+    SM_REMOTE_PARSER_MAX_MISSING_PAGE_RATIO: float = 0.02
     SM_LLAMA_PARSE_API_KEY: Optional[str] = None
     SM_LLAMA_PARSE_BASE_URL: str = "https://api.cloud.llamaindex.ai"
     SM_LLAMA_PARSE_TIMEOUT_SECS: int = 120

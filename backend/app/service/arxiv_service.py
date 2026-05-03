@@ -80,22 +80,33 @@ class ArxivService:
                 continue
 
             authors = [author.name for author in getattr(result, "authors", [])]
+            pdf_url = getattr(result, "pdf_url", None)
+            entry_id = getattr(result, "entry_id", None)
+            journal_ref = (getattr(result, "journal_ref", None) or "").strip()
             doc = DocumentCreate(
                 title=(getattr(result, "title", "") or "").strip() or "N/A",
                 authors=authors,
                 abstract=(getattr(result, "summary", "") or "").strip() or None,
                 publication_year=year_val,
-                journal_or_conference="arXiv",
+                journal_or_conference=journal_ref or "Preprint",
+                # arXiv exposes only subject categories (e.g. "cs.CV"), not
+                # paper-level author keywords. Keep keywords=None here and let
+                # metadata_extractor fill real keywords after PDF parsing.
                 keywords=None,
                 citation_count=None,
                 fields_of_study=list(getattr(result, "categories", []) or []) or None,
                 doi=getattr(result, "doi", None),
                 semantic_scholar_id=None,
-                source_url=getattr(result, "entry_id", None),
+                source_url=pdf_url or entry_id,
                 local_pdf_path=None,
                 file_hash=None,
                 ingestion_source=DocumentIngestionSource.ONLINE_IMPORT,
                 highLight=None,
+                quality_source=None,
+                quality_rank=None,
+                quality_label=None,
+                quality_score=0,
+                quality_labels=None,
             )
             documents.append(doc)
             if len(documents) >= limit:
