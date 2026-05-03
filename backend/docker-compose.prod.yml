@@ -67,6 +67,10 @@ services:
         "--no-autoupdate",
         "--protocol",
         "http2",
+        "--loglevel",
+        "info",
+        "--metrics",
+        "0.0.0.0:2000",
         "run",
         "--token",
         "${CF_TUNNEL_TOKEN:-}",
@@ -75,6 +79,10 @@ services:
       scholarmind_api:
         condition: service_healthy
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 128M
     logging:
       driver: json-file
       options:
@@ -152,7 +160,6 @@ services:
       - scholarmind_net
 
   doc_studio:
-    profiles: ["suite"]
     build:
       context: ./services/doc_studio
       dockerfile: Dockerfile
@@ -207,7 +214,6 @@ services:
       - scholarmind_net
 
   deep_research:
-    profiles: ["suite"]
     build:
       context: ./services/deep_research
       dockerfile: Dockerfile
