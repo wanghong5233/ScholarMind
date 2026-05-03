@@ -286,6 +286,14 @@ const truncateLiveText = (value?: string, maxLength = 88) => {
   return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text
 }
 
+const buildSelectionPreview = (value: string, maxLength = SELECTION_PREVIEW_CHARS) => {
+  const text = String(value || '').trim()
+  if (text.length <= maxLength) return text
+  const headLen = Math.max(120, Math.floor(maxLength * 0.62))
+  const tailLen = Math.max(80, maxLength - headLen - 20)
+  return `${text.slice(0, headLen).trimEnd()}\n...\n${text.slice(-tailLen).trimStart()}`
+}
+
 const normalizeLiveDeltaText = (value?: string) =>
   String(value || '')
     .replace(/\u0000/g, '')
@@ -325,6 +333,12 @@ type SelectionFragment = {
   text: string
   filePath?: string
   placeholder: string
+  startLine?: number
+  endLine?: number
+  startColumn?: number
+  endColumn?: number
+  totalChars?: number
+  isRangeReference?: boolean
 }
 
 type FileMentionFragment = {
@@ -368,6 +382,11 @@ const normalizeSelectionFragments = (input: unknown): SelectionFragment[] => {
       const endRaw = Number(item.end)
       const start = Number.isFinite(startRaw) ? Math.max(0, Math.floor(startRaw)) : 0
       const end = Number.isFinite(endRaw) ? Math.max(start, Math.floor(endRaw)) : Math.max(start, text.length)
+      const startLineRaw = Number(item.startLine ?? item.start_line)
+      const endLineRaw = Number(item.endLine ?? item.end_line)
+      const startColumnRaw = Number(item.startColumn ?? item.start_column)
+      const endColumnRaw = Number(item.endColumn ?? item.end_column)
+      const totalCharsRaw = Number(item.totalChars ?? item.total_chars)
       const placeholder = normalizeSelectionPlaceholder(item.placeholder, idx)
       const filePathRaw = item.filePath ?? item.file_path
       const filePath = typeof filePathRaw === 'string' && filePathRaw.trim() ? filePathRaw.trim() : undefined
@@ -380,6 +399,12 @@ const normalizeSelectionFragments = (input: unknown): SelectionFragment[] => {
         text,
         filePath,
         placeholder,
+        startLine: Number.isFinite(startLineRaw) ? Math.max(1, Math.floor(startLineRaw)) : undefined,
+        endLine: Number.isFinite(endLineRaw) ? Math.max(1, Math.floor(endLineRaw)) : undefined,
+        startColumn: Number.isFinite(startColumnRaw) ? Math.max(1, Math.floor(startColumnRaw)) : undefined,
+        endColumn: Number.isFinite(endColumnRaw) ? Math.max(1, Math.floor(endColumnRaw)) : undefined,
+        totalChars: Number.isFinite(totalCharsRaw) ? Math.max(0, Math.floor(totalCharsRaw)) : text.length,
+        isRangeReference: Boolean(item.isRangeReference ?? item.is_range_reference),
       } as SelectionFragment
     })
     .filter((item): item is SelectionFragment => Boolean(item))
@@ -683,8 +708,7 @@ type LiveTimelineEntry = {
 const MAX_CHAT_IMAGE_COUNT = 4
 const MAX_CHAT_IMAGE_FILE_SIZE = 6 * 1024 * 1024 // 6MB
 const MAX_SELECTION_COUNT = 8
-const MAX_SELECTION_TEXT_CHARS = 2000
-const MAX_SELECTION_TOTAL_CHARS = 8000
+const SELECTION_PREVIEW_CHARS = 360
 const MAX_FILE_MENTION_COUNT = 8
 const MAX_FILE_MENTION_CANDIDATES = 8
 
@@ -1616,11 +1640,7 @@ const LatexEditorPage = () => {
       message.warning('选区为空')
       return
     }
-    let text = rawText
-    if (rawText.length > MAX_SELECTION_TEXT_CHARS) {
-      text = rawText.slice(0, MAX_SELECTION_TEXT_CHARS)
-      message.info(`单段选区过长，已自动截断到 ${MAX_SELECTION_TEXT_CHARS} 字符`)
-    }
+    const text = buildSelectionPreview(rawText)
     
     // ???????????
     setSelections((prev) => {
@@ -1630,12 +1650,13 @@ const LatexEditorPage = () => {
       }
       const start = model.getOffsetAt(targetRange.getStartPosition())
       const end = model.getOffsetAt(targetRange.getEndPosition())
+      const startPosition = targetRange.getStartPosition()
+      const endPosition = targetRange.getEndPosition()
       const existed = prev.find(
         (item) =>
           item.filePath === snap.activeFilePath &&
           item.start === start &&
-          item.end === end &&
-          item.text === text,
+          item.end === end,
       )
       if (existed) {
         insertPlaceholderAtCursor(existed.placeholder)
@@ -1644,12 +1665,6 @@ const LatexEditorPage = () => {
         })
         return prev
       }
-      const currentTotalChars = prev.reduce((sum, item) => sum + item.text.length, 0)
-      if (currentTotalChars + text.length > MAX_SELECTION_TOTAL_CHARS) {
-        message.warning(`引用总长度不能超过 ${MAX_SELECTION_TOTAL_CHARS} 字符`)
-        return prev
-      }
-
       const placeholder = `@selection${prev.length + 1}`
       const snippet: SelectionFragment = {
         id: generateId(),
@@ -1658,6 +1673,12 @@ const LatexEditorPage = () => {
         text,
         filePath: snap.activeFilePath,
         placeholder,
+        startLine: startPosition.lineNumber,
+        endLine: endPosition.lineNumber,
+        startColumn: startPosition.column,
+        endColumn: endPosition.column,
+        totalChars: rawText.length,
+        isRangeReference: true,
       }
       insertPlaceholderAtCursor(placeholder)
       
@@ -2928,16 +2949,47 @@ const LatexEditorPage = () => {
   const rightPanelClosedRef = useRef(rightPanelClosed)
   rightPanelClosedRef.current = rightPanelClosed
 
+  const hasActiveEditorSelection = useCallback(() => {
+    const editor = editorRef.current
+    if (!editor) return false
+    const ranges = editor.getSelections?.() || []
+    return ranges.some((range: any) => {
+      if (!range) return false
+      if (typeof range.isEmpty === 'function') return !range.isEmpty()
+      return (
+        range.startLineNumber !== range.endLineNumber ||
+        range.startColumn !== range.endColumn
+      )
+    })
+  }, [])
+
+  const handleCtrlLShortcut = useCallback(() => {
+    // Cursor-like behavior:
+    // - If editor has a real selection, Ctrl+L links that range into the composer.
+    // - If there is no selection, Ctrl+L opens/focuses the chat composer.
+    // This avoids Monaco swallowing Ctrl+L while the right panel is closed.
+    if (hasActiveEditorSelection()) {
+      addSelectionSnippet()
+      return
+    }
+    if (rightPanelClosedRef.current) {
+      setRightPanelClosed(false)
+      setRightTab('chat')
+    } else {
+      setRightTab('chat')
+    }
+    requestAnimationFrame(() => {
+      promptInputDivRef.current?.focus()
+    })
+  }, [addSelectionSnippet, hasActiveEditorSelection])
+
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey)) return
       const key = e.key.toLowerCase()
       if (key === 'l') {
-        if (rightPanelClosedRef.current) {
-          e.preventDefault()
-          setRightPanelClosed(false)
-          setRightTab('chat')
-        }
+        e.preventDefault()
+        handleCtrlLShortcut()
       }
       if (key === 'b') {
         e.preventDefault()
@@ -2946,7 +2998,7 @@ const LatexEditorPage = () => {
     }
     document.addEventListener('keydown', handleGlobalKeyDown)
     return () => document.removeEventListener('keydown', handleGlobalKeyDown)
-  }, [])
+  }, [handleCtrlLShortcut])
 
   const handleLeftResizeStart = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
@@ -3393,12 +3445,12 @@ const LatexEditorPage = () => {
         editorInstance.addCommand(
           monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyL,
           () => {
-            addSelectionSnippet()
+            handleCtrlLShortcut()
           },
         )
       }
     },
-    [addSelectionSnippet],
+    [handleCtrlLShortcut],
   )
 
   const handleSave = useCallback(
@@ -5479,6 +5531,13 @@ const LatexEditorPage = () => {
             start: sel.start,
             end: sel.end,
             text: sel.text,
+            preview: sel.text,
+            total_chars: sel.totalChars ?? sel.text.length,
+            is_range_reference: sel.isRangeReference ?? true,
+            start_line: sel.startLine,
+            end_line: sel.endLine,
+            start_column: sel.startColumn,
+            end_column: sel.endColumn,
             file_path: filePath,
             placeholder,
           },
@@ -5489,6 +5548,12 @@ const LatexEditorPage = () => {
             text: sel.text,
             filePath,
             placeholder,
+            startLine: sel.startLine,
+            endLine: sel.endLine,
+            startColumn: sel.startColumn,
+            endColumn: sel.endColumn,
+            totalChars: sel.totalChars ?? sel.text.length,
+            isRangeReference: sel.isRangeReference ?? true,
           } as SelectionFragment,
         }
       })
@@ -5509,6 +5574,14 @@ const LatexEditorPage = () => {
           start: persistedSelections[0].start,
           end: persistedSelections[0].end,
           text: persistedSelections[0].text,
+          preview: persistedSelections[0].preview,
+          total_chars: persistedSelections[0].total_chars,
+          is_range_reference: persistedSelections[0].is_range_reference,
+          start_line: persistedSelections[0].start_line,
+          end_line: persistedSelections[0].end_line,
+          start_column: persistedSelections[0].start_column,
+          end_column: persistedSelections[0].end_column,
+          file_path: persistedSelections[0].file_path,
         }
         linkedSelections = effectiveSelectionPairs.map((item) => item.fragment)
       }

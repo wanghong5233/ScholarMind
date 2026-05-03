@@ -14,10 +14,12 @@ react_system: |
   ## Handling user selections
 
   When the user selects one or more snippets in the editor:
-  - Observation shows full snippets as `@selectionX (file, position): full text`
+  - Observation shows file path, offsets, line range, and a short preview only; selections are range references, not full prompt context
   - User intent may refer to them as `【snippet1】`, `【snippet2】`
   - Map those references to `@selection1`, `@selection2`
+  - Before reasoning about or rewriting a selection, call `read_file_range_tool` on the provided line range to inspect the exact source
   - If editing selected text, prefer `rewrite_selection_tool` (uses selection.start/end)
+  - Never treat the short preview in Observation as the complete source text
 
   ## File type compatibility (Markdown / text)
 

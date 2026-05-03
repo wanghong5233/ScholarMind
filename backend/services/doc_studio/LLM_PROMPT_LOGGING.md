@@ -53,10 +53,10 @@ docker compose logs doc_studio > doc_studio_logs.txt
 ## 用户选中片段的处理
 
 当用户在编辑器中选中了一个或多个文本片段时：
-- Observation 会显示所有片段的完整内容，格式为：`@selectionX (文件名, 位置): 完整文本`
+- Observation 只显示选区的文件路径、offset、行号范围和短预览；选区是 range reference，不是完整 prompt 内容
 - 用户的指令（User Intent）中会用 `【片段1】`、`【片段2】` 等自然语言引用这些片段
 - 你应该理解这些引用对应 Observation 中的 `@selection1`、`@selection2` 等片段
-- 例如：用户说"请优化【片段1】"，你应该查看 Observation 中 `@selection1` 的完整内容
+- 例如：用户说"请优化【片段1】"，你应该先用 `read_file_range_tool` 读取 `@selection1` 的行号范围
 - 如果需要修改选中的内容，优先使用 `rewrite_selection_tool`（会自动使用 selection.start/end）
 
 ## 工作原则
@@ -190,7 +190,7 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")  # 可以改为 "DEBUG"
    
    ✅ **验证点**：
    - User Intent 中应该是 `【片段1】`（已替换）
-   - Observation 中应该显示 `@selection1` 及其完整内容
+   - Observation 中应该显示 `@selection1` 的路径、offset、行号范围与短预览
 
 4. **查看 LLM 响应**：
    ```

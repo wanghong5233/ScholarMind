@@ -1201,7 +1201,11 @@ class LaTeXEditAgent(BaseAgent):
         if context:
             selections = context.get("selections")
             if isinstance(selections, list) and selections:
-                parts.append(f"用户选区（共 {len(selections)} 段）：")
+                parts.append(
+                    f"用户引用了 {len(selections)} 段选区。选区按 Cursor 式 range reference 处理："
+                    "下面只给范围与短预览，不代表完整内容；如果问题依赖完整选区，"
+                    "请明确说明需要在 Agent 模式下按行读取完整范围后再处理。"
+                )
                 for idx, sel in enumerate(selections[:8]):
                     if not isinstance(sel, dict):
                         continue
@@ -1209,17 +1213,34 @@ class LaTeXEditAgent(BaseAgent):
                     sel_file = str(sel.get("file_path") or context.get("file_path") or "")
                     start = sel.get("start")
                     end = sel.get("end")
-                    sel_text = self._truncate_text(str(sel.get("text") or ""), max_len=900)
-                    if not sel_text:
-                        continue
-                    parts.append(
-                        f"{placeholder} ({sel_file}, 位置{start}:{end})：\n{sel_text}"
+                    start_line = sel.get("start_line")
+                    end_line = sel.get("end_line")
+                    total_chars = sel.get("total_chars") or len(str(sel.get("text") or ""))
+                    preview = self._truncate_text(
+                        str(sel.get("preview") or sel.get("text") or ""),
+                        max_len=260,
                     )
+                    line_hint = (
+                        f", 行 {start_line}-{end_line}"
+                        if start_line and end_line
+                        else ""
+                    )
+                    parts.append(
+                        f"{placeholder} ({sel_file}, offset {start}:{end}{line_hint}, length={total_chars})"
+                    )
+                    if preview:
+                        parts.append(f"预览：\n{preview}")
             else:
                 selection = context.get("selection") or {}
-                selection_text = self._truncate_text(str(selection.get("text") or ""), max_len=1600)
-                if selection_text:
-                    parts.append(f"用户选区内容：\n{selection_text}")
+                selection_preview = self._truncate_text(
+                    str(selection.get("preview") or selection.get("text") or ""),
+                    max_len=260,
+                )
+                if selection_preview:
+                    parts.append(
+                        "用户选区（短预览，非完整内容）：\n"
+                        f"{selection_preview}"
+                    )
 
             active_file = context.get("file_path")
             if active_file:
@@ -2200,19 +2221,44 @@ class LaTeXEditAgent(BaseAgent):
             selections = context.get("selections")
             has_selections = bool(selections and isinstance(selections, list) and len(selections) > 0)
             if has_selections:
-                obs_parts.append(f"\n用户选中了 {len(selections)} 个片段：")
+                obs_parts.append(
+                    f"\n用户选中了 {len(selections)} 个片段。"
+                    "Selection Contract: 选区是文件范围引用，不是完整 prompt 内容；"
+                    "若需要理解、引用或改写选区，先用 read_file_range_tool 按 start_line/end_line 读取原文。"
+                )
                 for sel in selections:
-                    snippet = sel.get("text", "")
+                    preview = str(sel.get("preview") or sel.get("text") or "")
                     start = sel.get("start")
                     end = sel.get("end")
+                    start_line = sel.get("start_line")
+                    end_line = sel.get("end_line")
+                    start_column = sel.get("start_column")
+                    end_column = sel.get("end_column")
+                    total_chars = sel.get("total_chars") or len(preview)
                     sel_file = sel.get("file_path", file_path)
                     placeholder = sel.get("placeholder", f"@selection{sel.get('id', '')}")
-                    
-                    # 显示片段信息：占位符、文件、位置、内容预览
-                    obs_parts.append(
-                        f"\n{placeholder} ({sel_file}, 位置{start}:{end}, {len(snippet)}字符):\n"
-                        f"```\n{snippet[:500]}{'...' if len(snippet) > 500 else ''}\n```"
+
+                    line_range = (
+                        f"lines={start_line}-{end_line}"
+                        if start_line and end_line
+                        else "lines=unknown"
                     )
+                    col_range = (
+                        f", cols={start_column}-{end_column}"
+                        if start_column and end_column
+                        else ""
+                    )
+                    obs_parts.append(
+                        f"\n{placeholder} ({sel_file}, offset={start}:{end}, "
+                        f"{line_range}{col_range}, length={total_chars} chars)"
+                    )
+                    if preview:
+                        obs_parts.append(
+                            "Preview only:\n```text\n"
+                            + preview[:260]
+                            + ("..." if len(preview) > 260 else "")
+                            + "\n```"
+                        )
             file_mentions = context.get("file_mentions")
             has_file_mentions = bool(isinstance(file_mentions, list) and file_mentions)
             if has_file_mentions:
@@ -2277,11 +2323,15 @@ class LaTeXEditAgent(BaseAgent):
                 # 向后兼容：处理单个 selection
                 if context.get("selection") and context["selection"].get("text"):
                     selection = context["selection"]
-                    snippet = selection["text"]
+                    snippet = selection.get("preview") or selection["text"]
                     start = selection.get("start")
                     end = selection.get("end")
+                    start_line = selection.get("start_line")
+                    end_line = selection.get("end_line")
                     obs_parts.append(
-                        f"Selection [{start}:{end}] (len={len(snippet)}): {snippet[:400]}{'...' if len(snippet) > 400 else ''}"
+                        f"Selection [{start}:{end}]"
+                        f"{f' lines={start_line}-{end_line}' if start_line and end_line else ''} "
+                        f"(preview only, len={len(snippet)}): {snippet[:220]}{'...' if len(snippet) > 220 else ''}"
                     )
                 else:
                     safe_context = {
@@ -3073,10 +3123,12 @@ class LaTeXEditAgent(BaseAgent):
     ) -> Dict[str, Any]:
         """构建用于任务计划的上下文信息。"""
         selection_text = ""
+        selection_total_chars = None
         file_mentions_count = 0
         if context_payload:
             selection = context_payload.get("selection") or {}
-            selection_text = selection.get("text") or ""
+            selection_text = selection.get("text") or selection.get("preview") or ""
+            selection_total_chars = selection.get("total_chars")
             file_mentions = context_payload.get("file_mentions")
             if isinstance(file_mentions, list):
                 file_mentions_count = len(file_mentions)
@@ -3087,7 +3139,11 @@ class LaTeXEditAgent(BaseAgent):
         return {
             "has_selection": bool(selection_text),
             "has_file_mentions": file_mentions_count > 0,
-            "selection_length": len(selection_text),
+            "selection_length": (
+                int(selection_total_chars)
+                if isinstance(selection_total_chars, int)
+                else len(selection_text)
+            ),
             "has_kb": bool(state.knowledge_base_id),
             "workspace_file_count": len(state.workspace_files),
             "intent_confidence": state.intent_confidence,
