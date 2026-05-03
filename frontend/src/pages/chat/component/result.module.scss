@@ -8,8 +8,25 @@
   .chat-message-result__md {
     :global {
       .refrence-token {
+        display: inline-block;
+        min-width: 20px;
+        padding: 0 6px;
+        margin: 0 2px;
+        line-height: 18px;
+        font-size: 12px;
+        font-weight: 600;
+        text-align: center;
         color: var(--ant-color-primary);
-        font-weight: bold;
+        background-color: rgba(22, 119, 255, 0.08);
+        border-radius: 10px;
+        cursor: pointer;
+        user-select: none;
+        transition: background-color 0.15s ease, color 0.15s ease;
+
+        &:hover {
+          background-color: var(--ant-color-primary);
+          color: #fff;
+        }
       }
     }
   }

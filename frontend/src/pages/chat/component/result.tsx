@@ -48,13 +48,12 @@ export function Result(props: {
     ]
   }, [item.content])
 
-  const handleClick = useCallback(
-    (e: React.MouseEvent<HTMLDivElement>) => {
-      const target = e.target as HTMLElement
-      const index = target.getAttribute('data-refrence-index')
-      if (index) {
-        onRefrence?.(Number(index))
-      }
+  // 引用 chip 的点击与 hover 交给 Markdown 组件统一处理（onCitationClick），
+  // 这里仅保留 onClick 透传以兼容容器层面的事件冒泡需求；不再做事件委托
+  // 解析 data-refrence-index——chip 现在是真正的 React 节点。
+  const handleCitationClick = useCallback(
+    (index: number) => {
+      onRefrence?.(index)
     },
     [onRefrence],
   )
@@ -123,7 +122,8 @@ export function Result(props: {
               styles['chat-message-result__md'],
             )}
             value={item.think}
-            onClick={handleClick}
+            references={item.reference}
+            onCitationClick={handleCitationClick}
           />
         )
       ) : null}
@@ -137,7 +137,8 @@ export function Result(props: {
           <Markdown
             className={styles['chat-message-result__md']}
             value={item.content}
-            onClick={handleClick}
+            references={item.reference}
+            onCitationClick={handleCitationClick}
           />
         )
       ) : null}

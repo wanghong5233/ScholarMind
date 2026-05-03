@@ -194,7 +194,7 @@ function AssistantMessage(props: {
       <div className={styles['chat-message-item__sender']}>
         <Avatar className={styles['avatar']} src={IconAvatar} />
 
-        <div className={styles['name']}>Doc Copilet</div>
+        <div className={styles['name']}>ScholarMind</div>
       </div>
 
       <div className={styles['chat-message-item__content']}>

@@ -119,7 +119,15 @@ class ChatCompareOrchestrator:
         except Exception:
             raise HTTPException(status_code=502, detail="Compare generation failed")
 
+        # 引用契约最终化：右侧引文面板只展示真正在对比表格中被 [N] 引用的来源，
+        # 同时把 N 重写为紧凑的 1..K 编号，与 chat_ask 的 UX 完全一致。
         citations = self.rag.build_citations(chunks)
+        try:
+            content, citations, _finalize_meta = (
+                self.chat_service.finalize_answer_with_citations(content or "", citations)
+            )
+        except Exception:
+            pass
         usage = self.chat_service.get_last_usage() or {
             "prompt_tokens": 0,
             "completion_tokens": 0,

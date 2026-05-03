@@ -1,10 +1,173 @@
 from __future__ import annotations
 
-from typing import Iterable, List, Tuple, Dict, Any
+import re
+from typing import Iterable, List, Tuple, Dict, Any, Set
 from core.config import settings
 from service.core.ingestion.constants import is_multimodal_metadata
 from service.core.ingestion.interfaces import ParsedBlock, Chunker
 from utils.get_logger import log
+
+
+# ---- chunk 质量过滤（learned from LlamaIndex / RAGFlow / Anthropic Contextual Retrieval）----
+#
+# 核心原则：垃圾进、垃圾出。在入库前掐断低信息密度的 chunk，避免：
+# (1) 召回阶段把垃圾块挤掉真正相关的内容；
+# (2) 右侧引文面板出现「只有 URL/标题」这种没有阅读价值的卡片；
+# (3) LLM 上下文被噪声稀释。
+#
+# 三层过滤：结构性黑名单 → 内容信息密度 → 孤立标题归并。
+
+_URL_RE = re.compile(r"https?://\S+")
+_PURE_URL_RE = re.compile(r"^\s*https?://\S+\s*$")
+_HEADING_TYPES: Set[str] = {"title", "heading", "header", "h1", "h2", "h3", "h4", "h5", "h6"}
+_TOKEN_RE = re.compile(r"[\w\u4e00-\u9fff]{2,}")
+
+
+def _substantive_word_count(text: str) -> int:
+    """去掉 URL / Markdown 标题前缀后统计「像词」的 token 数，用于过滤伪正文块。"""
+    stripped = _URL_RE.sub(" ", (text or "").strip())
+    stripped = re.sub(r"^#{1,6}\s+", "", stripped, flags=re.MULTILINE)
+    stripped = re.sub(r"[*_`]+", " ", stripped)
+    return len(_TOKEN_RE.findall(stripped.lower()))
+
+
+def _canonical_title_key(text: str) -> str:
+    t = (text or "").strip().lower()
+    t = re.sub(r"^#{1,6}\s+", "", t)
+    t = re.sub(r"[*_`]+", "", t)
+    t = re.sub(r"\s+", " ", t)
+    return t.strip(" .:;，。、")
+
+
+def _drop_logical_types() -> Set[str]:
+    raw = str(getattr(settings, "SM_CHUNK_DROP_LOGICAL_TYPES", "") or "")
+    items = {item.strip().lower() for item in raw.split(",") if item.strip()}
+    return items
+
+
+def _block_type(block: ParsedBlock) -> str:
+    md = block.metadata or {}
+    return str(md.get("logical_type") or md.get("element_type") or "").strip().lower()
+
+
+def _is_low_information_text(text: str) -> bool:
+    """信息密度过低的文本：纯 URL、过短、字符过于重复、纯标点。"""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return True
+
+    min_chars = max(int(getattr(settings, "SM_CHUNK_MIN_INFORMATION_CHARS", 30) or 30), 0)
+    if len(cleaned) < min_chars:
+        return True
+
+    if bool(getattr(settings, "SM_CHUNK_DROP_PURE_URL", True)):
+        if _PURE_URL_RE.match(cleaned):
+            return True
+        url_ratio = float(getattr(settings, "SM_CHUNK_URL_CHAR_RATIO_MAX", 0.65) or 0.65)
+        url_ratio = min(max(url_ratio, 0.1), 0.99)
+        url_chars = sum(len(m.group(0)) for m in _URL_RE.finditer(cleaned))
+        if url_chars >= url_ratio * max(len(cleaned), 1):
+            return True
+
+    min_words = max(int(getattr(settings, "SM_CHUNK_MIN_SUBSTANTIVE_WORDS", 5) or 0), 0)
+    if min_words > 0 and len(cleaned) <= int(
+        getattr(settings, "SM_CHUNK_SUBSTANTIVE_CHECK_MAX_CHARS", 8000) or 8000
+    ):
+        if _substantive_word_count(cleaned) < min_words:
+            return True
+
+    min_unique = max(int(getattr(settings, "SM_CHUNK_MIN_UNIQUE_CHARS", 20) or 20), 0)
+    if len(set(cleaned)) < min_unique:
+        return True
+
+    # 字母 + 数字占比 < 30% 视为纯符号 / 公式 / 噪声
+    alnum = sum(1 for c in cleaned if c.isalnum())
+    if len(cleaned) > 0 and alnum / len(cleaned) < 0.3:
+        return True
+
+    return False
+
+
+def _should_index_block(block: ParsedBlock, *, drop_set: Set[str]) -> Tuple[bool, str]:
+    """判断单个 block 是否应该进入 chunk 索引。
+
+    Returns:
+        (keep, reason)；keep=False 时 reason 用于日志统计。
+    """
+    md = block.metadata or {}
+
+    # 多模态块（图/表）由 indexer 单独处理，chunker 一律放行
+    if is_multimodal_metadata(md):
+        return True, "multimodal"
+
+    btype = _block_type(block)
+    if btype in drop_set:
+        return False, f"blacklist:{btype}"
+
+    # structure_path 也可能直接指向 references 节
+    spath = str(md.get("structure_path") or "").lower()
+    if "references" in spath or "bibliography" in spath:
+        return False, "blacklist:structure_path"
+
+    text = (block.text or "").strip()
+
+    if _is_low_information_text(text):
+        return False, "low_information"
+
+    # 孤立的短标题：结构信息已写入下游 chunk 的 structure_title 元数据，
+    # 标题独立成 chunk 既无阅读价值又会占召回名额。
+    if (
+        bool(getattr(settings, "SM_CHUNK_DROP_ISOLATED_HEADING", True))
+        and btype in _HEADING_TYPES
+        and len(text) < 120
+    ):
+        return False, f"isolated_heading:{btype}"
+
+    return True, "keep"
+
+
+def _filter_blocks(blocks: List[ParsedBlock]) -> Tuple[List[ParsedBlock], Dict[str, int]]:
+    """应用 chunk 质量过滤，返回 (kept_blocks, dropped_stats)。"""
+    if not bool(getattr(settings, "SM_CHUNK_QUALITY_FILTER_ENABLED", True)):
+        return blocks, {}
+    drop_set = _drop_logical_types()
+    kept: List[ParsedBlock] = []
+    dropped_stats: Dict[str, int] = {}
+    for blk in blocks:
+        keep, reason = _should_index_block(blk, drop_set=drop_set)
+        if keep:
+            kept.append(blk)
+        else:
+            dropped_stats[reason] = dropped_stats.get(reason, 0) + 1
+    return kept, dropped_stats
+
+
+def post_filter_chunks_for_embedding(
+    chunks: List[ParsedBlock],
+    *,
+    document_title: str | None,
+) -> Tuple[List[ParsedBlock], Dict[str, int]]:
+    """嵌入前的最后一道门：再审一次结构与信息密度；去掉与正文标题重复的复述块。"""
+    if not bool(getattr(settings, "SM_CHUNK_POST_FILTER_ENABLED", True)):
+        return chunks, {}
+
+    drop_set = _drop_logical_types()
+    title_key = _canonical_title_key(document_title) if document_title else ""
+    kept: List[ParsedBlock] = []
+    stats: Dict[str, int] = {}
+    for c in chunks or []:
+        ok, reason = _should_index_block(c, drop_set=drop_set)
+        if not ok:
+            bucket = f"post:{reason}"
+            stats[bucket] = stats.get(bucket, 0) + 1
+            continue
+        if title_key and len(title_key) >= 12:
+            body = _canonical_title_key(c.text or "")
+            if body and body == title_key:
+                stats["post:title_duplicate_body"] = stats.get("post:title_duplicate_body", 0) + 1
+                continue
+        kept.append(c)
+    return kept, stats
 
 
 def _normalize_page_range(value: Any, fallback: Any = None) -> List[int]:
@@ -171,6 +334,17 @@ class RecursiveCharacterChunker(Chunker):
     def chunk(self, *, blocks: Iterable[ParsedBlock]) -> List[ParsedBlock]:
         # 结构优先：先按结构块迭代，内部再做长度切分
         block_list: List[ParsedBlock] = [b for b in blocks if (b.text or "").strip()]
+        # 入库前的质量门：黑名单类型（references / footer / author_bio）、
+        # 低信息密度（纯 URL / 过短 / 重复字符）、孤立短标题统统过滤。
+        block_list, dropped_stats = _filter_blocks(block_list)
+        if dropped_stats:
+            try:
+                log.info(
+                    "RecursiveCharacterChunker.quality_filter dropped=%s",
+                    dropped_stats,
+                )
+            except Exception:
+                pass
         if getattr(settings, "SM_SEMANTIC_CHUNKING_ENABLED", False):
             # 从配置读取 SOTA 参数
             target = getattr(settings, "SM_CHUNK_TARGET_CHARS", 800)
@@ -464,6 +638,22 @@ class SemanticAwareChunker(Chunker):
         valid_blocks = [b for b in blocks if (b.text or "").strip()]
         if not valid_blocks:
             return []
+        # 关键质量门：LlamaParse / Unstructured / MinerU 输出的 layout blocks 里
+        # 会混入 references / heading / 纯 URL / 作者简介等无信息块；如果直接保留
+        # 为 chunk，会出现「右侧引文卡片只有一行 URL 或一个标题」的脏数据。
+        # 这里在 hybrid layout-aware 路径入口统一过滤，与 RecursiveCharacterChunker
+        # 入口的过滤策略保持一致。
+        valid_blocks, dropped_stats = _filter_blocks(valid_blocks)
+        if dropped_stats:
+            try:
+                log.info(
+                    "SemanticAwareChunker.hybrid_layout.quality_filter dropped=%s",
+                    dropped_stats,
+                )
+            except Exception:
+                pass
+        if not valid_blocks:
+            return []
 
         final_results: List[ParsedBlock] = []
         preserved_blocks = 0
@@ -575,7 +765,18 @@ class SemanticAwareChunker(Chunker):
             block_level = self._chunk_block_level(_blocks)
             return _merge_short_chunks(block_level)
         
-        # 原有逻辑：句子级语义分块（适用于非预合并场景）
+        # 非 layout-aware 路径：句子级语义分块。同样要在入口质量过滤，
+        # 否则 PyMuPDF / Unstructured 兜底输出的 references / footer 块
+        # 会绕过 _chunk_block_level 的过滤直接进入索引。
+        _blocks, dropped_stats = _filter_blocks(_blocks)
+        if dropped_stats:
+            try:
+                log.info(
+                    "SemanticAwareChunker.sentence.quality_filter dropped=%s",
+                    dropped_stats,
+                )
+            except Exception:
+                pass
         for b in _blocks:
             text = (b.text or "").strip()
             # Chunker 不负责过滤多模态块，只负责切分

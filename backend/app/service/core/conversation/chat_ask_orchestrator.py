@@ -840,11 +840,33 @@ class ChatAskOrchestrator:
                         "answer": "",
                     }
                     try:
-                        full_answer = "".join(answer_accum)
+                        raw_answer = "".join(answer_accum)
+                        # 工业级 RAG 引用契约的最终化（参考 Perplexity / NotebookLM）：
+                        #   1) 归一化 + 越界过滤 + 元注释剥离；
+                        #   2) 提取真正被 [N] 引用过的 chunk，按出现顺序重新编号；
+                        #   3) 裁剪 citations 数组——右侧引文面板只展示真正支撑回答
+                        #      的来源，避免「召回了但没用上」的低质量 chunk（纯 URL、
+                        #      纯标题、reference 节）污染面板。
+                        # 兜底：LLM 一个 [N] 都没用 → 保留全部 citations，与
+                        # 截图里那种「只有 URL/标题」的引文一样退化但不消失，
+                        # 至少让用户感知系统检索到了内容。
+                        try:
+                            full_answer, citations_tail, finalize_meta = (
+                                self.chat_service.finalize_answer_with_citations(
+                                    raw_answer, citations_tail
+                                )
+                            )
+                        except Exception:
+                            full_answer = raw_answer
+                            finalize_meta = {"used": 0, "total": len(citations_tail), "fallback_all": True}
                         completion_payload["answer"] = full_answer
+                        completion_payload["citations"] = citations_tail
+                        debug_tail["citation_finalize"] = finalize_meta
                         logger.info(
                             f"[STREAM_BEFORE_SAVE] session={session_id} answer_parts={len(answer_accum)} "
-                            f"full_answer_len={len(full_answer)} question_len={len(question)}"
+                            f"full_answer_len={len(full_answer)} question_len={len(question)} "
+                            f"citations_used={finalize_meta.get('used')} citations_total={finalize_meta.get('total')} "
+                            f"citations_dropped={finalize_meta.get('dropped', 0)}"
                         )
                         if persist_history:
                             self._record_memories_async(
@@ -1124,7 +1146,14 @@ class ChatAskOrchestrator:
                 pass
             raise HTTPException(status_code=502, detail="LLM generation failed")
 
+        # 引用契约最终化：与流式分支保持一致——重编号、裁剪只剩真正引用过的来源。
         citations = self.rag.build_citations(chunks)
+        try:
+            content, citations, _finalize_meta = (
+                self.chat_service.finalize_answer_with_citations(content or "", citations)
+            )
+        except Exception:
+            pass
         usage = self.chat_service.get_last_usage() or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         retrieval_debug = self.retriever.get_last_retrieval_debug() or {}
         history_builder_debug = self.chat_service.get_last_history_debug() or {}

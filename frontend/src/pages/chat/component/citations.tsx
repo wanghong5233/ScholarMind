@@ -100,7 +100,7 @@ export default function Citations(props: { list?: API.Reference[] }) {
   const [read, setRead] = useState<API.Reference | null>(null)
   const user = useSnapshot(userState)
 
-  const metaDetails: MetaDetail[] = useMemo(() => {
+  const debugDetails: MetaDetail[] = useMemo(() => {
     if (!read) return []
     
     const pageText = read.page_range?.length
@@ -151,10 +151,7 @@ export default function Citations(props: { list?: API.Reference[] }) {
       : '-'
 
     return [
-      { label: 'DOI', value: doiText },
-      { label: '所属章节', value: sectionText },
       { label: '结构路径', value: structurePathText },
-      { label: '内容类型', value: read.logical_type || read.element_type || '-' },
       { label: '页码范围', value: pageText },
       { label: '边界框信息', value: bboxText },
       { label: '分块信息', value: chunkText },
@@ -165,7 +162,44 @@ export default function Citations(props: { list?: API.Reference[] }) {
       { label: '解析引擎', value: parserText },
       { label: '文档 ID', value: read.document_id ?? '-' },
       { label: '知识库 ID', value: read.knowledge_base_id ?? '-' },
+      { label: 'DOI', value: doiText },
+      { label: '所属章节', value: sectionText },
+      { label: '内容类型', value: read.logical_type || read.element_type || '-' },
     ]
+  }, [read])
+
+  const sourceSummary = useMemo(() => {
+    if (!read) return null
+
+    const title =
+      read.document_title ||
+      read.document_name ||
+      `文档 ${read.document_id ?? '-'}`
+    const page = read.page_range?.length
+      ? `第 ${read.page_range.join(' ~ ')} 页`
+      : typeof read.page === 'number'
+      ? `第 ${read.page} 页`
+      : read.positions?.[0]?.[0]
+      ? `第 ${read.positions[0][0]} 页`
+      : ''
+    const rawSection = String(read.structure_title || '').trim()
+    const normalizedSection = rawSection.toLowerCase()
+    const section =
+      rawSection && !['text', 'paragraph', 'section'].includes(normalizedSection)
+        ? rawSection
+        : ''
+    const contentType =
+      read.logical_type || read.element_type
+        ? String(read.logical_type || read.element_type)
+        : ''
+
+    return {
+      title,
+      doi: read.doi || '',
+      page,
+      section,
+      contentType,
+    }
   }, [read])
 
   const locationDescription = useMemo(() => {
@@ -275,10 +309,6 @@ export default function Citations(props: { list?: API.Reference[] }) {
     if (areaLabel) {
       parts.push(areaLabel)
     }
-    if (typeof yCoord === 'number') {
-      parts.push(`y≈${Math.round(yCoord)}`)
-    }
-
     if (!parts.length) {
       return null
     }
@@ -346,26 +376,30 @@ export default function Citations(props: { list?: API.Reference[] }) {
       >
         {read ? (
           <div className={styles['citation-detail']}>
-            <div className={styles['citation-detail__meta']}>
-              <div className={styles['meta-item']}>
-                <div className={styles['meta-label']}>论文标题</div>
-                <div className={styles['meta-value']}>
-                  {read.document_name || `文档 ${read.document_id ?? '-'}`}
+            {sourceSummary ? (
+              <div className={styles['citation-detail__summary']}>
+                <div className={styles['summary-main']}>
+                  <div className={styles['summary-kicker']}>回答引用的原文证据</div>
+                  <div className={styles['summary-title']}>{sourceSummary.title}</div>
+                  {sourceSummary.doi ? (
+                    <div className={styles['summary-doi']}>DOI：{sourceSummary.doi}</div>
+                  ) : null}
+                </div>
+                <div className={styles['summary-tags']}>
+                  {sourceSummary.page ? (
+                    <span className={styles['summary-tag']}>{sourceSummary.page}</span>
+                  ) : null}
+                  {sourceSummary.section ? (
+                    <span className={styles['summary-tag']}>章节：{sourceSummary.section}</span>
+                  ) : null}
+                  {sourceSummary.contentType ? (
+                    <span className={styles['summary-tag']}>类型：{sourceSummary.contentType}</span>
+                  ) : null}
                 </div>
               </div>
-              {metaDetails.map((meta) => (
-                <div key={meta.label} className={styles['meta-item']}>
-                  <div className={styles['meta-label']}>{meta.label}</div>
-                  <div className={styles['meta-value']}>
-                    {meta.value}
-                    {meta.hint && (
-                      <div className={styles['meta-hint']}>{meta.hint}</div>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
+            ) : null}
             <div className={styles['citation-detail__content']}>
+              <div className={styles['citation-detail__content-title']}>引用原文</div>
               <Markdown
                 value={
                   read.source_text ||
@@ -398,12 +432,28 @@ export default function Citations(props: { list?: API.Reference[] }) {
                   </Button>
                   {(!read.structure_path || !read.structure_title) && (
                     <div className={styles['citation-detail__hint']}>
-                      💡 提示：该引用缺少结构化元数据（章节、路径等），可能是旧版本解析的文档。建议在知识库中重新解析此文档以获得完整的定位信息。
+                      该引用缺少章节或版面定位信息，可能来自旧版本解析结果。重新解析文档可获得更完整的定位。
                     </div>
                   )}
                 </div>
               </div>
             </div>
+            <details className={styles['citation-detail__debug']}>
+              <summary>高级信息（开发调试）</summary>
+              <div className={styles['citation-detail__meta']}>
+                {debugDetails.map((meta) => (
+                  <div key={meta.label} className={styles['meta-item']}>
+                    <div className={styles['meta-label']}>{meta.label}</div>
+                    <div className={styles['meta-value']}>
+                      {meta.value}
+                      {meta.hint && (
+                        <div className={styles['meta-hint']}>{meta.hint}</div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </details>
           </div>
         ) : null}
       </Drawer>

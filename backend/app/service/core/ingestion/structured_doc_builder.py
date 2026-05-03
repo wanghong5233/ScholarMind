@@ -457,6 +457,12 @@ class StructuredDocumentBuilder:
 
     def _fallback_document(self, mineru_blocks: List[ParsedBlock]) -> StructuredDocument:
         fallback_blocks = self._build_orphan_blocks(mineru_blocks, used_indices=set())
+        # 关键：LlamaParse / PyMuPDF 等「仅 layout blocks、无 TEI」路径永远不经过
+        # Grobid enrich，因此拿不到 back.references 结构；`_label_reference_blocks`
+        # 也不会执行，参考文献常以普通 paragraph/de page 整块出现。
+        # 若不在这里补一刀，纯 URL、[1] 开头条目、Markdown 单行标题会与正文
+        # 同等入库，向量检索就会把「只占位、无信息量」的垃圾块与用户问题对上。
+        fallback_blocks = self._annotate_fallback_references_after_orphans(fallback_blocks)
         return StructuredDocument(blocks=fallback_blocks)
 
     def _build_orphan_blocks(self, mineru_blocks: List[ParsedBlock], used_indices: Set[int]) -> List[StructuredBlock]:
@@ -470,6 +476,11 @@ class StructuredDocumentBuilder:
             meta = dict(block.metadata or {})
             logical = str(meta.get("element_type") or "unclassified")
             normalized_text = text.lower()
+            # LlamaParse 常把 Markdown 标题行写成普通段落；归为 heading 才能让
+            # chunker 的「孤立短标题丢弃」语义生效，避免 「# Paper Title」单占一张卡。
+            if re.match(r"^\s{0,3}#{1,6}\s+\S", text):
+                logical = "heading"
+                meta.setdefault("structure_title", re.sub(r"^\s{0,3}#{1,6}\s+", "", text).strip()[:500])
             if logical == "paragraph":
                 if self._looks_like_index_terms(normalized_text):
                     logical = "keywords"
@@ -489,6 +500,9 @@ class StructuredDocumentBuilder:
                         meta.setdefault("structure_title", label)
                     else:
                         meta.setdefault("structure_title", "Figure")
+            # 单行「仅 URL / DOI / arXiv 标识」视为参考文献占位行（无检索价值）
+            if logical == "paragraph" and self._looks_like_standalone_link_catalog_line(text):
+                logical = "reference_entry"
             original_element = meta.get("element_type")
             if original_element != logical:
                 meta.setdefault("original_element_type", original_element)
@@ -505,6 +519,7 @@ class StructuredDocumentBuilder:
             if page_int is None:
                 page_int = 1
             bbox = meta.get("bbox")
+
             orphan_blocks.append(
                 StructuredBlock(
                     block_id=path,
@@ -524,6 +539,51 @@ class StructuredDocumentBuilder:
                 )
             )
         return orphan_blocks
+
+    def _annotate_fallback_references_after_orphans(self, blocks: List[StructuredBlock]) -> List[StructuredBlock]:
+        """无 TEI 时的参考文献顺序标注：检测到 References/Bibliography 标题后，
+        将后续条目标为 reference_entry，方便 chunker 黑名单统一丢弃。"""
+        ref_mode = False
+        for blk in blocks:
+            raw = (blk.text or "").strip()
+            line0 = raw.split("\n", 1)[0].strip()
+            stripped = (
+                line0.casefold().lstrip("#").lstrip("*").strip().strip("*").strip()
+            )
+
+            if blk.logical_type in {"references", "reference_entry"}:
+                ref_mode = True
+                continue
+            if blk.logical_type in {"title", "authors", "abstract", "keywords"}:
+                continue
+
+            if not ref_mode:
+                if stripped in {"references", "bibliography", "reference"} or stripped.startswith(
+                    ("references:", "reference list", "bibliography:")
+                ):
+                    blk.logical_type = "references"
+                    blk.metadata.setdefault("structure_title", "References")
+                    ref_mode = True
+                    continue
+
+            if ref_mode and self._looks_like_reference_entry(raw):
+                blk.logical_type = "reference_entry"
+                blk.metadata.setdefault("structure_title", "Reference")
+        return blocks
+
+    def _looks_like_standalone_link_catalog_line(self, text: str) -> bool:
+        """整块内容只有一个「链接条目」且无其它论述；常见于参考文献单列 URL。"""
+        line = text.strip().split("\n")[0].strip()
+        if not line or "\n" in text.strip():
+            return False
+        if bool(re.fullmatch(r"https?://\S+", line, flags=re.IGNORECASE)):
+            return True
+        if bool(re.fullmatch(r"10\.\d{4,9}/\S+", line)):
+            return True
+        low = line.lower()
+        if bool(re.fullmatch(r"arxiv:\d{4}\.\d{4,5}(v\d+)?", low)):
+            return True
+        return False
 
     def _extract_special_metadata(self, mineru_blocks: List[ParsedBlock], indices: List[int]) -> Dict[str, Any]:
         if not indices:
@@ -784,6 +844,13 @@ class StructuredDocumentBuilder:
         if not line:
             return False
         if re.match(r"^\s*(\[\d+\]|\d+\.)", line):
+            return True
+        first = line.split("\n")[0].strip()
+        if bool(re.fullmatch(r"https?://\S+", first, flags=re.IGNORECASE)):
+            return True
+        if bool(re.fullmatch(r"10\.\d{4,9}/\S+", first)):
+            return True
+        if bool(re.fullmatch(r"arxiv:\d{4}\.\d{4,5}(v\d+)?", first.lower())):
             return True
         if re.match(r"^[A-Z][A-Za-z\-\s']+,\s", line):
             return bool(re.search(r"\d{4}", line))

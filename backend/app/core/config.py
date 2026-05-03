@@ -220,6 +220,27 @@ class Settings(BaseSettings):
     SM_LAYOUT_AWARE_CHUNKING_ENABLED: bool = True
     SM_LAYOUT_SEMANTIC_SPLIT_ENABLED: bool = True
     SM_LAYOUT_SEMANTIC_MIN_CHARS: int = 1800
+    # Chunk 质量过滤（参考 LlamaIndex / RAGFlow 学术 RAG 标准做法）：
+    # references / footer / 纯 URL / 信息密度极低的块在入库前过滤掉，
+    # 避免污染检索结果与右侧引文面板。任何被过滤的 chunk 都会在日志统计。
+    SM_CHUNK_QUALITY_FILTER_ENABLED: bool = True
+    # 逻辑类型黑名单：这些 logical_type / element_type 的块永远不进 chunk 索引
+    SM_CHUNK_DROP_LOGICAL_TYPES: str = (
+        "references,reference,reference_entry,bibliography,"
+        "header,footer,page_number,page_header,page_footer,"
+        "author_bio,acknowledgement,acknowledgements,acknowledgments"
+    )
+    SM_CHUNK_MIN_INFORMATION_CHARS: int = 30   # 短于此长度的块直接丢弃
+    SM_CHUNK_MIN_UNIQUE_CHARS: int = 20        # 去重后字符数 < 此值视为重复噪声
+    SM_CHUNK_DROP_PURE_URL: bool = True        # 丢弃整体只是 URL 的块
+    SM_CHUNK_DROP_ISOLATED_HEADING: bool = True  # 丢弃孤立的短标题块（结构信息已记入下游 chunk 的 structure_title）
+    # URL + 占位符占整块字符的比例上限（> 则整块视为参考文献/占位，无信息量）
+    SM_CHUNK_URL_CHAR_RATIO_MAX: float = 0.65
+    # 剔除 URL / Md 前缀后，至少应有的「实质词」数（图/表/公式块在此之前已放行）
+    SM_CHUNK_MIN_SUBSTANTIVE_WORDS: int = 5
+    SM_CHUNK_SUBSTANTIVE_CHECK_MAX_CHARS: int = 8000
+    # 嵌入前二次过滤（去重文档标题复述块等），避免 layout chunker 之后才暴露的边角料
+    SM_CHUNK_POST_FILTER_ENABLED: bool = True
     # 预合并/块级合并阈值（可灰度调参）
     SM_PREMERGE_MAX_CHARS: int = 10000                # MinerU 预合并单块最大字符数（默认 10k）
     SM_BLOCK_LEVEL_ALLOW_CROSS_PAGE: bool = False     # 是否允许块级跨页合并（默认不允许，保障可溯源）

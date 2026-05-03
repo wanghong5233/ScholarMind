@@ -2402,9 +2402,12 @@ export default function Index() {
           markPendingCommitted()
           nextTarget.content = `${nextTarget.content || ''}${json}`
         } else if (typeof json?.answer === 'string' && json.answer) {
-          // completion 事件兜底：如果流式片段没到达，直接回填最终答案
+          // completion 事件：服务端会把流式 delta 拼接成的脏版本经过引用契约
+          // 后处理（删除越界 [N]、归一化异形格式、剥离【…】元注释）后再回传，
+          // 这里必须无条件覆盖累积内容，否则用户看到的仍是脏版本，与持久化
+          // 到 DB 的干净版本不一致，下次回看时会出现 UI 跳变。
           markPendingCommitted()
-          nextTarget.content = nextTarget.content || json.answer
+          nextTarget.content = json.answer
         }
 
         if (Array.isArray(json?.documents) && json.documents.length) {

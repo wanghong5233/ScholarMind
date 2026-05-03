@@ -127,7 +127,8 @@ class DocumentQuestionService:
             metadata["rag_provider"] = provider_name
         provider_stats = build_provider_stats(chunks)
         prompt = (
-            question_intro + "\n请按序号给出：1) 问题描述 2) 指向性提示（可引用 [文档ID:页码]）。"
+            question_intro
+            + "\n请按序号给出：1) 问题描述 2) 指向性提示（可引用 [N]，N 对应 [Context] 中以 [N] 开头的来源序号；多源写作 [1][3]）。"
         )
         content = self.chat_service.generate(
             question=prompt,
@@ -136,13 +137,21 @@ class DocumentQuestionService:
             history=[],
             compress_history=False,
         )
-        text = (content or "").strip()
-        lines = [x.strip(" -•\t").strip() for x in text.splitlines() if x.strip()]
+        # 引用契约最终化：批判性问题列表里 [N] 编号紧凑化、citations 只保留
+        # 真正被引用的 chunk，与 chat_ask / compare 的 UX 一致。
+        raw_text = (content or "").strip()
+        citations = self.rag.build_citations(chunks)
+        try:
+            raw_text, citations, _finalize_meta = (
+                self.chat_service.finalize_answer_with_citations(raw_text, citations)
+            )
+        except Exception:
+            pass
+        lines = [x.strip(" -•\t").strip() for x in raw_text.splitlines() if x.strip()]
         if len(lines) <= 2:
-            parts = re.split(r"(?:^|\n)\s*(?:\d+\.|\d+、|\(\d+\))\s*", text)
+            parts = re.split(r"(?:^|\n)\s*(?:\d+\.|\d+、|\(\d+\))\s*", raw_text)
             lines = [p.strip() for p in parts if p and p.strip()]
         questions = lines[:count]
-        citations = self.rag.build_citations(chunks)
         debug = {
             "doc_id": doc_id,
             "dims": dims[:count],
