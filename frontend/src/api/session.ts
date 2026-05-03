@@ -135,7 +135,7 @@ export function create(
     defaults: params?.defaults,
     surface: params?.surface ?? 'deep_chat',
   }
-  return request.post<API.CreateSessionResponse>('sessions', payload, options)
+  return request.post<API.CreateSessionResponse>('sessions/', payload, options)
 }
 
 export function chat(

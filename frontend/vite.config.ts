@@ -5,9 +5,15 @@ import { defineConfig } from 'vite'
 export default defineConfig(() => {
   return {
     server: {
-      port: 3000,
-      host: '127.0.0.1',
+      port: 5173,
+      host: '0.0.0.0',
       strictPort: false, // 端口被占用时自动尝试下一个
+      proxy: {
+        '/api': {
+          target: 'http://127.0.0.1:8000',
+          changeOrigin: true,
+        },
+      },
     },
     plugins: [
       react(),
@@ -16,8 +22,9 @@ export default defineConfig(() => {
         configureServer(server) {
           server.httpServer?.once('listening', () => {
             const config = server.config
-            const port = (server.httpServer?.address() as { port: number })?.port ?? config.server.port ?? 3000
-            const host = typeof config.server.host === 'string' ? config.server.host : '127.0.0.1'
+            const port = (server.httpServer?.address() as { port: number })?.port ?? config.server.port ?? 5173
+            const rawHost = typeof config.server.host === 'string' ? config.server.host : 'localhost'
+            const host = rawHost === '0.0.0.0' ? 'localhost' : rawHost
             const base = config.base?.replace(/\/$/, '') || ''
             const url = `http://${host}:${port}${base}/admin`
             // eslint-disable-next-line no-console

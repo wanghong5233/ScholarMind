@@ -1,3 +1,4 @@
+import { AxiosHeaders } from 'axios'
 import { userActions, userState } from '@/store/user'
 import { buildLoginPath } from '@/utils/auth'
 import { ResponseError } from '../error'
@@ -38,8 +39,12 @@ export const authPlugin: IRequestPlugin = {
   install(instance) {
     instance.interceptors.request.use((config) => {
       const { token } = userState
-      if (token && !config.headers['Authorization']) {
-        config.headers['Authorization'] = `Bearer ${token}`
+      if (token) {
+        const headers = AxiosHeaders.from(config.headers)
+        if (!headers.has('Authorization')) {
+          headers.set('Authorization', `Bearer ${token}`)
+        }
+        config.headers = headers
       }
       return config
     })

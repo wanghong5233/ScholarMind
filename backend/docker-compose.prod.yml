@@ -31,7 +31,7 @@ services:
         "10",
       ]
     volumes:
-      - storage_root_data:/app/service/core/storage
+      - ${SM_STORAGE_ROOT:-/opt/data/scholarmind/storage}:/app/service/core/storage
     healthcheck:
       test:
         [
@@ -264,8 +264,6 @@ volumes:
     name: scholarmind_prod_pg_data
   redis_data:
     name: scholarmind_prod_redis_data
-  storage_root_data:
-    name: scholarmind_prod_storage_root
   latex_workspaces:
     name: scholarmind_prod_latex_workspaces
   deep_research_data:

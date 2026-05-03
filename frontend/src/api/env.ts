@@ -8,12 +8,17 @@ function trimTrailingSlash(s: string): string {
   return s.replace(/\/+$/, '')
 }
 
+function isLocalBackendBase(value: string): boolean {
+  return /^https?:\/\/(localhost|127\.0\.0\.1):8000\/api\/?$/i.test(value)
+}
+
 /**
  * 主 API base（用于 request、getDocumentPreviewUrl 等）。
  * 生产环境必须通过 VITE_API_BASE 配置为绝对地址，否则会打到前端托管域名。
  */
 export function getApiBase(): string {
   const v = (import.meta.env.VITE_API_BASE as string | undefined)?.trim()
+  if (import.meta.env.DEV && (!v || isLocalBackendBase(v))) return '/api'
   return trimTrailingSlash(v || '/api')
 }
 
@@ -23,7 +28,7 @@ export function getApiBase(): string {
 export function getDocStudioBase(): string {
   const explicit = (import.meta.env.VITE_DOC_STUDIO_BASE as string | undefined)?.trim()
   if (explicit) return trimTrailingSlash(explicit)
-  if (import.meta.env.DEV) return 'http://127.0.0.1:8000/api/doc-studio'
+  if (import.meta.env.DEV) return '/api/doc-studio'
   const apiBase = (import.meta.env.VITE_API_BASE as string | undefined)?.trim()
   if (apiBase && /^https?:\/\//i.test(apiBase)) {
     return `${trimTrailingSlash(apiBase)}/doc-studio`
@@ -37,7 +42,7 @@ export function getDocStudioBase(): string {
 export function getDeepResearchBase(): string {
   const explicit = (import.meta.env.VITE_DEEP_RESEARCH_BASE as string | undefined)?.trim()
   if (explicit) return trimTrailingSlash(explicit)
-  if (import.meta.env.DEV) return 'http://127.0.0.1:8000/api/deep-research'
+  if (import.meta.env.DEV) return '/api/deep-research'
   const apiBase = (import.meta.env.VITE_API_BASE as string | undefined)?.trim()
   if (apiBase && /^https?:\/\//i.test(apiBase)) {
     return `${trimTrailingSlash(apiBase)}/deep-research`

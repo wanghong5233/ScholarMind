@@ -4,7 +4,7 @@ import type { JobInfo } from './repository'
 
 export function list(params?: { kbId?: number }, options?: AxiosRequestConfig) {
   const query = params?.kbId ? { kb_id: params.kbId } : undefined
-  return request.get<JobInfo[]>('jobs', {
+  return request.get<JobInfo[]>('jobs/', {
     ...options,
     params: query,
   })

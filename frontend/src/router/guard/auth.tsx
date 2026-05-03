@@ -57,6 +57,22 @@ export function AuthGuard({ children }: { children?: React.ReactNode }) {
 
   if (!route?.auth) return children
 
+  if (user._persist?.loading) {
+    return (
+      <div
+        style={{
+          height: '100%',
+          minHeight: '240px',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        <Spin tip="正在恢复登录状态..." />
+      </div>
+    )
+  }
+
   if (inAdminNamespace) {
     if (!adminAuth.token) {
       return <Navigate to={`/admin/login?redirect=${encodeURIComponent(redirectPath)}`} replace />
