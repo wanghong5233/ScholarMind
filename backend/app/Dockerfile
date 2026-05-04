@@ -10,17 +10,16 @@ RUN echo "deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bookworm main contrib
 #     echo "deb http://security.debian.org/debian-security bookworm-security main" >> /etc/apt/sources.list && \
 #     echo "deb http://deb.debian.org/debian bookworm-updates main" >> /etc/apt/sources.list
 
-# 安装必要的构建工具和依赖，增加错误处理
+# 安装必要的构建工具
+# 已移除 libgl1 / libgl1-mesa-glx / libglu1-mesa / libglib2.0-0 / make / curl
+#   - 前四个是 opencv-python (cv2) 的 GUI/视频后端依赖；cv2 已从 requirements
+#     移除（详见 components_factory 顶部说明），这些 lib 是死重 (~100 MB 下载
+#     + 解包时间，在 ECS 公网带宽下能省好几分钟)。
+#   - make / curl 不再被任何 RUN 步骤需要。
 RUN apt-get update --fix-missing || apt-get update && \
     apt-get install -y --no-install-recommends --fix-missing \
     build-essential \
     python3-dev \
-    make \
-    curl \
-    libgl1 \
-    libgl1-mesa-glx \
-    libglu1-mesa \
-    libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # 更新 pip 并配置镜像源
