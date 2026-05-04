@@ -1301,13 +1301,19 @@ const LatexEditorPage = () => {
   const [treeFocusPath, setTreeFocusPath] = useState('')
   const [hoveredTreePath, setHoveredTreePath] = useState('')
 
+  // Notebook 复用 Doc Studio 的工作区存储，但在 Doc Studio 视图里必须当作不可见资源，
+  // 仅可通过 /doc-studio/notebook 显式访问，不出现在 Doc Studio 工作区下拉里。
+  const docStudioWorkspaces = useMemo(
+    () => snap.workspaces.filter((item) => item.workspaceId !== NOTEBOOK_WORKSPACE_ID),
+    [snap.workspaces],
+  )
   const workspaceOptions = useMemo(
     () =>
-      snap.workspaces.map((item) => ({
+      docStudioWorkspaces.map((item) => ({
         label: item.name,
         value: item.workspaceId,
       })),
-    [snap.workspaces],
+    [docStudioWorkspaces],
   )
   const activeWorkspaceName = useMemo(() => {
     const activeWorkspace = snap.workspaces.find((item) => item.workspaceId === snap.workspaceId)
@@ -1338,7 +1344,7 @@ const LatexEditorPage = () => {
   const supportsCompilePanel = isLatexWorkspace || isMarkdownActiveFile
   const compileActionTitle = useMemo(() => {
     if (isPlaintextActiveFile) return 'TXT 文件无需编译'
-    if (isMarkdownActiveFile) return '检查 Markdown'
+    if (isMarkdownActiveFile) return '编译 Markdown'
     return '编译'
   }, [isMarkdownActiveFile, isPlaintextActiveFile])
 
@@ -2815,14 +2821,19 @@ const LatexEditorPage = () => {
           errorToast: false,
         })
         docStudioActions.setWorkspaces(list)
-        const preferred =
-          targetWorkspace ||
-          params.workspaceId ||
-          list[0]?.workspaceId ||
-          ''
+        // 兜底候选必须排除 Notebook：Notebook 只能通过 /doc-studio/notebook 显式访问，
+        // 否则用户先打开 Notebook 再切到 /doc-studio 时，会把 Notebook 误装进 Doc Studio 视图。
+        const explicit = targetWorkspace || params.workspaceId || ''
+        const fallback =
+          list.find((item) => item.workspaceId !== NOTEBOOK_WORKSPACE_ID)?.workspaceId || ''
+        const preferred = explicit || fallback
         if (preferred) {
           docStudioActions.setWorkspaceId(preferred)
           await loadWorkspaceFiles(preferred)
+        } else {
+          // 没有任何 Doc Studio 工作区时，明确清空状态，进入 Doc Studio 空白态，
+          // 避免从 /doc-studio/notebook 切回 /doc-studio 时残留 Notebook 的文件树和会话。
+          docStudioActions.setWorkspaceId('')
         }
       } catch (error) {
         showRequestError(error)
