@@ -4,9 +4,9 @@ FROM nvidia/cuda:12.2.0-runtime-ubuntu22.04
 
 WORKDIR /app
 
-# 1. 配置国内镜像源（加速下载）
-RUN sed -i 's@http://.*archive.ubuntu.com@https://mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list && \
-    sed -i 's@http://.*security.ubuntu.com@https://mirrors.tuna.tsinghua.edu.cn@g' /etc/apt/sources.list
+# 1. APT 源：阿里云 Ubuntu mirror（在阿里云 ECS 上走内网；非阿里云环境也比清华公网快）
+RUN sed -i 's@http://.*archive.ubuntu.com@http://mirrors.aliyun.com@g' /etc/apt/sources.list && \
+    sed -i 's@http://.*security.ubuntu.com@http://mirrors.aliyun.com@g' /etc/apt/sources.list
 
 # 2. 安装系统依赖
 RUN apt-get update && apt-get install -y \
@@ -20,12 +20,10 @@ RUN apt-get update && apt-get install -y \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-# 3. 配置 pip 国内镜像源
-RUN pip3 config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple && \
-    pip3 config set global.extra-index-url "https://mirrors.cernet.edu.cn/pypi/web/simple https://pypi.mirrors.ustc.edu.cn/simple/"
-
-# 4. 升级 pip
-RUN pip3 install --upgrade pip setuptools wheel
+# 3. pip 镜像源：阿里云内网
+RUN pip3 config set global.index-url "https://mirrors.aliyun.com/pypi/simple/" && \
+    pip3 config set install.trusted-host "mirrors.aliyun.com" && \
+    pip3 install --upgrade pip setuptools wheel
 
 # 5. 安装 GPU 版本的 PyTorch（CUDA 12.1）
 RUN pip3 install --no-cache-dir \

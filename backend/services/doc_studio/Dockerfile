@@ -44,12 +44,11 @@ RUN apt-get update && apt-get install -y \
     imagemagick \
     && rm -rf /var/lib/apt/lists/*
 
-# 配置 pip 国内镜像源
-RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple && \
-    pip config set global.extra-index-url "https://mirrors.cernet.edu.cn/pypi/web/simple"
-
-# 升级 pip
-RUN pip install --upgrade pip setuptools wheel
+# 配置 pip 镜像源 —— 阿里云 PyPI（ECS 内网访问，免公网带宽）
+# 与 backend/app/Dockerfile 保持一致；apt 源已是阿里云（见上方 sed 那一段）。
+RUN pip config set global.index-url "https://mirrors.aliyun.com/pypi/simple/" && \
+    pip config set install.trusted-host "mirrors.aliyun.com" && \
+    pip install --upgrade pip setuptools wheel
 
 # 复制依赖文件
 COPY requirements.txt /app/requirements.txt
