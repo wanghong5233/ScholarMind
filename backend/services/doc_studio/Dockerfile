@@ -3,6 +3,11 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+RUN sed -i \
+    -e 's|http://deb.debian.org/debian|https://mirrors.aliyun.com/debian|g' \
+    -e 's|http://deb.debian.org/debian-security|https://mirrors.aliyun.com/debian-security|g' \
+    /etc/apt/sources.list.d/debian.sources
+
 # 安装系统依赖和完整的 LaTeX 编译环境
 # 包含学术论文所需的所有常用宏包（IEEEtran、algorithm、subfig 等）
 # 包含中文支持：xelatex、lualatex、ctex、xeCJK 等

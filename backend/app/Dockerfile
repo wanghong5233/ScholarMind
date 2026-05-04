@@ -39,16 +39,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 将 app/ 目录下的所有内容拷贝到容器的 /app 目录
 COPY app/ /app
 
-# 预置 NLTK 数据，确保容器重建后无需再次下载
+# NLTK data must not be fetched during production builds: ECS does not use the
+# developer machine's VPN, and the upstream NLTK data host can hang indefinitely.
+# Runtime tokenization has a regex fallback when punkt/wordnet data is absent.
 ENV NLTK_DATA=/usr/local/nltk_data
-RUN python - <<'PY'
-import nltk
-for p in ['punkt','punkt_tab','wordnet','omw-1.4']:
-    try:
-        nltk.download(p, download_dir='/usr/local/nltk_data')
-    except Exception as e:
-        print('nltk download failed:', p, e)
-PY
+RUN mkdir -p /usr/local/nltk_data
 
 # 修改文件权限
 RUN chmod -R 755 /app

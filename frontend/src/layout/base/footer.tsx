@@ -1,9 +1,8 @@
 import { sessionActions } from '@/store/session'
 import { userActions, userState } from '@/store/user'
 import { buildLoginPath } from '@/utils/auth'
-import { isDemoUser } from '@/utils/demo'
 import { MoreOutlined } from '@ant-design/icons'
-import { Avatar, Button, Dropdown, type MenuProps, Tag } from 'antd'
+import { Avatar, Button, Dropdown, type MenuProps } from 'antd'
 import { useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useSnapshot } from 'valtio'
@@ -13,35 +12,27 @@ export function Footer() {
   const user = useSnapshot(userState)
   const navigate = useNavigate()
   const username = user.username || 'unknown'
-  const demoUser = isDemoUser(user.username)
   const redirectPath =
     typeof window === 'undefined'
       ? '/chat'
       : `${window.location.pathname}${window.location.search || ''}`
 
-  const menuItems = useMemo<MenuProps['items']>(() => {
-    const items: NonNullable<MenuProps['items']> = [
+  const menuItems = useMemo<MenuProps['items']>(
+    () => [
       {
         key: 'account',
         label: `当前账号：${username}`,
         disabled: true,
       },
-    ]
-    if (demoUser) {
-      items.push({
-        key: 'demo',
-        label: '当前为 Demo 体验账号',
-        disabled: true,
-      })
-    }
-    items.push({ type: 'divider' })
-    items.push({
-      key: 'logout',
-      label: '退出登录',
-      danger: true,
-    })
-    return items
-  }, [demoUser, username])
+      { type: 'divider' },
+      {
+        key: 'logout',
+        label: '退出登录',
+        danger: true,
+      },
+    ],
+    [username],
+  )
 
   const handleMenuClick: MenuProps['onClick'] = ({ key }) => {
     if (key !== 'logout') return
@@ -81,11 +72,6 @@ export function Footer() {
         </Avatar>
         <div className="base-layout-footer__user-meta">
           <span className="base-layout-footer__username">{user.username}</span>
-          {demoUser && (
-            <Tag className="base-layout-footer__demo-tag" color="gold">
-              Demo
-            </Tag>
-          )}
         </div>
         <Dropdown
           placement="topRight"
