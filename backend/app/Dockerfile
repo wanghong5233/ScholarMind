@@ -1,20 +1,25 @@
 FROM python:3.11.7-slim
 
-# 方案1：使用更稳定的镜像源（清华大学镜像源）
-RUN echo "deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bookworm main contrib non-free non-free-firmware" > /etc/apt/sources.list && \
-    echo "deb https://mirrors.tuna.tsinghua.edu.cn/debian/ bookworm-updates main contrib non-free non-free-firmware" >> /etc/apt/sources.list && \
-    echo "deb https://mirrors.tuna.tsinghua.edu.cn/debian-security bookworm-security main contrib non-free non-free-firmware" >> /etc/apt/sources.list
-
-# 或者使用官方源作为备用（如果镜像源有问题，请取消注释下面几行）
-# RUN echo "deb http://deb.debian.org/debian bookworm main" > /etc/apt/sources.list && \
-#     echo "deb http://security.debian.org/debian-security bookworm-security main" >> /etc/apt/sources.list && \
-#     echo "deb http://deb.debian.org/debian bookworm-updates main" >> /etc/apt/sources.list
+# ----------------------------------------------------------------------------
+# APT 源：使用阿里云 mirror（ECS 内网访问，免公网流量、速度 100+MB/s）
+#   原因：之前用清华公网源（mirrors.tuna.tsinghua.edu.cn）在阿里云 ECS 上
+#         走公网出口（小机器带宽 1-3 Mbps），装 build-essential 时拖到
+#         15+ 分钟仍未结束、被 timeout 杀掉。doc_studio 用阿里云内网源
+#         装 4 GB+ 的 TeX Live 都能成功 —— 验证了内网链路才是关键。
+#   注意：python:3.11.7-slim 基于 Debian 12 (bookworm)，使用新格式的
+#         /etc/apt/sources.list.d/debian.sources（deb822）。如不删除该文件，
+#         APT 会同时尝试官方源 deb.debian.org，污染我们的源选择。所以先删
+#         deb822 文件，再写一个干净的 sources.list 只指向阿里云。
+# ----------------------------------------------------------------------------
+RUN rm -f /etc/apt/sources.list.d/debian.sources && \
+    echo "deb http://mirrors.aliyun.com/debian/ bookworm main contrib non-free non-free-firmware" > /etc/apt/sources.list && \
+    echo "deb http://mirrors.aliyun.com/debian/ bookworm-updates main contrib non-free non-free-firmware" >> /etc/apt/sources.list && \
+    echo "deb http://mirrors.aliyun.com/debian-security bookworm-security main contrib non-free non-free-firmware" >> /etc/apt/sources.list
 
 # 安装必要的构建工具
 # 已移除 libgl1 / libgl1-mesa-glx / libglu1-mesa / libglib2.0-0 / make / curl
 #   - 前四个是 opencv-python (cv2) 的 GUI/视频后端依赖；cv2 已从 requirements
-#     移除（详见 components_factory 顶部说明），这些 lib 是死重 (~100 MB 下载
-#     + 解包时间，在 ECS 公网带宽下能省好几分钟)。
+#     移除（详见 components_factory 顶部说明），这些 lib 是死重 (~100 MB)。
 #   - make / curl 不再被任何 RUN 步骤需要。
 RUN apt-get update --fix-missing || apt-get update && \
     apt-get install -y --no-install-recommends --fix-missing \
@@ -22,9 +27,13 @@ RUN apt-get update --fix-missing || apt-get update && \
     python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# 更新 pip 并配置镜像源
-RUN pip config set global.extra-index-url "https://mirrors.cernet.edu.cn/pypi/web/simple"
-RUN pip install --upgrade pip setuptools wheel
+# ----------------------------------------------------------------------------
+# pip 源：阿里云 PyPI 镜像（ECS 内网访问，理由同上）
+#   原 cernet 源走公网，新源走阿里云内网，pip install 阶段速度提升明显。
+# ----------------------------------------------------------------------------
+RUN pip config set global.index-url "https://mirrors.aliyun.com/pypi/simple/" && \
+    pip config set install.trusted-host "mirrors.aliyun.com" && \
+    pip install --upgrade pip setuptools wheel
 
 # 设置工作目录
 WORKDIR /app
