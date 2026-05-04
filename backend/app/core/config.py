@@ -252,7 +252,9 @@ class Settings(BaseSettings):
     # 解析器编排顺序（逗号分隔，按顺序尝试）。
     # 默认优先远程/轻量解析，避免低成本演示环境依赖本地 GPU/Java 重服务。
     # 可选项：llamaparse, unstructured_api, mineru, unstructured, pymupdf
-    SM_PARSER_ORDER: str = "llamaparse,unstructured_api,unstructured,pymupdf"
+    # 注意：scholarmind_api 镜像已剔除本地 unstructured 包（瘦身），默认顺序不再包含 "unstructured"。
+    # 如需走本地 unstructured 解析，请同时把 unstructured[pdf,docx] 加回 requirements.txt 并重建镜像。
+    SM_PARSER_ORDER: str = "llamaparse,unstructured_api,pymupdf"
 
     # 远程解析 API 配置。未配置 key 时对应 parser 会自动跳过，并降级到后续解析器。
     SM_REMOTE_PARSER_STRICT_FAIL: bool = True

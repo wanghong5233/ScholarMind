@@ -13,7 +13,7 @@ services:
       REDIS_PORT: ${REDIS_PORT:-6379}
       REDIS_DB: ${REDIS_DB:-0}
       SM_VECTOR_STORE: ${SM_VECTOR_STORE:-pgvector}
-      SM_PARSER_ORDER: ${SM_PARSER_ORDER:-llamaparse,unstructured_api,unstructured,pymupdf}
+      SM_PARSER_ORDER: ${SM_PARSER_ORDER:-llamaparse,unstructured_api,pymupdf}
       SM_GROBID_ENABLED: ${SM_GROBID_ENABLED:-false}
       SM_RERANKER_TYPE: ${SM_RERANKER_TYPE:-dashscope}
       PYTHONUNBUFFERED: "1"

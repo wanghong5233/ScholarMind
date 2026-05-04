@@ -6,7 +6,22 @@ from service.core.abstractions.vector_store import BaseVectorStore
 from exceptions.base import ModelNotFoundError
 
 # 导入具体的实现类
-from service.core.implementations.embedders.local_bge import LocalBgeEmbedder
+# ----------------------------------------------------------------------------
+# LocalBgeEmbedder（SM_EMBEDDER_TYPE=local）：暂未启用，预留扩展点
+#   定位：面向未来的 embedding 独立微服务 / 领域微调方向，是工厂模式刻意
+#         保留的实现分支，并非废弃代码。
+#   当前为何不启用：local_bge.py 顶层 `from sentence_transformers import
+#         SentenceTransformer` 会把 torch + nvidia-* 拉进镜像（约 7-8 GB）。
+#         为了把 scholarmind_api 从 ~11GB 压到 ~4GB，演示阶段先不打包这条
+#         链路。生产/演示统一走 DashScope（远程 API）。
+#   何时启用：要做本地 embedding 微调或独立微服务时，按下方"启用步骤"恢复。
+#   启用步骤：
+#     1) 取消下方 `from ...local_bge import LocalBgeEmbedder` 注释
+#     2) 取消 get_embedder() 内 `elif SM_EMBEDDER_TYPE == "local"` 分支注释
+#     3) 把 torch + sentence-transformers 加回 backend/app/requirements.txt
+#     4) 重建 scholarmind_api 镜像
+# ----------------------------------------------------------------------------
+# from service.core.implementations.embedders.local_bge import LocalBgeEmbedder  # 暂未启用，见上方说明
 from service.core.implementations.embedders.dashscope import DashScopeEmbedder
 from service.core.implementations.rerankers.http_reranker import HttpReranker
 from service.core.implementations.rerankers.dashscope import DashScopeReranker
@@ -26,12 +41,20 @@ def get_embedder() -> BaseEmbedder:
     """
     global _embedder_instance
     if _embedder_instance is None:
-        if settings.SM_EMBEDDER_TYPE == "local":
-            _embedder_instance = LocalBgeEmbedder()
-        elif settings.SM_EMBEDDER_TYPE == "dashscope":
+        if settings.SM_EMBEDDER_TYPE == "dashscope":
             _embedder_instance = DashScopeEmbedder()
+        # SM_EMBEDDER_TYPE=local 暂未启用（预留扩展点，详见模块顶部说明）
+        # elif settings.SM_EMBEDDER_TYPE == "local":
+        #     _embedder_instance = LocalBgeEmbedder()
         else:
-            raise ModelNotFoundError(model_name=settings.SM_EMBEDDER_TYPE, message="Unknown embedder type configured.")
+            raise ModelNotFoundError(
+                model_name=settings.SM_EMBEDDER_TYPE,
+                message=(
+                    f"Embedder type '{settings.SM_EMBEDDER_TYPE}' is not enabled in this image. "
+                    "Currently only 'dashscope' is built in. "
+                    "To enable 'local', see the activation steps in components_factory.py header."
+                ),
+            )
     return _embedder_instance
 
 def get_reranker() -> BaseReranker:

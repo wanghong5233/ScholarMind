@@ -1,5 +1,26 @@
+# ============================================================================
+# 状态：暂未启用（预留扩展点，面向未来）
+#
+# 定位：面向未来的 embedding 独立微服务 / 领域微调方向。属于工厂模式刻意
+#       保留的实现分支，不是废弃代码。
+#
+# 当前为何不打包：
+#   - 本文件顶层 `from sentence_transformers import SentenceTransformer` 会
+#     把 torch + nvidia-* 拉进镜像（约 7-8 GB）。
+#   - 演示阶段为了把 scholarmind_api 从 ~11GB 压到 ~4GB，
+#     requirements.txt 暂不安装 sentence-transformers / torch。
+#   - components_factory.get_embedder() 中对本类的 import 与分支已注释。
+#   - 因此本文件不会在运行时被 import；若误改配置 SM_EMBEDDER_TYPE=local，
+#     工厂会抛出明确错误，提示按"启用步骤"恢复。
+#
+# 启用步骤（要做本地 embedding 微调 / 独立微服务时）：
+#   1) 把 sentence-transformers / torch 加回 backend/app/requirements.txt
+#   2) 取消 components_factory.py 中对 LocalBgeEmbedder 的 import 和分支注释
+#   3) 重建 scholarmind_api 镜像
+# ============================================================================
+
 from typing import List
-from sentence_transformers import SentenceTransformer
+from sentence_transformers import SentenceTransformer  # noqa: F401  (inactive path; see file header)
 from schemas.rag import Document, Chunk
 from service.core.abstractions.embedder import BaseEmbedder
 from core.config import settings
@@ -8,7 +29,10 @@ from utils.get_logger import log
 class LocalBgeEmbedder(BaseEmbedder):
     """
     使用部署在本地的 BGE 模型来生成嵌入向量的实现类。
-    它依赖于 `sentence-transformers` 库。
+    依赖 `sentence-transformers`。
+
+    状态：当前镜像未启用此实现（详见文件头说明）。这是面向未来的预留扩展点，
+         在重新启用 sentence-transformers / torch 后即可恢复使用。
     """
     def __init__(self):
         try:

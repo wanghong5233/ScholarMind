@@ -45,13 +45,21 @@ def rerank_similarity(query, texts):
 
 
 def _get_local_embedder():
+    """本地 embedder 路径，与 LocalBgeEmbedder 同属"暂未启用、预留扩展"分支。
+
+    当前镜像不安装 sentence-transformers / torch，SM_EMBEDDER_TYPE=local 不会
+    被 components_factory 选中。本函数保留是因为 `generate_embedding()` 内仍有
+    `if SM_EMBEDDER_TYPE=='local'` 兜底逻辑：万一配置漂移到 local，这里会因找
+    不到 sentence_transformers 抛 ImportError，被上层 try/except 捕获并自动
+    降级到远程 DashScope，不会让请求 500。
+    """
     global _LOCAL_EMBEDDER_MODEL, _LOCAL_EMBEDDER_DISABLED_REASON
     if _LOCAL_EMBEDDER_DISABLED_REASON:
         raise RuntimeError(_LOCAL_EMBEDDER_DISABLED_REASON)
     if _LOCAL_EMBEDDER_MODEL is None:
         with _LOCAL_EMBEDDER_LOCK:
             if _LOCAL_EMBEDDER_MODEL is None:
-                from sentence_transformers import SentenceTransformer
+                from sentence_transformers import SentenceTransformer  # noqa: F401  (inactive path; see docstring)
                 try:
                     _LOCAL_EMBEDDER_MODEL = SentenceTransformer(
                         settings.LOCAL_EMBEDDER_PATH,
