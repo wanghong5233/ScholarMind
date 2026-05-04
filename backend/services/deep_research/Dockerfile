@@ -3,6 +3,9 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
+RUN pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple && \
+    pip config set global.extra-index-url "https://mirrors.cernet.edu.cn/pypi/web/simple"
+
 RUN pip install --upgrade pip setuptools wheel
 
 COPY requirements.txt /app/requirements.txt
