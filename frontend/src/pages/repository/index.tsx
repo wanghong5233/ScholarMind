@@ -102,11 +102,6 @@ export default function Index() {
     }
   }, [kbList, currentKbId])
 
-  // Conditional polling: while any doc is still pending/parsing we refresh
-  // every 3s so the KB list stays in sync with the background parse job.
-  // Once everything has settled to ready/failed the polling stops, avoiding
-  // wasted requests on idle KBs.
-  const [docPollingMs, setDocPollingMs] = useState<number | undefined>(undefined)
   const {
     data: documents,
     refresh: refreshDocuments,
@@ -120,17 +115,29 @@ export default function Index() {
     {
       ready: Boolean(user.token),
       refreshDeps: [currentKbId, user.token],
-      pollingInterval: docPollingMs,
-      pollingWhenHidden: false,
     },
   )
 
+  // Conditional refresh via plain setInterval. We avoid ahooks' built-in
+  // pollingInterval here because dynamically toggling it from undefined to a
+  // number does not always restart the polling timer, leaving documents stuck
+  // at "排队中" until manual refresh.
+  const hasInflightDocs = useMemo(
+    () =>
+      (documents ?? []).some(
+        (doc) =>
+          doc.processing_status === 'pending' || doc.processing_status === 'parsing',
+      ),
+    [documents],
+  )
+
   useEffect(() => {
-    const hasInflight = (documents ?? []).some(
-      (doc) => doc.processing_status === 'pending' || doc.processing_status === 'parsing',
-    )
-    setDocPollingMs(hasInflight ? 3000 : undefined)
-  }, [documents])
+    if (!hasInflightDocs) return
+    const timer = setInterval(() => {
+      refreshDocuments()
+    }, 3000)
+    return () => clearInterval(timer)
+  }, [hasInflightDocs, refreshDocuments])
 
   const currentKb = useMemo(() => {
     if (!kbList) return null

@@ -4,6 +4,13 @@ import { Upload, UploadFile, UploadProps } from 'antd'
 import { forwardRef, useImperativeHandle, useState } from 'react'
 import styles from './upload.module.scss'
 
+// 一批上传的硬上限。50 = 一次建库的典型规模（一篇综述的参考文献、
+// 一个会议某 track 的论文集），同时避免误拖整个文件夹打爆浏览器/后端。
+// 单文件 50MB × 50 = 一次最多 2.5GB 串行上传，配合后端 worker=1 的
+// 解析队列在合理时间内能消化完。
+const MAX_BATCH_FILES = 50
+const MAX_FILE_SIZE_MB = 50
+
 export type RepositoryUploadRef = {
   submit: () => Promise<void>
 }
@@ -44,10 +51,8 @@ export default forwardRef<RepositoryUploadRef, Props>(function RepositoryUpload(
               if (!kbId) {
                 throw new Error('请选择知识库后再上传文档')
               }
-              // 检查文件大小
-              const LIMIT_MB = 50
-              if ((file.size ?? 0) > LIMIT_MB * 1024 * 1024) {
-                throw new Error(`文件大小不能超过${LIMIT_MB}M`)
+              if ((file.size ?? 0) > MAX_FILE_SIZE_MB * 1024 * 1024) {
+                throw new Error(`文件大小不能超过${MAX_FILE_SIZE_MB}M`)
               }
               //上传接口
               await api.repository.upload({
@@ -100,7 +105,8 @@ export default forwardRef<RepositoryUploadRef, Props>(function RepositoryUpload(
         <Upload.Dragger
           {...otherProps}
           showUploadList={false}
-          maxCount={10}
+          multiple
+          maxCount={MAX_BATCH_FILES}
           fileList={fileList}
           onChange={(info) => setFileList(info.fileList)}
         >
@@ -117,7 +123,7 @@ export default forwardRef<RepositoryUploadRef, Props>(function RepositoryUpload(
         </Upload.Dragger>
 
         <p className={styles['repository-upload__desc']}>
-          支持单个或批量文件上传。文件大小不能超过50M，最多支持10个文件。
+          支持单个或批量文件上传。单个文件不超过 {MAX_FILE_SIZE_MB}M，单批最多 {MAX_BATCH_FILES} 个；论文较多时建议分批上传，便于在解析队列中逐批回看进度。
         </p>
 
         <Upload
