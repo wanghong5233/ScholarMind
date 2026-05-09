@@ -892,7 +892,12 @@ export default function Index() {
               rowSelection={rowSelection}
               scroll={scroll}
               loading={tableLoading}
-              pagination={false}
+              pagination={{
+                defaultPageSize: 15,
+                showSizeChanger: true,
+                pageSizeOptions: [15, 30, 50, 100],
+                showTotal: (total) => `共 ${total} 篇论文`,
+              }}
             />
 
             <Modal
