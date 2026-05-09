@@ -28,22 +28,27 @@ export function getRepeatKey(config: AxiosRequestConfig) {
   return `${config.method}-${config.url}-${config.repeatKey ?? ''}`
 }
 
-// Default rule:
-//   - Only mutations (POST/PUT/PATCH/DELETE) opt into "cancel previous
-//     in-flight identical request". This prevents double-click submits
-//     from causing duplicate side effects.
-//   - GET/HEAD are idempotent. Auto-cancelling them is dangerous: it
-//     races background polling against user-triggered refresh. E.g.
-//     deleting a row triggers `refreshDocuments()`; if a polling GET
-//     for the same list is in flight, the refresh is aborted as a
-//     "duplicate" and the table appears not to update.
-// Callers can still opt in/out explicitly via `cancelRepeat: true/false`
-// (see axios-extend.d.ts).
+// Default: OFF. cancelRepeat is opt-in.
+//
+// Why not "default ON for mutations to prevent double-click"?
+//   Double-click prevention belongs in the UI layer (button disabled /
+//   confirmLoading), not in a transport-layer interceptor. Letting the
+//   network silently drop one of two clicks creates a worse UX: the
+//   button is still enabled, the user thinks nothing happened and clicks
+//   again, side effects fire in unexpected order.
+//
+// Why not "default ON for any method"?
+//   Idempotent GETs (list polling, refresh-after-delete) compose with
+//   user-triggered refreshes; cancelling them races user actions against
+//   background polls. Mutating POSTs may legitimately fan out (e.g.
+//   batch upload sends N parallel POST /upload, all sharing method+url).
+//
+// When IS cancelRepeat appropriate? Narrow cases where the caller
+// explicitly knows "I only ever want the latest one to land", e.g.
+// search-as-you-type. In that case the caller passes `cancelRepeat: true`
+// (and ideally a `repeatKey` so unrelated requests aren't lumped together).
 function shouldCancelRepeat(config: AxiosRequestConfig | undefined): boolean {
-  if (config?.cancelRepeat === true) return true
-  if (config?.cancelRepeat === false) return false
-  const method = (config?.method ?? 'get').toLowerCase()
-  return method !== 'get' && method !== 'head'
+  return config?.cancelRepeat === true
 }
 
 export const repeatPlugin: IRequestPlugin = {

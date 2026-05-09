@@ -915,11 +915,16 @@ export default function Index() {
               open={openUpload}
               width={400}
               destroyOnClose
+              confirmLoading={uploading}
+              cancelButtonProps={{ disabled: uploading }}
+              maskClosable={!uploading}
+              keyboard={!uploading}
               onCancel={() => {
                 if (uploading) return
                 setOpenUpload(false)
               }}
               onOk={async () => {
+                if (uploading) return
                 setUploading(true)
                 try {
                   await uploadRef.current?.submit()
