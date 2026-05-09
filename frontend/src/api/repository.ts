@@ -208,11 +208,17 @@ export function upload(
   const { kbId, file } = params
   const form = new FormData()
   form.append('file', file)
+  // 文件上传天然支持并发（worker pool 同时发多个 POST），方法 + URL 相同，
+  // 不能让 repeatPlugin 把它们当 "重复提交" 互相 abort —— 否则只剩最后一个
+  // 能成功，其余全部以 CanceledError 落入 catch，被前端记为 "失败"。
+  // 对每个并发上传单独区分一次性 cancelRepeat 没意义，直接在接口层关掉。
   return request.post(`knowledgebases/${kbId}/documents/upload`, form, {
+    cancelRepeat: false,
+    ...options,
     headers: {
       'Content-Type': 'multipart/form-data',
+      ...(options?.headers ?? {}),
     },
-    ...options,
   })
 }
 
