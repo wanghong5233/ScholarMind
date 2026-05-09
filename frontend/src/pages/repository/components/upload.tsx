@@ -6,10 +6,15 @@ import styles from './upload.module.scss'
 
 // 一批上传的硬上限。50 = 一次建库的典型规模（一篇综述的参考文献、
 // 一个会议某 track 的论文集），同时避免误拖整个文件夹打爆浏览器/后端。
-// 单文件 50MB × 50 = 一次最多 2.5GB 串行上传，配合后端 worker=1 的
-// 解析队列在合理时间内能消化完。
 const MAX_BATCH_FILES = 50
 const MAX_FILE_SIZE_MB = 50
+// 并发上限 3：
+//   - 浏览器对同 host 默认 6 路 HTTP/1.1 连接，留 3 个给文档列表轮询、
+//     job 详情拉取等被动 GET，避免相互排队。
+//   - 后端 LocalUploadHandler 每个 job 主要是 hash + 落盘 + 一行 INSERT，
+//     ECS 2C2G 上 3 个并发完全压得住；ParseIndexHandler 后续解析仍是
+//     单 worker 串行，无影响。
+const UPLOAD_CONCURRENCY = 3
 
 export type RepositoryUploadRef = {
   submit: () => Promise<void>
@@ -38,19 +43,16 @@ export default forwardRef<RepositoryUploadRef, Props>(function RepositoryUpload(
           let pendingCount = 0
           const errors: Error[] = []
 
-          for (const file of fileList) {
-            if (file.status === 'done') continue
-
+          // 单文件的完整上传流程：HTTP POST → 等后端 job 终态 → 更新行状态 + 计数器。
+          // 由外层 worker-pool 控制并发，函数内部不需要锁（单线程 JS 下计数器
+          // 读改写都是同步操作）。
+          const uploadOne = async (file: UploadFile) => {
             setFileList((prev) =>
-              prev.map((item) => {
-                if (item.uid === file.uid) {
-                  return {
-                    ...item,
-                    status: 'uploading',
-                  }
-                }
-                return item
-              }),
+              prev.map((item) =>
+                item.uid === file.uid
+                  ? { ...item, status: 'uploading' }
+                  : item,
+              ),
             )
 
             let outcome: UploadOutcome = 'failed'
@@ -74,12 +76,9 @@ export default forwardRef<RepositoryUploadRef, Props>(function RepositoryUpload(
                 : null
 
               if (!finalJob) {
-                // 后端确认任务已创建但前端没等到终态，按"待处理"对待，
-                // 不当作失败 —— 后台仍在跑，避免误导用户。
                 outcome = 'pending'
               } else {
                 const details = api.job.extractJobDetails(finalJob)
-                // LocalUploadHandler 单 job 只处理 1 个文件 → details 长度 0/1
                 const detail = details[0]
                 if (detail?.status === 'duplicate') {
                   outcome = 'duplicate'
@@ -113,8 +112,6 @@ export default forwardRef<RepositoryUploadRef, Props>(function RepositoryUpload(
                     response: outcomeMessage,
                   }
                 }
-                // ok / duplicate / pending 都不阻塞用户，统一标 done；
-                // 蒙层提示由下方汇总 message 给出。
                 return {
                   ...item,
                   status: 'done',
@@ -129,6 +126,20 @@ export default forwardRef<RepositoryUploadRef, Props>(function RepositoryUpload(
             else if (outcome === 'pending') pendingCount += 1
             else failedCount += 1
           }
+
+          // worker-pool：起 N 个 worker 并发跑 uploadOne，每个 worker 用
+          // 共享队列 shift 下一个任务，直到清空。比 Promise.all(map) 简单且
+          // 自然满足"任意一个失败不影响其他、整体并发恒定"两个约束。
+          const queue = fileList.filter((f) => f.status !== 'done').slice()
+          const workerCount = Math.min(UPLOAD_CONCURRENCY, queue.length)
+          const workers = Array.from({ length: workerCount }, async () => {
+            while (queue.length) {
+              const next = queue.shift()
+              if (!next) break
+              await uploadOne(next)
+            }
+          })
+          await Promise.all(workers)
 
           const summaryParts: string[] = []
           if (okCount > 0) summaryParts.push(`${okCount} 篇新增`)
