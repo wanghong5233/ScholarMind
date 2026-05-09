@@ -257,7 +257,12 @@ DEEP_RESEARCH_COMPARISON_AND_IMPLEMENTATION_PLAN.md
 SCHOLARMIND_DEEP_RESEARCH_FINAL_PLAN.md
 
 
-# Private learning notes (never commit)
-notes/
+# Private learning notes 默认不入库（用 notes/* 而不是 notes/，否则下面的
+# negation 不生效：git 在祖先目录被忽略时不会再扫描子文件）。
+# 工程类维护文档（部署手册、Backlog）通过 ! 例外显式纳入。
+notes/*
+notes/*/
+!notes/KNOWN_ISSUES_AND_BACKLOG.md
+!notes/LOW_COST_CLOUD_DEPLOYMENT_MANUAL.md
 temp/
 简历/
