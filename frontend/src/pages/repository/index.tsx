@@ -109,14 +109,7 @@ export default function Index() {
   } = useRequest(
     async () => {
       if (!currentKbId || !user.token) return [] as RepositoryDoc[]
-      // Suppress the global full-screen Spin overlay: this list is polled
-      // every 3s while any doc is still pending/parsing, and the default
-      // `loading: true` on the axios instance would flash the overlay on
-      // every refresh, making the page look perpetually frozen.
-      const { data } = await api.repository.listDocuments(
-        { kbId: currentKbId },
-        { loading: false },
-      )
+      const { data } = await api.repository.listDocuments({ kbId: currentKbId })
       return data ?? []
     },
     {
