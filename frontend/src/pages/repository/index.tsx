@@ -584,6 +584,11 @@ export default function Index() {
       .map((key) => Number(key))
       .filter((value) => Number.isFinite(value))
   }, [selectedRowKeys])
+  // 受控分页：观察到生产环境中只传 defaultPageSize 时，antd Table 的内部
+  // useState init-once 仍会渲染成 10 / 页（pagination 对象每渲染都重建，
+  // 但 useState init 只跑一次）。直接受控管 page + pageSize 才能让 15 稳定生效。
+  const [docPage, setDocPage] = useState(1)
+  const [docPageSize, setDocPageSize] = useState(15)
   const [jobModalOpen, setJobModalOpen] = useState(false)
   const [jobLoading, setJobLoading] = useState(false)
   const [jobList, setJobList] = useState<JobInfo[]>([])
@@ -893,10 +898,15 @@ export default function Index() {
               scroll={scroll}
               loading={tableLoading}
               pagination={{
-                defaultPageSize: 15,
+                current: docPage,
+                pageSize: docPageSize,
                 showSizeChanger: true,
                 pageSizeOptions: [15, 30, 50, 100],
                 showTotal: (total) => `共 ${total} 篇论文`,
+                onChange: (page, size) => {
+                  setDocPage(page)
+                  setDocPageSize(size)
+                },
               }}
             />
 
