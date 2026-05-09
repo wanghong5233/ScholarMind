@@ -113,7 +113,7 @@ export default function Index() {
       return data ?? []
     },
     {
-      ready: Boolean(user.token),
+      ready: Boolean(user.token && currentKbId),
       refreshDeps: [currentKbId, user.token],
     },
   )
@@ -165,10 +165,13 @@ export default function Index() {
     return () => clearInterval(timer)
   }, [hasInflightDocs, reloadDocuments])
 
-  // Only show the table loading shroud on the first load / KB switch. Background
-  // polling reloads also flip `documentsLoading` to true, which would make the
-  // table flash a spinner every 3 seconds and look like the page is stuck.
-  const tableLoading = documentsLoading && documents === undefined
+  // Do not start the document request before currentKbId is restored from URL
+  // + kbList. Otherwise the first request returns [] and the table briefly says
+  // "暂无数据", which users read as "the knowledge base is empty".
+  // Background polling uses reloadDocuments() + mutateDocuments(), so it does
+  // not flip this loading flag and will not flash the table.
+  const tableLoading = Boolean(currentKbId) && documentsLoading && documents === undefined
+  const documentEmptyText = tableLoading ? '正在加载文档列表...' : '暂无文档'
 
   const currentKb = useMemo(() => {
     if (!kbList) return null
@@ -589,6 +592,13 @@ export default function Index() {
   // 但 useState init 只跑一次）。直接受控管 page + pageSize 才能让 15 稳定生效。
   const [docPage, setDocPage] = useState(1)
   const [docPageSize, setDocPageSize] = useState(15)
+
+  useEffect(() => {
+    setSelectedRowKeys([])
+    setDocPage(1)
+    mutateDocuments(undefined)
+  }, [currentKbId, mutateDocuments])
+
   const [jobModalOpen, setJobModalOpen] = useState(false)
   const [jobLoading, setJobLoading] = useState(false)
   const [jobList, setJobList] = useState<JobInfo[]>([])
@@ -897,6 +907,7 @@ export default function Index() {
               rowSelection={rowSelection}
               scroll={scroll}
               loading={tableLoading}
+              locale={{ emptyText: documentEmptyText }}
               pagination={{
                 current: docPage,
                 pageSize: docPageSize,
