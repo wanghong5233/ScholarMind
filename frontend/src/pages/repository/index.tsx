@@ -104,8 +104,8 @@ export default function Index() {
 
   const {
     data: documents,
-    refresh: refreshDocuments,
     loading: documentsLoading,
+    mutate: mutateDocuments,
   } = useRequest(
     async () => {
       if (!currentKbId || !user.token) return [] as RepositoryDoc[]
@@ -117,6 +117,31 @@ export default function Index() {
       refreshDeps: [currentKbId, user.token],
     },
   )
+
+  const documentsReloadingRef = useRef(false)
+  const reloadDocuments = useCallback(async () => {
+    if (!currentKbId || !user.token || documentsReloadingRef.current) return
+    documentsReloadingRef.current = true
+    try {
+      const { data } = await api.repository.listDocuments(
+        { kbId: currentKbId },
+        {
+          errorToast: false,
+          loading: false,
+          headers: {
+            'Cache-Control': 'no-cache',
+            Pragma: 'no-cache',
+          },
+          params: {
+            _r: Date.now(),
+          },
+        },
+      )
+      mutateDocuments(data ?? [])
+    } finally {
+      documentsReloadingRef.current = false
+    }
+  }, [currentKbId, mutateDocuments, user.token])
 
   // Conditional refresh via plain setInterval. We avoid ahooks' built-in
   // pollingInterval here because dynamically toggling it from undefined to a
@@ -133,11 +158,12 @@ export default function Index() {
 
   useEffect(() => {
     if (!hasInflightDocs) return
+    void reloadDocuments()
     const timer = setInterval(() => {
-      refreshDocuments()
+      void reloadDocuments()
     }, 3000)
     return () => clearInterval(timer)
-  }, [hasInflightDocs, refreshDocuments])
+  }, [hasInflightDocs, reloadDocuments])
 
   // Only show the table loading shroud on the first load / KB switch. Background
   // polling reloads also flip `documentsLoading` to true, which would make the
@@ -508,7 +534,7 @@ export default function Index() {
                     try {
                       await api.repository.retryDocument({ kbId: currentKbId, docId: row.id })
                       message.success('已重新加入解析队列')
-                      refreshDocuments()
+                      await reloadDocuments()
                     } catch (e: any) {
                       message.error(e?.response?.data?.detail || '重试失败')
                     }
@@ -525,7 +551,7 @@ export default function Index() {
                     kbId: currentKbId,
                     docId: row.id,
                   })
-                  refreshDocuments()
+                  await reloadDocuments()
                 }}
               >
                 <Button
@@ -542,7 +568,7 @@ export default function Index() {
         },
       },
     ],
-    [currentKbId, refreshDocuments, user.token],
+    [currentKbId, reloadDocuments, user.token],
   )
   const scroll = useMemo(() => {
     return {
@@ -883,7 +909,7 @@ export default function Index() {
                 try {
                   await uploadRef.current?.submit()
                   setOpenUpload(false)
-                  refreshDocuments()
+                  await reloadDocuments()
                 } finally {
                   setUploading(false)
                 }

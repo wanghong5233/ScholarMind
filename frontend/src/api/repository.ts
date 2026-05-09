@@ -194,7 +194,10 @@ export function listDocuments(
   const { kbId, ...rest } = params
   return request.get<RepositoryDocument[]>(`knowledgebases/${kbId}/documents/`, {
     ...options,
-    params: rest,
+    params: {
+      ...(options?.params ?? {}),
+      ...rest,
+    },
   })
 }
 
