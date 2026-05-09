@@ -73,15 +73,20 @@ export interface OnlineDocumentCandidate {
   quality_labels?: Array<{ source: string; rank: string; label: string }> | null
 }
 
+// 后端 job_runner 把每个 handler 的 result.details 写到 job.payload.resultDetails。
+// 不同入口字段不一致：本地上传携带 filename / local_path，在线导入携带 title /
+// download_status 等。这里用一个并集类型描述，调用方按 status 取需要的字段。
 export interface JobDetail {
-  doc_id: number
-  title: string
-  status?: 'ok' | 'skipped_pdf' | 'failed'
+  doc_id?: number
+  title?: string
+  filename?: string
+  status?: 'ok' | 'duplicate' | 'skipped_pdf' | 'failed'
   download_status?: 'downloaded' | 'skipped' | 'failed'
   parse_status?: 'parsed' | 'failed' | 'not_applicable'
   note?: string
   manual_download_url?: string
   local_pdf_path?: string | null
+  local_path?: string | null
   error?: string
   parse_error?: string
   chunks?: number

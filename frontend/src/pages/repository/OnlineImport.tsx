@@ -135,27 +135,6 @@ export default function RepositoryOnlineImport() {
     return { label: '尝试解析', color: 'processing' as const }
   }
 
-  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
-
-  const waitForJobCompletion = async (jobId: number): Promise<JobInfo | null> => {
-    const MAX_ATTEMPTS = 10
-    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
-      if (attempt > 0) {
-        await sleep(1500)
-      }
-      try {
-        const { data } = await api.job.detail(jobId, { errorToast: false, loading: false })
-        if (!data) continue
-        if (['success', 'failed', 'partial'].includes(data.status)) {
-          return data
-        }
-      } catch (err) {
-        return null
-      }
-    }
-    return null
-  }
-
   const currentYear = useMemo(() => new Date().getFullYear(), [])
   const defaultYearStart = useMemo(() => Math.max(1900, currentYear - 5), [currentYear])
   const yearOptions = useMemo(
@@ -415,9 +394,8 @@ export default function RepositoryOnlineImport() {
         kbId,
         documents: docs,
       })
-      const finalJob = job?.id ? await waitForJobCompletion(job.id) : null
-      const details: JobDetail[] =
-        (finalJob?.payload as any)?.resultDetails || job?.details || []
+      const finalJob = job?.id ? await api.job.waitForJobCompletion(job.id) : null
+      const details: JobDetail[] = api.job.extractJobDetails(finalJob ?? job)
       const skipped = details.filter((item) => item.status === 'skipped_pdf')
       const failed = details.filter((item) => item.status === 'failed')
 
