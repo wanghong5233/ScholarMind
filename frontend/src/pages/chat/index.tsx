@@ -135,11 +135,11 @@ function toFriendlyChatError(raw: string | undefined): string {
   return isModelOrApiError ? FRIENDLY_MODEL_UNAVAILABLE : raw
 }
 
+// qwen-plus / qwen-turbo 在意图识别 / 摘要等链路上输出不稳定（会让 RAG 路由
+// 失效），统一从全局候选移除。需要时通过远程 catalog 临时上架，不在前端硬编码。
 const DASHSCOPE_TEXT_MODEL_OPTIONS = [
-  { label: 'qwen-plus', value: 'qwen-plus' },
   { label: 'qwen3-max', value: 'qwen3-max' },
   { label: 'qwen-max', value: 'qwen-max' },
-  { label: 'qwen-turbo', value: 'qwen-turbo' },
 ] as const
 
 const DASHSCOPE_VISION_MODEL_OPTIONS = [
@@ -221,11 +221,11 @@ const buildLlmModelOptionsFromCatalog = (
     }))
   return remote.length ? remote : LLM_MODEL_OPTIONS
 }
+// 上下文窗口提示表：保留旧 key 是为了万一后端 catalog 仍返回这些模型时，
+// 前端能渲染上下文长度。前端选择器已不再让用户选 qwen-plus / qwen-turbo。
 const MODEL_CONTEXT_WINDOW_HINTS: Record<string, number> = {
-  'qwen-plus': 200000,
   'qwen3-max': 200000,
   'qwen-max': 200000,
-  'qwen-turbo': 100000,
   'qwen-vl-max': 32000,
   'qwen-vl-plus': 32000,
   'gpt-4o': 128000,

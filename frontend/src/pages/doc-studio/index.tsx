@@ -712,11 +712,10 @@ const SELECTION_PREVIEW_CHARS = 360
 const MAX_FILE_MENTION_COUNT = 8
 const MAX_FILE_MENTION_CANDIDATES = 8
 
+// 与 chat 选择器同步：qwen-plus / qwen-turbo 被全局禁用（产物质量不稳定）。
 const DASHSCOPE_TEXT_MODEL_OPTIONS = [
-  { label: 'qwen-plus', value: 'qwen-plus' },
   { label: 'qwen3-max', value: 'qwen3-max' },
   { label: 'qwen-max', value: 'qwen-max' },
-  { label: 'qwen-turbo', value: 'qwen-turbo' },
 ] as const
 
 const DASHSCOPE_VISION_MODEL_OPTIONS = [

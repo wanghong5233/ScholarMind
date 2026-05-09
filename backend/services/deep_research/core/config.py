@@ -144,7 +144,7 @@ class Settings(BaseSettings):
     DASHSCOPE_API_KEY: str | None = None
     DASHSCOPE_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     DASHSCOPE_MODEL_NAME: str = "qwen3-max"
-    DASHSCOPE_MODEL_CANDIDATES: str = "qwen3-max,qwen-plus,qwen-max"
+    DASHSCOPE_MODEL_CANDIDATES: str = "qwen3-max,qwen-max"
     OPENAI_API_KEY: str | None = None
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
     OPENAI_MODEL_NAME: str = "gpt-5.2"

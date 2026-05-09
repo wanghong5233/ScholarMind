@@ -20,7 +20,9 @@ class Settings(BaseSettings):
     DASHSCOPE_API_KEY: Optional[str] = None  # 从 .env 加载
     DASHSCOPE_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     DASHSCOPE_MODEL_NAME: str = "qwen3-max"  # 基础模型（API 调用）
-    DASHSCOPE_MODEL_CANDIDATES: str = "qwen-plus,qwen3-max,qwen-max,qwen-turbo"
+    # qwen-plus / qwen-turbo 已统一从全局候选移除（产物质量不稳定）。
+    # 文本任务用 qwen3-max / qwen-max；视觉走 DASHSCOPE_VISION_MODEL_NAME。
+    DASHSCOPE_MODEL_CANDIDATES: str = "qwen3-max,qwen-max"
     DASHSCOPE_VISION_MODEL_NAME: str = "qwen-vl-max"  # 图片问答默认模型
     OPENAI_API_KEY: Optional[str] = None  # 可选：OpenAI API Key
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
@@ -45,7 +47,7 @@ class Settings(BaseSettings):
     # LLM 成本统计（默认 0，按需在环境变量配置）
     # LLM_COST_CONFIG 示例：
     # {
-    #   "dashscope": {"qwen-plus": {"input": 0.0, "output": 0.0}, "default": {"input": 0.0, "output": 0.0}},
+    #   "dashscope": {"qwen3-max": {"input": 0.0, "output": 0.0}, "default": {"input": 0.0, "output": 0.0}},
     #   "openai": {"gpt-4o": {"input": 0.0, "output": 0.0}}
     # }
     LLM_COST_CONFIG: Dict[str, Dict[str, Dict[str, float]]] = {}

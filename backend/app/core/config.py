@@ -104,7 +104,10 @@ class Settings(BaseSettings):
     # 模型名称
     DASHSCOPE_MODEL_NAME: str = "qwen3-max"
     OPENAI_MODEL_NAME: str = "gpt-5.2"
-    DASHSCOPE_MODEL_CANDIDATES: str = "qwen-plus,qwen3-max,qwen-max,qwen-turbo,qwen-vl-max,qwen-vl-plus"
+    # qwen-plus / qwen-turbo 已从全局候选移除：在意图识别 / 摘要等任务上输出
+    # 不稳定，会让 RAG 路由判断错位（symptom: ask 不触发检索）。统一使用
+    # qwen3-max / qwen-max；视觉相关任务保留 qwen-vl-* 系列。
+    DASHSCOPE_MODEL_CANDIDATES: str = "qwen3-max,qwen-max,qwen-vl-max,qwen-vl-plus"
     OPENAI_MODEL_CANDIDATES: str = "gpt-5.2,gpt-5,gpt-5-mini,gpt-4.1,gpt-4o"
     # 按任务拆分模型（为空时回退到 DASHSCOPE_MODEL_NAME / OPENAI_MODEL_NAME）
     SM_LLM_MODEL_ANSWER: Optional[str] = None

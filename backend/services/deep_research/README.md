@@ -122,7 +122,7 @@ Set the following environment variables to enable LLM-based report generation (O
 - `PREFERRED_LLM_PROVIDER=dashscope|openai` (default: dashscope)
 - `DASHSCOPE_API_KEY=...`
 - `DASHSCOPE_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1`
-- `DASHSCOPE_MODEL_NAME=qwen-plus`
+- `DASHSCOPE_MODEL_NAME=qwen3-max`
 - `OPENAI_API_KEY=...` (optional)
 - `OPENAI_BASE_URL=https://api.openai.com/v1` (optional)
 - `OPENAI_MODEL_NAME=gpt-5.2` (optional)

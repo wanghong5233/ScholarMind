@@ -520,7 +520,77 @@ networks:
 | 终止语义 | `timeout` 会向 Docker compose 客户端发信号并取消 build | 不用 `timeout` 包裹 Docker build / up |
 | 网络 | ECS 不继承本机 VPN、代理和 DNS | Dockerfile 内显式配置 apt / pip 国内源 |
 
-## 11. 常见故障
+## 11. 本地↔Prod 配置对齐表
+
+> 教训：曾经因为 `SM_LLM_MODEL_AUX` 本地是 `gpt-5-mini`、ECS 是 `qwen-turbo`，导致同一句问题在本地能触发 RAG，在 ECS 走纯 LLM 直答（意图识别走 AUX，AUX 不稳定 → 路由失败）。
+
+把所有 env 变量分成两类：
+
+- **业务关键变量**：必须 ECS 与本地完全一致，否则"线上有 bug 但本地复现不了"。
+- **环境关键变量**：必须不一致，反映 host / 网络 / CORS / 数据卷的真实差异。
+
+### 11.1 业务关键变量（必须对齐）
+
+| 变量 | 期望值 | 来源 |
+|---|---|---|
+| `SM_LLM_TYPE` | `openai` | 团队统一选择（gpt-5.2 主答） |
+| `OPENAI_MODEL_NAME` | `gpt-5.2` | 主答模型 |
+| `SM_LLM_MODEL_ANSWER` | `gpt-5.2` | 显式声明，避免回退 |
+| `SM_LLM_MODEL_AUX` | `gpt-5-mini` | 意图识别走这个，错位会让 RAG 不触发 |
+| `SM_LLM_MODEL_GRAPH` | `gpt-5-mini` | 图谱抽取 |
+| `SM_LLM_MODEL_SUMMARY` | `gpt-5-mini` | 对话摘要 |
+| `DASHSCOPE_MODEL_NAME` | `qwen3-max` | DashScope 兜底用，禁止 qwen-plus |
+| `SM_DASHSCOPE_RERANK_MODEL` | `qwen3-rerank` | 精排 |
+| `SM_EMBEDDER_TYPE` | `dashscope` | embedding 用 DashScope |
+| `SM_EMBEDDING_MODEL` | `text-embedding-v3` | 1024 维 |
+| `SM_RERANKER_TYPE` | `dashscope` | 走云端 API |
+| `SM_VECTOR_STORE` | `pgvector` | 不再用 ES |
+| `SM_RAG_TOPK` | `8` | 受 MIN=4/MAX=8 夹紧，给上限 |
+| `SM_RETRIEVE_PAGE_SIZE` | `8` | 与 topK 同步 |
+| `SM_PARSER_ORDER` | **不在 .env 配置** | 让代码默认 `llamaparse,unstructured_api,pymupdf` 生效 |
+
+**全局禁用名单**（不允许出现在任何 env / 代码 / 前端选择器）：
+- `qwen-plus` — 输出不稳定
+- `qwen-turbo` — 同上，且更廉价但更差
+
+### 11.2 环境关键变量（必须不一致）
+
+| 变量 | 本地 | ECS |
+|---|---|---|
+| `DATABASE_URL` | `localhost:5432` | `scholarmind_db:5432`（容器名）|
+| `REDIS_HOST` | `localhost` | `scholarmind_redis` |
+| `SM_STORAGE_ROOT` | 本地任意路径 | `/opt/data/scholarmind/storage` |
+| `SM_CORS_ALLOW_ORIGINS` | `*` 或 `localhost:5173` | `https://scholarmind.wh5233.me` |
+| `JWT_SECRET_KEY` | 任意 dev key | 强随机，长期保留 |
+| `SM_ADMIN_CONSOLE_PASSWORD` | dev | 强密码 |
+| `CF_TUNNEL_TOKEN` | 不需要 | 真实 token |
+| `OPENAI_API_KEY` / `DASHSCOPE_API_KEY` / `SM_LLAMA_PARSE_API_KEY` | 个人 key | 团队/服务 key |
+
+### 11.3 单文件维护原则
+
+- 业务关键变量在 `backend/.env.production.example` 显式列全（不依赖代码默认）。
+- 升级/调整业务变量时：**先改 `.env.production.example`（入仓库）→ 同步本地 `.env` → ssh ECS 改 `/opt/apps/scholarmind/.env.production` → 重启容器**。
+- 任何"本地能跑、ECS 不能跑"的问题，第一步对照本表逐项 diff，再开始翻日志。
+
+### 11.4 ECS 端 .env.production 维护清单（不在 git 里）
+
+文件路径：`/opt/apps/scholarmind/.env.production`
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `POSTGRES_PASSWORD` | ✓ | 与 DATABASE_URL 中密码一致 |
+| `JWT_SECRET_KEY` | ✓ | 强随机，泄漏需重发所有 token |
+| `OPENAI_API_KEY` | ✓ | 主答 LLM |
+| `DASHSCOPE_API_KEY` | ✓ | embedding + rerank |
+| `SM_LLAMA_PARSE_API_KEY` | ✓ | 主解析器 |
+| `SM_UNSTRUCTURED_API_KEY` | 推荐 | llamaparse 失败时备用 |
+| `CF_TUNNEL_TOKEN` | ✓ | 公网入口 |
+| `SEMANTIC_SCHOLAR_API_KEY` | 推荐 | 在线检索 |
+| `WEB_SEARCH_API_KEY` / `TAVILY_API_KEY` | 可选 | DeepResearch 网络搜索 |
+| 11.1 表全部业务变量 | ✓ | 与 `.env.production.example` 一一对齐 |
+| 11.2 表 ECS 侧变量 | ✓ | 与本地必然不同 |
+
+## 12. 常见故障
 
 - `pgvector` 扩展报错：确认数据库镜像是 `pgvector/pgvector:pg15`
 - `demo-entry` 不可用：检查 `SM_DEMO_ENTRY_ENABLED=true` 与 `testuser` 是否存在

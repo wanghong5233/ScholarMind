@@ -169,11 +169,8 @@ class LLMClient:
         "gpt-5": 400_000,
         "gpt-5-mini": 400_000,
         "gpt-5.2": 400_000,
-        "qwen-plus": 200_000,
-        "qwen2.5-plus": 200_000,
         "qwen3-max": 200_000,
         "qwen-max": 200_000,
-        "qwen-turbo": 100_000,
         "qwen-vl-max": 32_000,
         "qwen-vl-plus": 32_000,
     }
