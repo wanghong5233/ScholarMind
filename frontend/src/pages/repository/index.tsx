@@ -139,6 +139,11 @@ export default function Index() {
     return () => clearInterval(timer)
   }, [hasInflightDocs, refreshDocuments])
 
+  // Only show the table loading shroud on the first load / KB switch. Background
+  // polling reloads also flip `documentsLoading` to true, which would make the
+  // table flash a spinner every 3 seconds and look like the page is stuck.
+  const tableLoading = documentsLoading && documents === undefined
+
   const currentKb = useMemo(() => {
     if (!kbList) return null
     return kbList.find((kb: RepositoryKnowledgeBase) => kb.id === currentKbId) ?? null
@@ -860,7 +865,7 @@ export default function Index() {
               dataSource={tableData}
               rowSelection={rowSelection}
               scroll={scroll}
-              loading={documentsLoading}
+              loading={tableLoading}
               pagination={false}
             />
 
