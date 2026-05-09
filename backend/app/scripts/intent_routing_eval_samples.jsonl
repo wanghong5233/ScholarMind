@@ -1,0 +1,20 @@
+{"question":"你是什么模型？","expected_need_retrieval":false,"expected_query_type":"chat"}
+{"question":"你是谁？","expected_need_retrieval":false,"expected_query_type":"chat"}
+{"question":"你能做什么？","expected_need_retrieval":false,"expected_query_type":"chat"}
+{"question":"请把上一条回答精简成三点。","expected_need_retrieval":false,"expected_query_type":"chat"}
+{"question":"请把这句话翻译成英文：我们今天继续做本地调试。","expected_need_retrieval":false,"expected_query_type":"chat"}
+{"question":"Cursor 的 Agent 模式下，这个需求应该先改代码还是先提问？","expected_need_retrieval":false,"expected_query_type":"chat"}
+{"question":"我们刚才聊了什么，给我一个简短总结。","expected_need_retrieval":false,"expected_query_type":"chat"}
+{"question":"你好，先自我介绍一下。","expected_need_retrieval":false,"expected_query_type":"chat"}
+{"question":"根据我上传的知识库，解释这篇论文的核心贡献并给出处。","expected_need_retrieval":true,"expected_query_type":"analytical"}
+{"question":"对比知识库里三篇论文在实验设置上的差异，并标注引用来源。","expected_need_retrieval":true,"expected_query_type":"comparative"}
+{"question":"文档第 4 节提到的主要结论是什么？","expected_need_retrieval":true,"expected_query_type":"factual"}
+{"question":"在我的知识库中，哪篇论文最早提出这个方法？","expected_need_retrieval":true,"expected_query_type":"factual"}
+{"question":"请从已上传文档中找出支持这个观点的两条证据。","expected_need_retrieval":true,"expected_query_type":"factual"}
+{"question":"结合我的论文库，分析该方法在低资源场景下的局限性。","expected_need_retrieval":true,"expected_query_type":"analytical"}
+{"question":"比较 A 和 B 两种方法在我上传论文中的优缺点。","expected_need_retrieval":true,"expected_query_type":"comparative"}
+{"question":"根据知识库内容，给出这个术语的定义并引用来源。","expected_need_retrieval":true,"expected_query_type":"factual"}
+{"question":"这段回答有没有事实依据？请在我的文档中核验。","expected_need_retrieval":true,"expected_query_type":"factual"}
+{"question":"我的文档里有没有提到这个数据集？","expected_need_retrieval":true,"expected_query_type":"factual"}
+{"question":"请基于我上传的三篇论文给出综合结论。","expected_need_retrieval":true,"expected_query_type":"analytical"}
+{"question":"在知识库中，哪些文档支持这个结论，哪些反对？","expected_need_retrieval":true,"expected_query_type":"comparative"}

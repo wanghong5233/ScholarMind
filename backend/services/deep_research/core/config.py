@@ -149,6 +149,14 @@ class Settings(BaseSettings):
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
     OPENAI_MODEL_NAME: str = "gpt-5.2"
     OPENAI_MODEL_CANDIDATES: str = "gpt-5.2,gpt-4.1,gpt-4o"
+    LLM_POLICY_ENABLED: bool = True
+    LLM_POLICY_VERSION: str = "v1"
+    LLM_POLICY_MANIFEST_PATH: str = "/shared/llm_policy/llm_policy.v1.json"
+    LLM_POLICY_TASK_RAG_SUMMARY: str = "deepresearch.rag_summary"
+    LLM_POLICY_TASK_DECISION: str = "deepresearch.decision"
+    LLM_POLICY_TASK_REPORT: str = "deepresearch.report"
+    LLM_POLICY_TASK_REPORT_SECTION: str = "deepresearch.report_section"
+    LLM_POLICY_AUDIT_ENABLED: bool = True
     LLM_PRICE_TABLE_JSON: str | None = None
     LLM_DEFAULT_INPUT_USD_PER_1K: float = 0.0
     LLM_DEFAULT_OUTPUT_USD_PER_1K: float = 0.0

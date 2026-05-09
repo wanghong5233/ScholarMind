@@ -48,9 +48,10 @@ class RagAskTool(BaseTool):
                 api_key=api_key,
                 base_url=base_url,
                 model_name=model_name,
-                temperature=0.2,
-                max_tokens=512,
+                temperature=None,
+                max_tokens=None,
                 timeout=settings.REQUEST_TIMEOUT,
+                task_id=getattr(settings, "LLM_POLICY_TASK_RAG_SUMMARY", "deepresearch.rag_summary"),
             )
 
     async def execute(self, context: ToolContext, parameters: Dict[str, Any]) -> ToolResult:

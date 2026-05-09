@@ -24,6 +24,12 @@ from service.core.components_factory import get_reranker
 from service.core.conversation.ask_run_control import get_ask_run_control
 from service.core.conversation.ask_stream_replay_buffer import get_ask_stream_replay_buffer
 from service.core.conversation.ask_utils import normalize_top_k
+from service.core.conversation.routing_decision import (
+    classify_query_intent,
+    coerce_confidence,
+    derive_route_type,
+    is_in_rollout,
+)
 from service.core.conversation.chat_generation_service import ChatGenerationService
 from service.core.conversation.conversation_service import ConversationService
 from service.core.conversation.deep_research_context_service import DeepResearchContextService
@@ -207,24 +213,152 @@ class ChatAskOrchestrator:
             effective_index_mode = "disabled"
         index_mode = requested_index_mode or effective_index_mode
         retrieval_disabled = index_mode == "disabled"
+        route_reason = "index_mode_enabled"
+        if index_mode == "disabled":
+            route_reason = "index_mode_disabled"
+        elif not retrieval_plan:
+            route_reason = "no_retrieval_plan"
+        min_confidence = float(
+            getattr(settings, "SM_ADAPTIVE_RETRIEVAL_MIN_CONFIDENCE", 0.75) or 0.75
+        )
+        rollout_percent_raw = getattr(settings, "SM_ADAPTIVE_RETRIEVAL_ROLLOUT_PERCENT", 100)
+        try:
+            rollout_percent = int(rollout_percent_raw)
+        except (TypeError, ValueError):
+            rollout_percent = 100
+        rollout_key = str(
+            getattr(settings, "SM_ADAPTIVE_RETRIEVAL_ROLLOUT_KEY", "adaptive_retrieval_v1")
+            or "adaptive_retrieval_v1"
+        ).strip() or "adaptive_retrieval_v1"
+        adaptive_shadow_enabled = bool(
+            getattr(settings, "SM_ADAPTIVE_RETRIEVAL_SHADOW_ENABLED", False)
+        )
+        rollout_selected, rollout_bucket, rollout_percent = self._is_in_rollout(
+            user_id=self.current_user.id,
+            session_id=session_id,
+            key=rollout_key,
+            percent=rollout_percent,
+        )
+        intent_debug: Dict[str, Any] = {
+            "evaluated": False,
+            "applied": False,
+            "need_retrieval": not retrieval_disabled,
+            "query_type": "unknown",
+            "confidence": 1.0 if retrieval_disabled else 0.0,
+            "threshold": min_confidence,
+            "reason": "not_evaluated",
+            "policy_version": str(getattr(settings, "SM_LLM_POLICY_VERSION", "v1")),
+            "skip": False,
+            "rollout": {
+                "enabled": bool(getattr(settings, "SM_ADAPTIVE_RETRIEVAL_ENABLED", False)),
+                "key": rollout_key,
+                "percent": rollout_percent,
+                "bucket": rollout_bucket,
+                "selected": rollout_selected,
+                "shadow_enabled": adaptive_shadow_enabled,
+            },
+        }
 
         # Adaptive retrieval: LLM-based intent classification
-        if (
+        adaptive_base_eligible = (
             not retrieval_disabled
             and requested_index_mode != "disabled"
             and retrieval_plan
             and getattr(settings, "SM_ADAPTIVE_RETRIEVAL_ENABLED", False)
-        ):
+        )
+        evaluate_intent = adaptive_base_eligible and (
+            rollout_selected or adaptive_shadow_enabled
+        )
+        if adaptive_base_eligible and not evaluate_intent:
+            route_reason = "intent_rollout_holdout"
+        if evaluate_intent:
             intent = self._classify_query_intent(question, retrieval_plan)
-            if intent.get("need_retrieval") is False:
+            intent_need_retrieval = bool(intent.get("need_retrieval", True))
+            intent_query_type = str(intent.get("query_type", "unknown"))
+            intent_reason = str(intent.get("reason", "llm"))
+            intent_confidence_raw = intent.get("confidence", 0.0)
+            try:
+                intent_confidence = float(intent_confidence_raw)
+            except (TypeError, ValueError):
+                intent_confidence = 0.0
+            intent_confidence = max(0.0, min(1.0, intent_confidence))
+            intent_debug = {
+                "evaluated": True,
+                "applied": rollout_selected,
+                "need_retrieval": intent_need_retrieval,
+                "query_type": intent_query_type,
+                "confidence": intent_confidence,
+                "threshold": min_confidence,
+                "reason": intent_reason,
+                "policy_version": str(
+                    intent.get("policy_version")
+                    or getattr(settings, "SM_LLM_POLICY_VERSION", "v1")
+                ),
+                "skip": False,
+                "rollout": {
+                    "enabled": bool(getattr(settings, "SM_ADAPTIVE_RETRIEVAL_ENABLED", False)),
+                    "key": rollout_key,
+                    "percent": rollout_percent,
+                    "bucket": rollout_bucket,
+                    "selected": rollout_selected,
+                    "shadow_enabled": adaptive_shadow_enabled,
+                },
+            }
+            skip_by_intent = (
+                rollout_selected
+                and (not intent_need_retrieval)
+                and intent_confidence >= min_confidence
+            )
+            intent_debug["skip"] = skip_by_intent
+            logger.info(
+                f"[ADAPTIVE_RETRIEVAL] need_retrieval={intent_need_retrieval} "
+                f"query_type={intent_query_type} confidence={intent_confidence:.3f} "
+                f"threshold={min_confidence:.3f} reason={intent_reason} "
+                f"skip={skip_by_intent} applied={rollout_selected}"
+            )
+            if skip_by_intent:
                 retrieval_disabled = True
-                try:
-                    logger.info(
-                        "[ADAPTIVE_RETRIEVAL] query_type=%s → skip retrieval",
-                        intent.get("query_type", "chat"),
-                    )
-                except Exception:
-                    pass
+                route_reason = "intent_skip"
+                logger.info(
+                    f"[ADAPTIVE_RETRIEVAL] query_type={intent_query_type} → skip retrieval"
+                )
+            elif rollout_selected:
+                route_reason = (
+                    "intent_keep"
+                    if intent_need_retrieval
+                    else "intent_low_confidence_keep"
+                )
+            else:
+                route_reason = "intent_shadow_observe"
+
+        route_type = self._derive_route_type(index_mode=index_mode, retrieval_disabled=retrieval_disabled)
+        route_confidence = self._coerce_confidence(
+            intent_debug.get("confidence", 0.0),
+            default=1.0,
+        )
+        if not bool(intent_debug.get("evaluated")):
+            route_confidence = 1.0
+        route_snapshot: Dict[str, Any] = {
+            "type": route_type,
+            "reason": route_reason,
+            "confidence": route_confidence,
+            "policy_version": intent_debug.get("policy_version"),
+            "retrieval_disabled": retrieval_disabled,
+            "requested_index_mode": requested_index_mode or "auto",
+            "resolved_index_mode": index_mode,
+            "effective_index_mode": effective_index_mode,
+            "plan": [
+                {"scope": scope, "kb_id": kb_id}
+                for scope, kb_id in retrieval_plan
+            ],
+            "intent": intent_debug,
+        }
+        logger.info(
+            f"[ROUTE_DECISION] session={session_id} route_type={route_type} "
+            f"reason={route_reason} confidence={route_confidence:.3f} "
+            f"retrieval_disabled={retrieval_disabled} index_mode={index_mode} "
+            f"plan={route_snapshot['plan']}"
+        )
 
         primary_kb_for_debug: Optional[int] = session_kb_id if session_kb_id is not None else user_kb_id
         kb_ids_for_debug = [kb for _, kb in retrieval_plan]
@@ -351,13 +485,12 @@ class ChatAskOrchestrator:
                         )
                     context_text_for_llm = "\n\n".join(file_texts)
                     logger.info(
-                        "[CONTEXT_JSON_LOADED] session=%s files_count=%s context_text_len=%s",
-                        session_id,
-                        len(uploaded_files),
-                        len(context_text_for_llm),
+                        f"[CONTEXT_JSON_LOADED] session={session_id} "
+                        f"files_count={len(uploaded_files)} "
+                        f"context_text_len={len(context_text_for_llm)}"
                     )
             except Exception as ctx_err:
-                logger.warning("Failed to parse context_json: %s", ctx_err)
+                logger.warning(f"Failed to parse context_json: {ctx_err}")
 
         t_deep_research_context = time.perf_counter()
         deep_research_context_text, deep_research_context_debug = (
@@ -395,7 +528,7 @@ class ChatAskOrchestrator:
             if ltm_segment:
                 ltm_facts_extra_system = ltm_segment
         except Exception as ltm_recall_exc:
-            logger.debug("LTM recall failed (non-fatal): %s", ltm_recall_exc)
+            logger.debug(f"LTM recall failed (non-fatal): {ltm_recall_exc}")
 
         def compose_extra_system(*segments: Optional[str]) -> Optional[str]:
             merged = [str(item).strip() for item in segments if isinstance(item, str) and item.strip()]
@@ -488,6 +621,10 @@ class ChatAskOrchestrator:
                         {
                             "stage": "accepted",
                             "index_mode": index_mode,
+                            "route_type": route_type,
+                            "route_reason": route_reason,
+                            "route_confidence": route_confidence,
+                            "retrieval_disabled": retrieval_disabled,
                             "message": (
                                 "请求已接收，正在准备回答"
                                 if retrieval_disabled
@@ -500,6 +637,10 @@ class ChatAskOrchestrator:
                         {
                             "stage": "history",
                             "index_mode": index_mode,
+                            "route_type": route_type,
+                            "route_reason": route_reason,
+                            "route_confidence": route_confidence,
+                            "retrieval_disabled": retrieval_disabled,
                             "message": "正在构建会话上下文",
                         },
                     )
@@ -520,6 +661,10 @@ class ChatAskOrchestrator:
                         {
                             "stage": "memory",
                             "index_mode": index_mode,
+                            "route_type": route_type,
+                            "route_reason": route_reason,
+                            "route_confidence": route_confidence,
+                            "retrieval_disabled": retrieval_disabled,
                             "message": (
                                 "RAG 已关闭，跳过知识库记忆引导"
                                 if retrieval_disabled
@@ -555,6 +700,10 @@ class ChatAskOrchestrator:
                         {
                             "stage": "retrieving",
                             "index_mode": index_mode,
+                            "route_type": route_type,
+                            "route_reason": route_reason,
+                            "route_confidence": route_confidence,
+                            "retrieval_disabled": retrieval_disabled,
                             "message": (
                                 "正在分析问题并组织上下文，请稍候"
                                 if retrieval_disabled
@@ -566,14 +715,30 @@ class ChatAskOrchestrator:
                         for frame in _cancel_frames("retrieving"):
                             yield frame
                         return
-                    t_retrieval = time.perf_counter()
-                    chunks0, retrieval_debug, retrieval_sources, idx_override = perform_retrieval(
-                        question=question,
-                        top_k=top_k,
-                        focus_ids=focus_ids,
-                        boost_ids=boost_doc_ids,
-                    )
-                    retrieval_ms = int((time.perf_counter() - t_retrieval) * 1000)
+                    should_retrieve_stream = bool((not retrieval_disabled) and retrieval_plan)
+                    if should_retrieve_stream:
+                        t_retrieval = time.perf_counter()
+                        chunks0, retrieval_debug, retrieval_sources, idx_override = perform_retrieval(
+                            question=question,
+                            top_k=top_k,
+                            focus_ids=focus_ids,
+                            boost_ids=boost_doc_ids,
+                        )
+                        retrieval_ms = int((time.perf_counter() - t_retrieval) * 1000)
+                    else:
+                        chunks0 = []
+                        retrieval_debug = {
+                            "disabled": True,
+                            "reason": (
+                                "intent_skip"
+                                if route_reason == "intent_skip"
+                                else "retrieval_disabled"
+                            ),
+                            "execution_chain": "disabled",
+                        }
+                        retrieval_sources = {}
+                        idx_override = "disabled"
+                        retrieval_ms = 0
                     _ensure_deadline("after_retrieval")
                     reranker_stream = None
                     rerank_init_error: Optional[str] = None
@@ -586,13 +751,13 @@ class ChatAskOrchestrator:
                         "reason": "disabled" if not enable_rerank else "not_run",
                         "elapsed_ms": None,
                     }
-                    if enable_rerank:
+                    if should_retrieve_stream and enable_rerank:
                         try:
                             reranker_stream = get_reranker()
                         except Exception as rerank_init_exc:
                             reranker_stream = None
                             rerank_init_error = str(rerank_init_exc)
-                    if enable_rerank and reranker_stream and chunks0:
+                    if should_retrieve_stream and enable_rerank and reranker_stream and chunks0:
                         try:
                             t_rerank = time.perf_counter()
                             stream_models = [
@@ -649,7 +814,7 @@ class ChatAskOrchestrator:
                             logger.exception(
                                 f"[RERANK_FAILED_STREAM] err={rerank_exc} status={rerank_status_stream}"
                             )
-                    elif enable_rerank and not reranker_stream:
+                    elif should_retrieve_stream and enable_rerank and not reranker_stream:
                         rerank_status_stream.update(
                             {
                                 "backend": "unavailable",
@@ -657,12 +822,20 @@ class ChatAskOrchestrator:
                                 "reason": f"init_failed:{rerank_init_error}" if rerank_init_error else "init_failed",
                             }
                         )
-                    elif enable_rerank and not chunks0:
+                    elif should_retrieve_stream and enable_rerank and not chunks0:
                         rerank_status_stream.update(
                             {
                                 "backend": "skipped",
                                 "success": True,
                                 "reason": "no_candidates",
+                            }
+                        )
+                    elif not should_retrieve_stream:
+                        rerank_status_stream.update(
+                            {
+                                "backend": "skipped",
+                                "success": True,
+                                "reason": "retrieval_disabled",
                             }
                         )
                     if _cancelled():
@@ -678,6 +851,10 @@ class ChatAskOrchestrator:
                         "hits": len(chunks0),
                         "index": idx_override,
                         "index_mode": index_mode,
+                        "route_type": route_type,
+                        "route_reason": route_reason,
+                        "route_confidence": route_confidence,
+                        "retrieval_disabled": retrieval_disabled,
                         "message": (
                             "上下文准备完成，开始生成回答"
                             if retrieval_disabled
@@ -776,6 +953,7 @@ class ChatAskOrchestrator:
                         "top_k": top_k,
                         "index": idx_override,
                         "index_mode": index_mode,
+                        "route": route_snapshot,
                         "timing": {
                             "deep_research_context_ms": deep_research_context_ms,
                             "history_ms": history_ms,
@@ -811,7 +989,9 @@ class ChatAskOrchestrator:
                     try:
                         logger.info(
                             f"[ASK_PIPELINE_STREAM] session={session_id} variant={variant} "
-                            f"index_mode={index_mode} chain={(retrieval_debug or {}).get('execution_chain')} "
+                            f"index_mode={index_mode} route_type={route_type} route_reason={route_reason} "
+                            f"route_confidence={route_confidence:.3f} "
+                            f"chain={(retrieval_debug or {}).get('execution_chain')} "
                             f"hits={len(chunks0)} deep_research_context_ms={deep_research_context_ms} "
                             f"history_ms={history_ms} memory_ms={memory_ms} retrieval_ms={retrieval_ms} rerank_ms={rerank_ms} "
                             f"generation_ms={generation_ms} total_ms={debug_tail['timing']['total_ms']} "
@@ -834,6 +1014,7 @@ class ChatAskOrchestrator:
                         "citations": citations_tail,
                         "usage": usage_tail,
                         "runtime_model": runtime_model_tail,
+                        "route": route_snapshot,
                         "cancelled": bool(cancelled_during_generation),
                         "message_id": str(message_uuid),
                         "persisted": False,
@@ -887,6 +1068,7 @@ class ChatAskOrchestrator:
                                 "memory": memory_debug_raw,
                                 "ltm_facts": ltm_facts_debug_raw,
                                 "rerank": rerank_status_stream,
+                                "route": route_snapshot,
                                 "timing": debug_tail.get("timing"),
                                 "knowledge_base_id": s.knowledge_base_id,
                                 "usage": usage_tail,
@@ -923,6 +1105,42 @@ class ChatAskOrchestrator:
                     except Exception as save_err:
                         logger.error(f"[STREAM_SAVE_FAIL] session={session_id} error={save_err}")
                         self.db.rollback()
+                    AskEventLogger().log_event({
+                        "user_id": str(self.current_user.id),
+                        "session_id": session_id,
+                        "kb_id": int(primary_kb_for_debug) if primary_kb_for_debug is not None else None,
+                        "kb_ids": kb_ids_for_debug,
+                        "question": str(question)[:512],
+                        "top_k": int(top_k),
+                        "strategy": getattr(settings, "SM_RETRIEVAL_STRATEGY", "multi_stage"),
+                        "hits": len(chunks0),
+                        "retrieval": retrieval_debug,
+                        "retrieval_sources": retrieval_sources,
+                        "provider_stats": build_provider_stats(chunks0),
+                        "graph": retrieval_debug.get("graph") or {},
+                        "citations": completion_payload.get("citations") or [],
+                        "usage": usage_tail,
+                        "answer_chars": len(str(completion_payload.get("answer") or "")),
+                        "variant": variant,
+                        "route_type": route_type,
+                        "route_reason": route_reason,
+                        "route_confidence": route_confidence,
+                        "route": route_snapshot,
+                        "timing": debug_tail.get("timing"),
+                        "rerank": rerank_status_stream,
+                        "historyUsage": {
+                            "builder": history_usage.get("builder"),
+                            "stm": history_usage.get("stm"),
+                            "compress": bool(compress_history),
+                        },
+                        "memory": {"request": memory_debug_raw, "result": memory_result},
+                        "deepResearchContext": deep_research_context_debug,
+                        "index": idx_override,
+                        "index_mode": index_mode,
+                        "stream": True,
+                        "persisted": bool(completion_payload.get("persisted")),
+                        "cancelled": bool(completion_payload.get("cancelled")),
+                    })
                     yield _emit("completion", completion_payload)
                 except Exception as e:
                     try:
@@ -984,14 +1202,30 @@ class ChatAskOrchestrator:
             _ensure_deadline("after_memory")
         except TimeoutError as exc:
             raise HTTPException(status_code=504, detail=str(exc)) from exc
-        t_retrieval = time.perf_counter()
-        chunks, retrieval_debug, retrieval_sources, idx_override = perform_retrieval(
-            question=question,
-            top_k=top_k,
-            focus_ids=focus_ids,
-            boost_ids=boost_doc_ids,
-        )
-        retrieval_ms = int((time.perf_counter() - t_retrieval) * 1000)
+        should_retrieve_non_stream = bool((not retrieval_disabled) and retrieval_plan)
+        if should_retrieve_non_stream:
+            t_retrieval = time.perf_counter()
+            chunks, retrieval_debug, retrieval_sources, idx_override = perform_retrieval(
+                question=question,
+                top_k=top_k,
+                focus_ids=focus_ids,
+                boost_ids=boost_doc_ids,
+            )
+            retrieval_ms = int((time.perf_counter() - t_retrieval) * 1000)
+        else:
+            chunks = []
+            retrieval_debug = {
+                "disabled": True,
+                "reason": (
+                    "intent_skip"
+                    if route_reason == "intent_skip"
+                    else "retrieval_disabled"
+                ),
+                "execution_chain": "disabled",
+            }
+            retrieval_sources = {}
+            idx_override = "disabled"
+            retrieval_ms = 0
         try:
             _ensure_deadline("after_retrieval")
         except TimeoutError as exc:
@@ -1008,13 +1242,13 @@ class ChatAskOrchestrator:
             "reason": "disabled" if not enable_rerank else "not_run",
             "elapsed_ms": None,
         }
-        if enable_rerank:
+        if should_retrieve_non_stream and enable_rerank:
             try:
                 reranker = get_reranker()
             except Exception as rerank_init_exc:
                 reranker = None
                 rerank_init_error = str(rerank_init_exc)
-        if enable_rerank and reranker and chunks:
+        if should_retrieve_non_stream and enable_rerank and reranker and chunks:
             try:
                 t_rerank = time.perf_counter()
                 chunk_models = [
@@ -1065,7 +1299,7 @@ class ChatAskOrchestrator:
                 logger.exception(
                     f"[RERANK_FAILED] err={rerank_exc} status={rerank_status}"
                 )
-        elif enable_rerank and not reranker:
+        elif should_retrieve_non_stream and enable_rerank and not reranker:
             rerank_status.update(
                 {
                     "backend": "unavailable",
@@ -1073,12 +1307,20 @@ class ChatAskOrchestrator:
                     "reason": f"init_failed:{rerank_init_error}" if rerank_init_error else "init_failed",
                 }
             )
-        elif enable_rerank and not chunks:
+        elif should_retrieve_non_stream and enable_rerank and not chunks:
             rerank_status.update(
                 {
                     "backend": "skipped",
                     "success": True,
                     "reason": "no_candidates",
+                }
+            )
+        elif not should_retrieve_non_stream:
+            rerank_status.update(
+                {
+                    "backend": "skipped",
+                    "success": True,
+                    "reason": "retrieval_disabled",
                 }
             )
         try:
@@ -1155,7 +1397,8 @@ class ChatAskOrchestrator:
         except Exception:
             pass
         usage = self.chat_service.get_last_usage() or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-        retrieval_debug = self.retriever.get_last_retrieval_debug() or {}
+        if not bool((retrieval_debug or {}).get("disabled")):
+            retrieval_debug = self.retriever.get_last_retrieval_debug() or retrieval_debug
         history_builder_debug = self.chat_service.get_last_history_debug() or {}
         provider_stats = build_provider_stats(chunks)
         debug = {
@@ -1164,6 +1407,7 @@ class ChatAskOrchestrator:
             "top_k": top_k,
             "index": idx_override,
             "index_mode": index_mode,
+            "route": route_snapshot,
             "variant": variant,
             "retrieval": retrieval_debug,
             "history": {"builder": history_builder_debug, "stm": history_debug_dict},
@@ -1186,7 +1430,9 @@ class ChatAskOrchestrator:
         try:
             logger.info(
                 f"[ASK_PIPELINE_NON_STREAM] session={session_id} variant={variant} "
-                f"index_mode={index_mode} chain={(retrieval_debug or {}).get('execution_chain')} "
+                f"index_mode={index_mode} route_type={route_type} route_reason={route_reason} "
+                f"route_confidence={route_confidence:.3f} "
+                f"chain={(retrieval_debug or {}).get('execution_chain')} "
                 f"hits={len(chunks)} deep_research_context_ms={deep_research_context_ms} "
                 f"history_ms={history_ms} memory_ms={memory_ms} retrieval_ms={retrieval_ms} rerank_ms={rerank_ms} "
                 f"generation_ms={generation_ms} total_ms={debug['timing']['total_ms']} "
@@ -1241,6 +1487,10 @@ class ChatAskOrchestrator:
                 "usage": usage,
                 "answer_chars": len(content or ""),
                 "variant": variant,
+                "route_type": route_type,
+                "route_reason": route_reason,
+                "route_confidence": route_confidence,
+                "route": route_snapshot,
                 "timing": debug.get("timing"),
                 "rerank": rerank_status,
                 "historyUsage": {
@@ -1252,6 +1502,7 @@ class ChatAskOrchestrator:
                 "deepResearchContext": deep_research_context_debug,
                 "index": idx_override,
                 "index_mode": index_mode,
+                "stream": False,
             })
         except Exception:
             pass
@@ -1274,6 +1525,7 @@ class ChatAskOrchestrator:
                 "retrieval": retrieval_debug,
                 "memory": memory_debug_raw,
                 "rerank": rerank_status,
+                "route": route_snapshot,
                 "timing": debug.get("timing"),
                 "knowledge_base_id": s.knowledge_base_id,
                 "provider_stats": provider_stats,
@@ -1311,9 +1563,9 @@ class ChatAskOrchestrator:
                         s.context_json = None
                         self.db.add(s)
                         self.db.commit()
-                        logger.info("[CONTEXT_CLEARED] session=%s", session_id)
+                        logger.info(f"[CONTEXT_CLEARED] session={session_id}")
                     except Exception as clear_err:
-                        logger.warning("Failed to clear context_json: %s", clear_err)
+                        logger.warning(f"Failed to clear context_json: {clear_err}")
         except Exception:
             self.db.rollback()
 
@@ -1404,9 +1656,7 @@ class ChatAskOrchestrator:
         self.db.commit()
         self.db.refresh(session_obj)
         logger.info(
-            "Backfilled session KB id=%s for ask session %s",
-            kb.id,
-            session_obj.session_id,
+            f"Backfilled session KB id={kb.id} for ask session {session_obj.session_id}"
         )
 
     def _resolve_kb_provider(
@@ -1497,7 +1747,7 @@ class ChatAskOrchestrator:
                 )
             except Exception as exc:
                 try:
-                    logger.warning("Memory guide async update failed: %s", exc)
+                    logger.warning(f"Memory guide async update failed: {exc}")
                 except Exception:
                     pass
                 try:
@@ -1535,7 +1785,7 @@ class ChatAskOrchestrator:
                 db.commit()
             except Exception as exc:
                 try:
-                    logger.warning("LTM async record failed: %s", exc)
+                    logger.warning(f"LTM async record failed: {exc}")
                 except Exception:
                     pass
                 try:
@@ -1575,12 +1825,12 @@ class ChatAskOrchestrator:
                 )
                 if stored:
                     logger.info(
-                        "LTM facts stored: user=%s session=%s extracted=%s stored=%s",
-                        user_id, session_id, len(facts), stored,
+                        f"LTM facts stored: user={user_id} session={session_id} "
+                        f"extracted={len(facts)} stored={stored}"
                     )
             except Exception as exc:
                 try:
-                    logger.warning("LTM fact extraction/storage failed: %s", exc)
+                    logger.warning(f"LTM fact extraction/storage failed: {exc}")
                 except Exception:
                     pass
 
@@ -1628,7 +1878,9 @@ class ChatAskOrchestrator:
                         return
                     except Exception as exc:
                         try:
-                            logger.warning("Async message persist failed (attempt %s): %s", attempt + 1, exc)
+                            logger.warning(
+                                f"Async message persist failed (attempt {attempt + 1}): {exc}"
+                            )
                         except Exception:
                             pass
                         try:
@@ -1689,6 +1941,29 @@ class ChatAskOrchestrator:
             raise
 
     @staticmethod
+    def _coerce_confidence(value: Any, *, default: float = 0.0) -> float:
+        return coerce_confidence(value, default=default)
+
+    @staticmethod
+    def _derive_route_type(*, index_mode: str, retrieval_disabled: bool) -> str:
+        return derive_route_type(index_mode=index_mode, retrieval_disabled=retrieval_disabled)
+
+    @staticmethod
+    def _is_in_rollout(
+        *,
+        user_id: str | int,
+        session_id: str,
+        key: str,
+        percent: int,
+    ) -> tuple[bool, int, int]:
+        return is_in_rollout(
+            user_id=user_id,
+            session_id=session_id,
+            key=key,
+            percent=percent,
+        )
+
+    @staticmethod
     def _apply_relevance_gate(
         chunks: List[Dict[str, Any]],
     ) -> tuple[List[Dict[str, Any]], bool]:
@@ -1723,8 +1998,8 @@ class ChatAskOrchestrator:
         if top_score < threshold:
             try:
                 logger.info(
-                    "[RELEVANCE_GATE] top_score=%.4f < threshold=%.4f → fallback to chat mode",
-                    top_score, threshold,
+                    f"[RELEVANCE_GATE] top_score={top_score:.4f} "
+                    f"< threshold={threshold:.4f} → fallback to chat mode"
                 )
             except Exception:
                 pass
@@ -1737,50 +2012,7 @@ class ChatAskOrchestrator:
         question: str,
         retrieval_plan: list[tuple[str, int]],
     ) -> Dict[str, Any]:
-        """Classify query intent to decide retrieval necessity and strategy.
-
-        Returns dict with:
-            need_retrieval (bool): whether to perform knowledge base retrieval
-            query_type (str): factual | analytical | comparative | chat
-        """
-        if not question or not question.strip():
-            return {"need_retrieval": False, "query_type": "chat"}
-        if not retrieval_plan:
-            return {"need_retrieval": False, "query_type": "chat"}
-
-        try:
-            from service.core.rag.llm.client import LLMClient
-
-            llm = LLMClient(task="aux")
-            prompt = (
-                "你是查询意图分类器。判断以下用户问题是否需要从学术知识库中检索文档来回答。\n"
-                "输出严格 JSON：{\"need_retrieval\": true/false, \"query_type\": \"factual|analytical|comparative|chat\"}\n"
-                "- factual: 需要查找具体事实、数据、定义\n"
-                "- analytical: 需要分析、解释某个概念或方法\n"
-                "- comparative: 需要比较多个概念或方法\n"
-                "- chat: 闲聊、问候、与知识库无关的通用问题\n\n"
-                "仅当问题明显是闲聊/问候/通用知识时 need_retrieval=false，其余一律 true。\n\n"
-                f"用户问题：{question[:300]}"
-            )
-            messages = [{"role": "user", "content": prompt}]
-            result = llm.generate(messages, temperature=0.0, max_tokens=64, stream=False)
-            if not isinstance(result, str):
-                result = "".join(result)
-
-            import json as _json
-            text = result.strip()
-            start = text.find("{")
-            end = text.rfind("}") + 1
-            if start >= 0 and end > start:
-                parsed = _json.loads(text[start:end])
-                return {
-                    "need_retrieval": bool(parsed.get("need_retrieval", True)),
-                    "query_type": str(parsed.get("query_type", "factual")),
-                }
-        except Exception as exc:
-            try:
-                logger.warning("[ADAPTIVE_RETRIEVAL] intent classification failed: %s", exc)
-            except Exception:
-                pass
-
-        return {"need_retrieval": True, "query_type": "factual"}
+        return classify_query_intent(
+            question=question,
+            retrieval_plan=retrieval_plan,
+        )

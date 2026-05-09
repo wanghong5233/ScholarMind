@@ -82,7 +82,6 @@ class GraphExtractor:
         try:
             raw = self.llm.generate(
                 messages,
-                temperature=0.1,
                 max_tokens=int(getattr(settings, "SM_GRAPH_LLM_MAX_TOKENS", 512) or 512),
                 stream=False,
             )
@@ -116,7 +115,6 @@ class GraphExtractor:
         try:
             raw = self.llm.generate(
                 messages,
-                temperature=0.1,
                 max_tokens=int(getattr(settings, "SM_GRAPH_QUERY_MAX_TOKENS", 256) or 256),
                 stream=False,
             )

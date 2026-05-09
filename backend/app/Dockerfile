@@ -46,11 +46,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 拷贝代码
 # 将 app/ 目录下的所有内容拷贝到容器的 /app 目录
 COPY app/ /app
+COPY shared/ /shared
 
 # NLTK data must not be fetched during production builds: ECS does not use the
 # developer machine's VPN, and the upstream NLTK data host can hang indefinitely.
 # Runtime tokenization has a regex fallback when punkt/wordnet data is absent.
 ENV NLTK_DATA=/usr/local/nltk_data
+ENV PYTHONPATH=/app:/shared
 RUN mkdir -p /usr/local/nltk_data
 
 # 修改文件权限

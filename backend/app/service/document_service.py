@@ -6,6 +6,11 @@ from models.knowledgebase import KnowledgeBase
 from schemas.document import DocumentUpdate, DocumentCreate
 from exceptions.base import ResourceNotFoundException, PermissionDeniedException, APIException
 from service.core.rag.graph.store import KnowledgeGraphStore
+from service.document_identity import (
+    extract_arxiv_id,
+    normalize_doi,
+    normalize_semantic_scholar_id,
+)
 from core.config import settings
 import os
 from utils.get_logger import logger
@@ -164,28 +169,73 @@ def _find_duplicate_document(
     kb_id: int,
     semantic_scholar_id: Optional[str],
     doi: Optional[str],
-    file_hash: Optional[str]
+    file_hash: Optional[str],
+    source_url: Optional[str] = None,
+    exclude_doc_id: Optional[int] = None,
 ) -> Optional[Document]:
     """
-    在同一知识库内基于 semantic_scholar_id / doi / file_hash 查重。
+    在同一知识库内基于 semantic_scholar_id / doi / arxiv_id / file_hash 查重。
     只要任意一个非空字段匹配，即视为重复。
     """
     query = db.query(Document).filter(Document.knowledge_base_id == kb_id)
+    if exclude_doc_id is not None:
+        query = query.filter(Document.id != exclude_doc_id)
 
-    # 按优先级尝试匹配
-    if semantic_scholar_id:
-        existing = query.filter(Document.semantic_scholar_id == semantic_scholar_id).first()
-        if existing:
-            return existing
-    if doi:
-        existing = query.filter(Document.doi == doi).first()
-        if existing:
-            return existing
+    # file_hash 仍然是最廉价且最准确的本地重复判断。
     if file_hash:
         existing = query.filter(Document.file_hash == file_hash).first()
         if existing:
             return existing
+
+    normalized_semantic = normalize_semantic_scholar_id(semantic_scholar_id)
+    normalized_doi = normalize_doi(doi)
+    normalized_arxiv = extract_arxiv_id(source_url)
+    if not normalized_semantic and not normalized_doi and not normalized_arxiv:
+        return None
+
+    candidates = query.filter(
+        or_(
+            Document.semantic_scholar_id.isnot(None),
+            Document.doi.isnot(None),
+            Document.source_url.isnot(None),
+        )
+    ).all()
+    for candidate in candidates:
+        if normalized_semantic:
+            candidate_semantic = normalize_semantic_scholar_id(candidate.semantic_scholar_id)
+            if candidate_semantic and candidate_semantic == normalized_semantic:
+                return candidate
+        if normalized_doi:
+            candidate_doi = normalize_doi(candidate.doi)
+            if candidate_doi and candidate_doi == normalized_doi:
+                return candidate
+        if normalized_arxiv:
+            candidate_arxiv = extract_arxiv_id(candidate.source_url)
+            if candidate_arxiv and candidate_arxiv == normalized_arxiv:
+                return candidate
     return None
+
+
+def find_duplicate_document_by_identity(
+    db: Session,
+    kb_id: int,
+    *,
+    semantic_scholar_id: Optional[str],
+    doi: Optional[str],
+    file_hash: Optional[str],
+    source_url: Optional[str] = None,
+    exclude_doc_id: Optional[int] = None,
+) -> Optional[Document]:
+    """Public wrapper used by handlers for identifier-level dedupe."""
+    return _find_duplicate_document(
+        db=db,
+        kb_id=kb_id,
+        semantic_scholar_id=semantic_scholar_id,
+        doi=doi,
+        file_hash=file_hash,
+        source_url=source_url,
+        exclude_doc_id=exclude_doc_id,
+    )
 
 
 def find_document_by_file_hash(db: Session, kb_id: int, file_hash: str) -> Optional[Document]:
@@ -202,6 +252,7 @@ def find_document_by_file_hash(db: Session, kb_id: int, file_hash: str) -> Optio
         )
         .first()
     )
+
 
 def _resolve_es_targets(es_conn: Any, prefix: str) -> Set[str]:
     from elasticsearch import NotFoundError
@@ -374,6 +425,7 @@ def create_documents_bulk_for_kb(
             semantic_scholar_id=doc.semantic_scholar_id,
             doi=doc.doi,
             file_hash=doc.file_hash,
+            source_url=doc.source_url,
         )
         if duplicate:
             # 跳过重复
@@ -416,23 +468,19 @@ def find_existing_documents_for_payload(
 ) -> List[Document]:
     """
     根据传入的 DocumentCreate 列表，在指定 KB 内查找已存在的文档。
-    仅返回那些 semantic_scholar_id 或 DOI 匹配的记录。
+    匹配维度：semantic_scholar_id / doi / arxiv_id(source_url) / file_hash。
     """
-    semantic_ids: Set[str] = set(
-        d.semantic_scholar_id for d in documents if getattr(d, "semantic_scholar_id", None)
-    )
-    dois: Set[str] = set(
-        d.doi for d in documents if getattr(d, "doi", None)
-    )
-
-    if not semantic_ids and not dois:
-        return []
-
-    q = db.query(Document).filter(Document.knowledge_base_id == kb_id)
-    conditions = []
-    if semantic_ids:
-        conditions.append(Document.semantic_scholar_id.in_(list(semantic_ids)))
-    if dois:
-        conditions.append(Document.doi.in_(list(dois)))
-
-    return q.filter(or_(*conditions)).all()
+    existing_map: Dict[int, Document] = {}
+    for doc in documents:
+        duplicate = _find_duplicate_document(
+            db=db,
+            kb_id=kb_id,
+            semantic_scholar_id=getattr(doc, "semantic_scholar_id", None),
+            doi=getattr(doc, "doi", None),
+            file_hash=getattr(doc, "file_hash", None),
+            source_url=getattr(doc, "source_url", None),
+            exclude_doc_id=None,
+        )
+        if duplicate is not None:
+            existing_map[duplicate.id] = duplicate
+    return list(existing_map.values())

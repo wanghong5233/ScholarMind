@@ -24,6 +24,12 @@ class Settings(BaseSettings):
 
     # Database
     DATABASE_URL: str | None = None
+    # SQLAlchemy 连接池（上传高并发时避免默认 5/10 池打满导致请求超时）
+    SM_DB_POOL_SIZE: int = 12
+    SM_DB_MAX_OVERFLOW: int = 24
+    SM_DB_POOL_TIMEOUT_SECS: int = 30
+    SM_DB_POOL_RECYCLE_SECS: int = 1800
+    SM_DB_POOL_PRE_PING: bool = True
 
     # Redis
     REDIS_HOST: str = "redis"
@@ -115,6 +121,20 @@ class Settings(BaseSettings):
     SM_LLM_MODEL_GRAPH: Optional[str] = None
     SM_LLM_MODEL_SUMMARY: Optional[str] = None
     SM_LLM_REQUEST_TIMEOUT_SECS: int = 60
+    SM_LLM_POLICY_ENABLED: bool = True
+    SM_LLM_POLICY_VERSION: str = "v1"
+    SM_LLM_POLICY_MANIFEST_PATH: str = "/shared/llm_policy/llm_policy.v1.json"
+    SM_LLM_POLICY_TASK_ANSWER: str = "app.answer"
+    SM_LLM_POLICY_TASK_AUX: str = "app.aux"
+    SM_LLM_POLICY_TASK_SUMMARY: str = "app.summary"
+    SM_LLM_POLICY_TASK_COMPRESSION: str = "app.compression"
+    SM_LLM_POLICY_TASK_REWRITE: str = "app.rewrite"
+    SM_LLM_POLICY_TASK_TRANSLATE: str = "app.translate"
+    SM_LLM_POLICY_TASK_HYDE: str = "app.hyde"
+    SM_LLM_POLICY_TASK_GRAPH: str = "app.graph"
+    SM_LLM_POLICY_TASK_FACT_EXTRACTION: str = "app.fact_extraction"
+    SM_LLM_POLICY_TASK_EQUATION_DESCRIPTION: str = "app.equation_description"
+    SM_LLM_POLICY_AUDIT_ENABLED: bool = True
 
     # 组件选择
     SM_EMBEDDER_TYPE: Literal["local", "dashscope"] = "dashscope"
@@ -385,9 +405,14 @@ class Settings(BaseSettings):
 
     # 公式描述增强（摄入时用 LLM 为 LaTeX 生成自然语言描述，改善嵌入质量）
     SM_EQUATION_DESCRIPTION_ENABLED: bool = True
+    SM_EQUATION_DESCRIPTION_MAX_TOKENS: int = 2048
 
     # 自适应检索决策（意图分类：自动判断是否需要检索及检索策略）
     SM_ADAPTIVE_RETRIEVAL_ENABLED: bool = True
+    SM_ADAPTIVE_RETRIEVAL_MIN_CONFIDENCE: float = 0.75
+    SM_ADAPTIVE_RETRIEVAL_ROLLOUT_PERCENT: int = 100
+    SM_ADAPTIVE_RETRIEVAL_ROLLOUT_KEY: str = "adaptive_retrieval_v1"
+    SM_ADAPTIVE_RETRIEVAL_SHADOW_ENABLED: bool = False
 
     # 通用上下文窗口扩展（检索时对所有命中块附带前后邻居块）
     SM_CONTEXT_WINDOW_EXPANSION_ENABLED: bool = True

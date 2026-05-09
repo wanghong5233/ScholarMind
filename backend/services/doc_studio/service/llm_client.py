@@ -15,6 +15,7 @@ import time
 from openai import AsyncOpenAI
 
 from core.config import settings
+from service.llm_policy_adapter import get_policy_resolver
 from utils.language import guess_language
 from utils.prompt_loader import load_prompt_bundle
 from metrics import record_llm_usage
@@ -44,6 +45,7 @@ class LLMClient:
         self._client_cache: Dict[str, AsyncOpenAI] = {}
         self._provider_health: Dict[str, Dict[str, Any]] = {}
         self._last_runtime_model: Dict[str, Any] | None = None
+        self._policy_resolver = get_policy_resolver()
         self._configure()
 
     def refresh_config(self) -> Dict[str, Any]:
@@ -161,15 +163,23 @@ class LLMClient:
         except (TypeError, ValueError):
             return fallback
 
-    @staticmethod
-    def _uses_max_completion_tokens(model_name: Optional[str]) -> bool:
-        name = str(model_name or "").strip().lower()
-        return name.startswith("gpt-5")
+    def _uses_max_completion_tokens(self, model_name: Optional[str], llm_options: Optional[Dict[str, Any]] = None) -> bool:
+        resolved = self._resolve_task_policy(
+            model_name=str(model_name or ""),
+            llm_options=llm_options,
+        )
+        return resolved.token_param == "max_completion_tokens"
 
-    @staticmethod
-    def _supports_custom_temperature(model_name: Optional[str]) -> bool:
-        name = str(model_name or "").strip().lower()
-        return not name.startswith("gpt-5")
+    def _supports_custom_temperature(
+        self,
+        model_name: Optional[str],
+        llm_options: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        resolved = self._resolve_task_policy(
+            model_name=str(model_name or ""),
+            llm_options=llm_options,
+        )
+        return bool(resolved.supports_custom_temperature)
 
     @staticmethod
     def _infer_provider_from_model(model_name: Optional[str]) -> Optional[str]:
@@ -276,6 +286,46 @@ class LLMClient:
         )
         return config
 
+    def _resolve_task_policy(
+        self,
+        *,
+        model_name: str,
+        llm_options: Optional[Dict[str, Any]],
+        override_max_tokens: Optional[int] = None,
+        override_temperature: Optional[float] = None,
+    ):
+        task_id = str(
+            (llm_options or {}).get("policy_task_id")
+            or getattr(settings, "LLM_POLICY_TASK_ASK", "docstudio.ask")
+        ).strip()
+        return self._policy_resolver.resolve(
+            task_id=task_id or "docstudio.ask",
+            model_name=model_name,
+            override_max_output_tokens=override_max_tokens,
+            override_temperature=override_temperature,
+            override_timeout_secs=getattr(settings, "LLM_REQUEST_TIMEOUT", 75),
+        )
+
+    def _resolve_task_policy(
+        self,
+        *,
+        model_name: str,
+        llm_options: Optional[Dict[str, Any]],
+        override_max_tokens: Optional[int] = None,
+        override_temperature: Optional[float] = None,
+    ):
+        task_id = str(
+            (llm_options or {}).get("policy_task_id")
+            or getattr(settings, "LLM_POLICY_TASK_ASK", "docstudio.ask")
+        ).strip()
+        return self._policy_resolver.resolve(
+            task_id=task_id or "docstudio.ask",
+            model_name=model_name,
+            override_max_output_tokens=override_max_tokens,
+            override_temperature=override_temperature,
+            override_timeout_secs=getattr(settings, "LLM_REQUEST_TIMEOUT", 75),
+        )
+
     def _get_available_providers(self) -> List[str]:
         providers: List[str] = []
         if settings.DASHSCOPE_API_KEY:
@@ -342,6 +392,17 @@ class LLMClient:
             "failure_threshold": settings.LLM_HEALTH_FAILURE_THRESHOLD,
             "cooldown_seconds": settings.LLM_HEALTH_COOLDOWN_SECONDS,
             "request_timeout": settings.LLM_REQUEST_TIMEOUT,
+            "policy_version": getattr(self._policy_resolver, "policy_version", "legacy"),
+            "task_ids": {
+                "ask": getattr(settings, "LLM_POLICY_TASK_ASK", "docstudio.ask"),
+                "guardrail": getattr(settings, "LLM_POLICY_TASK_GUARDRAIL", "docstudio.guardrail"),
+                "analysis": getattr(settings, "LLM_POLICY_TASK_ANALYSIS", "docstudio.analysis"),
+                "answer_without_edit": getattr(
+                    settings,
+                    "LLM_POLICY_TASK_ANSWER_WITHOUT_EDIT",
+                    "docstudio.answer_without_edit",
+                ),
+            },
         }
 
     def get_last_runtime_model(self) -> Dict[str, Any] | None:
@@ -507,6 +568,16 @@ class LLMClient:
                         resolved_provider = self._normalize_provider_key(
                             llm_config.get("provider_key") or provider_key
                         )
+                        temp_override = temp_value if temp_value is not None else llm_config["temperature"]
+                        max_tokens_override = (
+                            max_tokens_value if max_tokens_value is not None else llm_config["max_tokens"]
+                        )
+                        resolved_policy = self._resolve_task_policy(
+                            model_name=model_name,
+                            llm_options=llm_options,
+                            override_max_tokens=max_tokens_override,
+                            override_temperature=temp_override,
+                        )
                         runtime_model = {
                             "requested_provider": requested_provider,
                             "requested_model": requested_model or primary_model or model_name,
@@ -519,18 +590,19 @@ class LLMClient:
                                     and model_name != requested_model
                                 )
                             ),
+                            "policy_version": resolved_policy.policy_version,
+                            "task_id": resolved_policy.task_id,
+                            "resolved_max_output_tokens": resolved_policy.max_output_tokens,
                         }
                         self._last_runtime_model = runtime_model
-                        resolved_temp = temp_value if temp_value is not None else llm_config["temperature"]
-                        resolved_max_tokens = (
-                            max_tokens_value if max_tokens_value is not None else llm_config["max_tokens"]
-                        )
                         response = await self._generate_api(
                             prompt,
                             tools,
-                            resolved_temp,
+                            resolved_policy.temperature,
                             llm_config,
-                            resolved_max_tokens,
+                            resolved_policy.max_output_tokens,
+                            resolved_policy=resolved_policy,
+                            llm_options=llm_options,
                             image_attachments=image_attachments,
                             stream_text_callback=stream_text_callback,
                         )
@@ -574,6 +646,8 @@ class LLMClient:
         temperature: float = 0.3,
         llm_config: Optional[Dict[str, Any]] = None,
         max_tokens: Optional[int] = None,
+        resolved_policy: Optional[Any] = None,
+        llm_options: Optional[Dict[str, Any]] = None,
         image_attachments: Optional[List[Dict[str, Any]]] = None,
         stream_text_callback: Optional[Callable[[str], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
@@ -595,9 +669,15 @@ class LLMClient:
         try:
             messages = self._build_messages_for_chat(prompt, image_attachments)
             should_stream_text = bool(stream_text_callback and not tools)
+            policy = resolved_policy or self._resolve_task_policy(
+                model_name=str(model),
+                llm_options=llm_options,
+                override_max_tokens=max_tokens,
+                override_temperature=temperature,
+            )
             token_key = (
                 "max_completion_tokens"
-                if self._uses_max_completion_tokens(str(model))
+                if policy.token_param == "max_completion_tokens"
                 else "max_tokens"
             )
             # 构建请求参数（和主 API 服务保持一致）
@@ -606,9 +686,9 @@ class LLMClient:
                 "messages": messages,
                 "stream": should_stream_text,
             }
-            if self._supports_custom_temperature(str(model)) or float(temperature) == 1.0:
-                kwargs["temperature"] = temperature
-            kwargs[token_key] = max_tokens or self.max_tokens
+            if policy.send_temperature:
+                kwargs["temperature"] = policy.temperature
+            kwargs[token_key] = policy.max_output_tokens
             
             # 如果提供了工具，添加到请求中
             if tools:
@@ -714,6 +794,8 @@ class LLMClient:
                 "provider": provider,
                 "model": model,
                 "cost": cost,
+                "policy_version": policy.policy_version,
+                "task_id": policy.task_id,
             }
         
         except Exception as e:

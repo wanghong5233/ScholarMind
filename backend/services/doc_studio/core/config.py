@@ -28,6 +28,14 @@ class Settings(BaseSettings):
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
     OPENAI_MODEL_NAME: str = "gpt-5.2"
     OPENAI_MODEL_CANDIDATES: str = "gpt-5.2,gpt-5-mini,gpt-4.1,gpt-4o"
+    LLM_POLICY_ENABLED: bool = True
+    LLM_POLICY_VERSION: str = "v1"
+    LLM_POLICY_MANIFEST_PATH: str = "/shared/llm_policy/llm_policy.v1.json"
+    LLM_POLICY_TASK_ASK: str = "docstudio.ask"
+    LLM_POLICY_TASK_GUARDRAIL: str = "docstudio.guardrail"
+    LLM_POLICY_TASK_ANALYSIS: str = "docstudio.analysis"
+    LLM_POLICY_TASK_ANSWER_WITHOUT_EDIT: str = "docstudio.answer_without_edit"
+    LLM_POLICY_AUDIT_ENABLED: bool = True
 
     # LLM 请求超时与健康策略
     LLM_REQUEST_TIMEOUT: int = 75

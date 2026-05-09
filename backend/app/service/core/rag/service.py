@@ -33,7 +33,9 @@ class RAGService:
     """Retrieval-only RAG engine for chunk search."""
     def __init__(self) -> None:
         self.store = self._build_vector_store()
-        self.llm_aux = LLMClient(task="aux")
+        self.llm_rewrite = LLMClient(task="rewrite")
+        self.llm_hyde = LLMClient(task="hyde")
+        self.llm_translate = LLMClient(task="translate")
         self.logger = logging.getLogger("rag.service")
         self._last_retrieval_debug: Dict[str, Any] | None = None
         self._last_variant_meta: Dict[str, Any] | None = None
@@ -1017,7 +1019,7 @@ class RAGService:
         ]
         json_payload: Optional[str]
         try:
-            json_payload = self.llm_aux.generate(prompts, temperature=0.1, max_tokens=256, stream=False)
+            json_payload = self.llm_rewrite.generate(prompts, stream=False)
         except Exception:
             json_payload = None
 
@@ -1068,7 +1070,7 @@ class RAGService:
             {"role": "user", "content": user_prompt},
         ]
         try:
-            hyde = self.llm_aux.generate(
+            hyde = self.llm_hyde.generate(
                 prompts,
                 temperature=float(getattr(settings, "SM_HYDE_TEMPERATURE", 0.2) or 0.2),
                 max_tokens=int(getattr(settings, "SM_HYDE_MAX_TOKENS", 256) or 256),
@@ -1227,12 +1229,7 @@ class RAGService:
             {"role": "user", "content": text},
         ]
         try:
-            translated = self.llm_aux.generate(
-                prompts,
-                temperature=0.0,
-                max_tokens=256,
-                stream=False,
-            )
+            translated = self.llm_translate.generate(prompts, stream=False)
             return translated or text
         except Exception as exc:
             try:

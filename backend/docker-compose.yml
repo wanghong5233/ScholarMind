@@ -15,10 +15,12 @@ services: # 定义一系列的服务（容器）
       REDIS_DB: 0
       SEMANTIC_SCHOLAR_API_KEY: ${SEMANTIC_SCHOLAR_API_KEY:-}
       RAG_PROJECT_BASE: /app/service/core
-      SM_PARSER_ORDER: ${SM_PARSER_ORDER:-llamaparse,unstructured_api,unstructured,pymupdf}
+      SM_PARSER_ORDER: ${SM_PARSER_ORDER:-llamaparse,unstructured_api,pymupdf}
       SM_GROBID_ENABLED: ${SM_GROBID_ENABLED:-false}
       SM_RERANKER_TYPE: ${SM_RERANKER_TYPE:-dashscope}
       PYTHONUNBUFFERED: 1
+      PYTHONPATH: /app:/shared
+      SM_LLM_POLICY_MANIFEST_PATH: ${SM_LLM_POLICY_MANIFEST_PATH:-/shared/llm_policy/llm_policy.v1.json}
     extra_hosts: # 添加额外的主机名到IP地址的映射，类似于/etc/hosts文件
       - "host.docker.internal:host-gateway" # 允许容器连接到宿主机的特殊地址
     env_file: # 从文件加载环境变量
@@ -27,6 +29,7 @@ services: # 定义一系列的服务（容器）
       - "8000:8000"  # 将宿主机的8000端口映射到容器的8000端口
     volumes: # 定义数据卷挂载，用于数据持久化或代码同步
       - ./app:/app # 挂载本地的 app 目录，实现代码热更新
+      - ./shared:/shared # 共享策略与模型能力画像
       # NLTK 数据已预置于镜像，无需挂载（原 Windows 路径会致 Linux/Mac 启动失败）
       - ./storage_root:/app/service/core/storage
       - models_data:/models  # 共享模型目录（与reranker服务共享）
@@ -178,22 +181,24 @@ services: # 定义一系列的服务（容器）
   doc_studio: # Doc Studio 服务
     container_name: scholarmind_doc_studio
     build:
-      context: ./services/doc_studio
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: ./services/doc_studio/Dockerfile
     hostname: doc_studio
     env_file:
       - .env  # 加载 .env 文件，包含 LLM_API_KEY 等配置
     environment:
       - PYTHONUNBUFFERED=1
-      - PYTHONPATH=/app
+      - PYTHONPATH=/app:/shared
       - PORT=8003
       - RAG_SERVICE_URL=http://scholarmind_api:8000
       - DATABASE_URL=postgresql://postgres:pg123456@scholarmind_db:5432/scholarmind
+      - LLM_POLICY_MANIFEST_PATH=${LLM_POLICY_MANIFEST_PATH:-/shared/llm_policy/llm_policy.v1.json}
     ports:
       - "8003:8003"  # 暴露端口供调试
     volumes:
       - latex_workspaces:/app/workspaces  # 工作区文件存储
       - ./services/doc_studio:/app  # 代码热更新（开发环境）
+      - ./shared:/shared
     command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8003", "--reload", "--timeout-graceful-shutdown", "5"]  # 开启热重载
     healthcheck:
       # 使用 python 标准库做健康检查，避免依赖 curl 是否存在
@@ -211,22 +216,24 @@ services: # 定义一系列的服务（容器）
   deep_research: # DeepResearch 服务
     container_name: scholarmind_deep_research
     build:
-      context: ./services/deep_research
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: ./services/deep_research/Dockerfile
     hostname: deep_research
     env_file:
       - .env
     environment:
       - PYTHONUNBUFFERED=1
-      - PYTHONPATH=/app
+      - PYTHONPATH=/app:/shared
       - PORT=8004
       - RAG_SERVICE_URL=http://scholarmind_api:8000
       - DATA_ROOT=/app/data/deep_research
+      - LLM_POLICY_MANIFEST_PATH=${LLM_POLICY_MANIFEST_PATH:-/shared/llm_policy/llm_policy.v1.json}
     ports:
       - "8004:8004"  # 暴露端口供调试
     volumes:
       - deep_research_data:/app/data/deep_research
       - ./services/deep_research:/app  # 代码热更新（开发环境）
+      - ./shared:/shared
     command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8004", "--reload", "--timeout-graceful-shutdown", "5"]
     healthcheck:
       # 使用 python 标准库做健康检查，避免依赖 curl 是否存在

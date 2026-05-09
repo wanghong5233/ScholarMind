@@ -318,10 +318,12 @@ def get_current_demo_user(subject: "JwtAuthorizationCredentials" = Depends(acces
         return user
     except HTTPException:
         raise
-    except Exception as e:
+    except SQLAlchemyError as e:
+        # 这里是认证依赖访问数据库失败（例如连接池耗尽），不是 token 无效。
+        # 返回 503 避免前端把它误判为“登录态失效”并强制登出。
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid token: {str(e)}",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication backend temporarily unavailable",
         ) from e
     finally:
         db.close()
@@ -361,11 +363,12 @@ def get_current_user(subject: "JwtAuthorizationCredentials" = Depends(access_sec
         return user
     except HTTPException:
         raise
-    except Exception as e:
+    except SQLAlchemyError as e:
+        # 数据库异常不应伪装成 401，否则前端会清空 token 并跳登录。
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid token: {str(e)}",
-        )
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication backend temporarily unavailable",
+        ) from e
     finally:
         db.close()
 

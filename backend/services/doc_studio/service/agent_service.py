@@ -1346,13 +1346,13 @@ class LaTeXEditAgent(BaseAgent):
 
         prompt = self._build_ask_prompt(state, user_intent, context_payload)
         ask_llm_options = dict(state.llm_options or {})
-        # Ask 模式默认限制输出长度，避免长流式输出导致总时长显著拉长。
+        ask_llm_options["policy_task_id"] = getattr(settings, "LLM_POLICY_TASK_ASK", "docstudio.ask")
         configured_max_tokens = ask_llm_options.get("llm_max_tokens")
         try:
-            current_max_tokens = int(configured_max_tokens) if configured_max_tokens is not None else int(settings.LLM_MAX_TOKENS)
-        except Exception:
-            current_max_tokens = int(settings.LLM_MAX_TOKENS)
-        ask_llm_options["llm_max_tokens"] = min(max(current_max_tokens, 256), 1200)
+            if configured_max_tokens is not None:
+                ask_llm_options["llm_max_tokens"] = int(configured_max_tokens)
+        except (TypeError, ValueError):
+            ask_llm_options.pop("llm_max_tokens", None)
         llm_result = await self.llm.generate(
             prompt=prompt,
             temperature=self.llm.temperature,
@@ -2129,16 +2129,17 @@ class LaTeXEditAgent(BaseAgent):
             "4) 使用中文。"
         )
         llm_options = dict(state.llm_options or {})
+        llm_options["policy_task_id"] = getattr(settings, "LLM_POLICY_TASK_GUARDRAIL", "docstudio.guardrail")
         raw_max_tokens = llm_options.get("llm_max_tokens")
         try:
-            current_max_tokens = int(raw_max_tokens) if raw_max_tokens is not None else int(settings.LLM_MAX_TOKENS)
-        except Exception:
-            current_max_tokens = int(settings.LLM_MAX_TOKENS)
-        llm_options["llm_max_tokens"] = min(max(current_max_tokens, 256), 520)
+            if raw_max_tokens is not None:
+                llm_options["llm_max_tokens"] = int(raw_max_tokens)
+        except (TypeError, ValueError):
+            llm_options.pop("llm_max_tokens", None)
         try:
             llm_result = await self.llm.generate(
                 prompt=prompt,
-                temperature=min(max(float(self.llm.temperature), 0.0), 0.3),
+                temperature=self.llm.temperature,
                 llm_options=llm_options,
             )
             reply_text = str(llm_result.get("content") or "").strip()
@@ -2942,12 +2943,16 @@ class LaTeXEditAgent(BaseAgent):
 {suggestions_text}
 
 请用 2-3 句话给出结论和下一步行动，使用中文。"""
-        
+        reflection_options = dict(llm_options or {})
+        reflection_options.setdefault(
+            "policy_task_id",
+            getattr(settings, "LLM_POLICY_TASK_ASK", "docstudio.ask"),
+        )
         try:
             response = await self.llm.generate(
                 prompt=prompt,
-                temperature=0.2,
-                llm_options=llm_options,
+                temperature=self.llm.temperature,
+                llm_options=reflection_options,
             )
             return response.get("content")
         except Exception as exc:

@@ -10,6 +10,7 @@ import logging
 from openai import AsyncOpenAI
 
 from core.config import settings
+from service.llm_policy_adapter import get_policy_resolver
 
 
 def _is_placeholder(value: Optional[str]) -> bool:
@@ -180,11 +181,12 @@ class LLMClient:
         api_key: Optional[str],
         base_url: str,
         model_name: str,
-        temperature: float,
-        max_tokens: int,
+        temperature: Optional[float],
+        max_tokens: Optional[int],
         timeout: int,
         usage_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
         usage_label: Optional[str] = None,
+        task_id: str = "deepresearch.report",
         endpoint_chain: Optional[List[LLMEndpoint]] = None,
         provider: str = "custom",
     ) -> None:
@@ -207,8 +209,10 @@ class LLMClient:
         self._logger = logging.getLogger("deep_research.llm_client")
         self._usage_callback = usage_callback
         self._usage_label = usage_label or "llm"
+        self._task_id = str(task_id or "deepresearch.report").strip()
         self._last_usage: Optional[Dict[str, Any]] = None
         self._client_cache: Dict[str, AsyncOpenAI] = {}
+        self._policy_resolver = get_policy_resolver()
 
         primary_endpoint = LLMEndpoint(
             provider=provider or "custom",
@@ -224,6 +228,30 @@ class LLMClient:
         """Return the latest usage payload from the LLM call."""
 
         return self._last_usage
+
+    def get_policy_snapshot(self, model_name: Optional[str] = None) -> Dict[str, Any]:
+        """Return resolved policy values for observability/audit."""
+
+        resolved_model = str(model_name or "").strip()
+        if not resolved_model and self._active_endpoint is not None:
+            resolved_model = self._active_endpoint.model_name
+        if not resolved_model and self._endpoint_chain:
+            resolved_model = self._endpoint_chain[0].model_name
+        policy = self._resolve_task_policy(
+            model_name=resolved_model,
+            override_max_tokens=self._max_tokens,
+            override_temperature=self._temperature,
+            override_timeout_secs=self._timeout,
+        )
+        return {
+            "policy_version": policy.policy_version,
+            "task_id": policy.task_id,
+            "model_name": resolved_model,
+            "token_param": policy.token_param,
+            "max_output_tokens": policy.max_output_tokens,
+            "temperature": policy.temperature,
+            "timeout_secs": policy.timeout_secs,
+        }
 
     @staticmethod
     def estimate_context_window_tokens(model_name: Optional[str]) -> int:
@@ -246,10 +274,25 @@ class LLMClient:
             return 200_000
         return 128_000
 
-    @staticmethod
-    def _uses_max_completion_tokens(model_name: Optional[str]) -> bool:
-        name = str(model_name or "").strip().lower()
-        return name.startswith("gpt-5")
+    def _resolve_task_policy(
+        self,
+        *,
+        model_name: str,
+        override_max_tokens: Optional[int] = None,
+        override_temperature: Optional[float] = None,
+        override_timeout_secs: Optional[float] = None,
+    ):
+        return self._policy_resolver.resolve(
+            task_id=self._task_id,
+            model_name=model_name,
+            override_max_output_tokens=override_max_tokens,
+            override_temperature=override_temperature,
+            override_timeout_secs=override_timeout_secs,
+        )
+
+    def _uses_max_completion_tokens(self, model_name: Optional[str]) -> bool:
+        resolved = self._resolve_task_policy(model_name=str(model_name or ""))
+        return resolved.token_param == "max_completion_tokens"
 
     def get_active_endpoint(self) -> Optional[LLMEndpoint]:
         """Return the endpoint that last generated successfully."""
@@ -273,8 +316,19 @@ class LLMClient:
         if not self.is_configured():
             raise RuntimeError("LLM client not configured; missing API key.")
 
-        max_output_tokens = self._max_tokens if max_tokens is None else max_tokens
-        sampled_temperature = self._temperature if temperature is None else temperature
+        policy_model = ""
+        if self._active_endpoint is not None:
+            policy_model = self._active_endpoint.model_name
+        elif self._endpoint_chain:
+            policy_model = self._endpoint_chain[0].model_name
+        resolved_policy = self._resolve_task_policy(
+            model_name=policy_model,
+            override_max_tokens=max_tokens if max_tokens is not None else self._max_tokens,
+            override_temperature=temperature if temperature is not None else self._temperature,
+            override_timeout_secs=self._timeout,
+        )
+        max_output_tokens = resolved_policy.max_output_tokens
+        sampled_temperature = resolved_policy.temperature
 
         last_exc: Optional[Exception] = None
         for idx, endpoint in enumerate(self._endpoint_chain, start=1):
@@ -323,16 +377,23 @@ class LLMClient:
             client = AsyncOpenAI(api_key=endpoint.api_key, base_url=endpoint.base_url)
             self._client_cache[client_key] = client
 
+        resolved_policy = self._resolve_task_policy(
+            model_name=endpoint.model_name,
+            override_max_tokens=max_output_tokens,
+            override_temperature=sampled_temperature,
+            override_timeout_secs=self._timeout,
+        )
         request_kwargs: Dict[str, Any] = {
             "model": endpoint.model_name,
             "messages": [{"role": "user", "content": prompt}],
-            "temperature": sampled_temperature,
-            "timeout": self._timeout,
+            "timeout": resolved_policy.timeout_secs,
         }
-        if self._uses_max_completion_tokens(endpoint.model_name):
-            request_kwargs["max_completion_tokens"] = max_output_tokens
+        if resolved_policy.send_temperature:
+            request_kwargs["temperature"] = resolved_policy.temperature
+        if resolved_policy.token_param == "max_completion_tokens":
+            request_kwargs["max_completion_tokens"] = resolved_policy.max_output_tokens
         else:
-            request_kwargs["max_tokens"] = max_output_tokens
+            request_kwargs["max_tokens"] = resolved_policy.max_output_tokens
 
         response = await client.chat.completions.create(**request_kwargs)
         self._record_usage(response, endpoint=endpoint)
@@ -362,6 +423,8 @@ class LLMClient:
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
+            "policy_version": self._policy_resolver.policy_version,
+            "task_id": self._task_id,
         }
         self._last_usage = payload
         if self._usage_callback:

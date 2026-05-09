@@ -32,7 +32,14 @@ export default function Login() {
   const redirectPath = useMemo(() => {
     const query = new URLSearchParams(location.search)
     const value = query.get('redirect')
-    if (!value || !value.startsWith('/') || value.startsWith('/admin')) return '/'
+    if (
+      !value ||
+      !value.startsWith('/') ||
+      value.startsWith('/admin') ||
+      value.startsWith('/login')
+    ) {
+      return '/'
+    }
     return value
   }, [location.search])
 

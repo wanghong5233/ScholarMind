@@ -50,6 +50,16 @@ help:
 	@echo
 	@echo DB:
 	@echo   migrate      - Run alembic upgrade head in scholarmind_api
+	@echo
+	@echo Routing eval:
+	@echo   route-report   - Build routing metrics report from ask_events logs
+	@echo   route-bootstrap- Bootstrap real-query labeling set from ask_events
+	@echo   route-eval     - Run offline intent routing evaluator
+	@echo
+	@echo CI guardrails:
+	@echo   policy-lint    - Block new LLM magic-number literals in migrated paths
+	@echo   policy-eval    - Enforce FRR/FNR threshold guardrails
+	@echo   policy-ci      - Run policy-lint + policy-eval
 
 
 # (推荐) 构建并以后台模式启动所有服务
@@ -239,4 +249,31 @@ docker-prune-soft:
 docker-prune-hard:
 	docker system prune -f
 	docker image prune -a -f
+
+# =========================
+# Routing eval commands
+# =========================
+
+.PHONY: route-report
+route-report:
+	$(DC) exec scholarmind_api python /app/scripts/report_route_metrics.py
+
+.PHONY: route-bootstrap
+route-bootstrap:
+	$(DC) exec scholarmind_api python /app/scripts/bootstrap_intent_labels.py
+
+.PHONY: route-eval
+route-eval:
+	$(DC) exec scholarmind_api python /app/scripts/eval_intent_routing.py --samples /app/scripts/intent_routing_eval_samples.jsonl
+
+.PHONY: policy-lint
+policy-lint:
+	python scripts/check_llm_policy_guardrails.py
+
+.PHONY: policy-eval
+policy-eval:
+	python scripts/check_intent_routing_thresholds.py --samples app/scripts/intent_routing_eval_samples.jsonl --max-frr 0.25 --max-fnr 0.25
+
+.PHONY: policy-ci
+policy-ci: policy-lint policy-eval
 

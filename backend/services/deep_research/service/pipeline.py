@@ -920,11 +920,12 @@ class ResearchPipeline:
                     api_key=rag_primary.api_key,
                     base_url=rag_primary.base_url,
                     model_name=rag_primary.model_name,
-                    temperature=0.2,
-                    max_tokens=512,
+                    temperature=None,
+                    max_tokens=None,
                     timeout=self._request_timeout,
                     usage_callback=usage_callback,
                     usage_label="rag.ask.summary",
+                    task_id=getattr(settings, "LLM_POLICY_TASK_RAG_SUMMARY", "deepresearch.rag_summary"),
                     endpoint_chain=rag_endpoints,
                     provider=rag_primary.provider,
                 )
@@ -1686,11 +1687,12 @@ class ResearchPipeline:
             api_key=decision_primary.api_key,
             base_url=decision_primary.base_url,
             model_name=decision_primary.model_name,
-            temperature=settings.DECISION_LLM_TEMPERATURE,
-            max_tokens=settings.DECISION_LLM_MAX_TOKENS,
+            temperature=None,
+            max_tokens=None,
             timeout=self._request_timeout,
             usage_callback=usage_callback,
             usage_label="decision_agent",
+            task_id=getattr(settings, "LLM_POLICY_TASK_DECISION", "deepresearch.decision"),
             endpoint_chain=decision_endpoints,
             provider=decision_primary.provider,
         )
@@ -2132,18 +2134,21 @@ class ResearchPipeline:
             api_key=report_primary.api_key,
             base_url=report_primary.base_url,
             model_name=report_primary.model_name,
-            temperature=settings.REPORT_LLM_TEMPERATURE,
-            max_tokens=settings.REPORT_LLM_MAX_TOKENS,
+            temperature=None,
+            max_tokens=None,
             timeout=self._request_timeout,
             usage_callback=usage_callback,
             usage_label="report_refiner",
+            task_id=getattr(settings, "LLM_POLICY_TASK_REPORT", "deepresearch.report"),
             endpoint_chain=report_endpoints,
             provider=report_primary.provider,
         )
+        report_policy = client.get_policy_snapshot(report_primary.model_name)
+        report_max_tokens = int(report_policy.get("max_output_tokens") or settings.REPORT_LLM_MAX_TOKENS)
         context_window = LLMClient.estimate_context_window_tokens(report_primary.model_name)
         input_budget = min(
             int(getattr(settings, "REPORT_PROMPT_MAX_INPUT_TOKENS", 16000) or 16000),
-            max(2400, context_window - int(settings.REPORT_LLM_MAX_TOKENS) - 1200),
+            max(2400, context_window - report_max_tokens - 1200),
         )
         refiner = ReportRefiner(client, language=language)
         return await refiner.refine(
@@ -2214,14 +2219,16 @@ class ResearchPipeline:
             api_key=section_primary.api_key,
             base_url=section_primary.base_url,
             model_name=section_primary.model_name,
-            temperature=settings.REPORT_LLM_TEMPERATURE,
-            max_tokens=settings.REPORT_LLM_MAX_TOKENS,
+            temperature=None,
+            max_tokens=None,
             timeout=self._request_timeout,
             usage_callback=usage_callback,
             usage_label="report_section",
+            task_id=getattr(settings, "LLM_POLICY_TASK_REPORT_SECTION", "deepresearch.report_section"),
             endpoint_chain=section_endpoints,
             provider=section_primary.provider,
         )
+        section_policy = client.get_policy_snapshot(section_primary.model_name)
 
         builder = ReportTemplateBuilder(language=language)
         sections = builder.build_sections()
@@ -2237,7 +2244,11 @@ class ResearchPipeline:
                 int(getattr(settings, "REPORT_REFERENCES_MAX_TOTAL", 80) or 80),
             )
         )
-        section_max_tokens = int(getattr(settings, "REPORT_LLM_SECTION_MAX_TOKENS", 1024) or 1024)
+        section_max_tokens = int(
+            section_policy.get("max_output_tokens")
+            or getattr(settings, "REPORT_LLM_SECTION_MAX_TOKENS", 1024)
+            or 1024
+        )
         section_context_window = LLMClient.estimate_context_window_tokens(section_primary.model_name)
         section_input_budget = min(
             int(getattr(settings, "REPORT_SECTION_PROMPT_MAX_INPUT_TOKENS", 9000) or 9000),
@@ -2262,6 +2273,8 @@ class ResearchPipeline:
                 "section_input_budget_tokens": section_input_budget,
                 "provider": section_primary.provider,
                 "model": section_primary.model_name,
+                "policy_version": section_policy.get("policy_version"),
+                "task_id": section_policy.get("task_id"),
             },
         )
 

@@ -6,7 +6,12 @@ export function buildLoginPath(redirectPath?: string) {
       ? '/chat'
       : `${window.location.pathname}${window.location.search || ''}`
   const target = redirectPath || fallback || '/chat'
-  const safeTarget = target.startsWith('/') && !target.startsWith('/admin') ? target : '/chat'
+  const normalizedPath = target.split('?')[0]
+  const isLoginLike = normalizedPath === '/login' || normalizedPath === '/admin/login'
+  const safeTarget =
+    target.startsWith('/') && !target.startsWith('/admin') && !isLoginLike
+      ? target
+      : '/chat'
   return `/login?redirect=${encodeURIComponent(safeTarget)}`
 }
 

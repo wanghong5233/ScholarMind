@@ -9,6 +9,7 @@ from typing import List, Dict, Any, Optional
 import logging
 import uuid
 
+from core.config import settings
 from utils.trace import set_trace_id, get_trace_id, clear_trace_id
 
 
@@ -122,7 +123,26 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "doc-studio",
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "llm_policy": {
+            "enabled": bool(getattr(settings, "LLM_POLICY_ENABLED", True)),
+            "version": str(getattr(settings, "LLM_POLICY_VERSION", "v1")),
+            "manifest_path": str(getattr(settings, "LLM_POLICY_MANIFEST_PATH", "")),
+            "task_ids": {
+                "ask": str(getattr(settings, "LLM_POLICY_TASK_ASK", "docstudio.ask")),
+                "guardrail": str(
+                    getattr(settings, "LLM_POLICY_TASK_GUARDRAIL", "docstudio.guardrail")
+                ),
+                "analysis": str(getattr(settings, "LLM_POLICY_TASK_ANALYSIS", "docstudio.analysis")),
+                "answer_without_edit": str(
+                    getattr(
+                        settings,
+                        "LLM_POLICY_TASK_ANSWER_WITHOUT_EDIT",
+                        "docstudio.answer_without_edit",
+                    )
+                ),
+            },
+        },
     }
 
 
@@ -137,6 +157,5 @@ app.include_router(training_rt.router, prefix="/api", tags=["RL Training"])
 
 if __name__ == "__main__":
     import uvicorn
-    from core.config import settings
     uvicorn.run(app, host=settings.HOST, port=settings.PORT)
 

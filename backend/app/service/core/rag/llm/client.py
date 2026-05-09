@@ -4,6 +4,8 @@ from core.config import settings
 import httpx
 import logging
 
+from service.core.rag.llm.policy_adapter import get_policy_resolver
+
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,7 @@ class LLMClient:
         self.timeout_secs = float(timeout_secs or getattr(settings, "SM_LLM_REQUEST_TIMEOUT_SECS", 60) or 60)
         self._last_usage: Dict[str, int] | None = None
         self._last_runtime_model: Dict[str, Any] | None = None
+        self._policy_resolver = get_policy_resolver()
 
     @staticmethod
     def _normalize_provider(provider: Optional[str]) -> str:
@@ -79,15 +82,13 @@ class LLMClient:
             return "dashscope"
         return None
 
-    @staticmethod
-    def _uses_max_completion_tokens(model: str) -> bool:
-        name = str(model or "").strip().lower()
-        return name.startswith("gpt-5")
+    def _uses_max_completion_tokens(self, model: str) -> bool:
+        resolved = self._resolve_task_policy(model_name=model)
+        return resolved.token_param == "max_completion_tokens"
 
-    @staticmethod
-    def _supports_custom_temperature(model: str) -> bool:
-        name = str(model or "").strip().lower()
-        return not name.startswith("gpt-5")
+    def _supports_custom_temperature(self, model: str) -> bool:
+        resolved = self._resolve_task_policy(model_name=model)
+        return bool(resolved.supports_custom_temperature)
 
     def _model_matches_provider(self, model: Optional[str], provider: str) -> bool:
         inferred = self._infer_provider_from_model(model)
@@ -132,6 +133,8 @@ class LLMClient:
             "rewrite": aux,
             "translate": aux,
             "hyde": aux,
+            "fact_extraction": aux,
+            "equation_description": aux,
         }
         selected = routing.get(task) or aux or answer or default_model
         candidates = [selected, aux, answer, default_model]
@@ -139,6 +142,51 @@ class LLMClient:
             if candidate and self._model_matches_provider(str(candidate), provider):
                 return str(candidate)
         return str(default_model)
+
+    def _policy_task_id(self) -> str:
+        mapping = {
+            "answer": str(getattr(settings, "SM_LLM_POLICY_TASK_ANSWER", "app.answer") or "app.answer"),
+            "default": str(getattr(settings, "SM_LLM_POLICY_TASK_ANSWER", "app.answer") or "app.answer"),
+            "aux": str(getattr(settings, "SM_LLM_POLICY_TASK_AUX", "app.aux") or "app.aux"),
+            "graph": str(getattr(settings, "SM_LLM_POLICY_TASK_GRAPH", "app.graph") or "app.graph"),
+            "rewrite": str(getattr(settings, "SM_LLM_POLICY_TASK_REWRITE", "app.rewrite") or "app.rewrite"),
+            "translate": str(
+                getattr(settings, "SM_LLM_POLICY_TASK_TRANSLATE", "app.translate") or "app.translate"
+            ),
+            "hyde": str(getattr(settings, "SM_LLM_POLICY_TASK_HYDE", "app.hyde") or "app.hyde"),
+            "summary": str(getattr(settings, "SM_LLM_POLICY_TASK_SUMMARY", "app.summary") or "app.summary"),
+            "compression": str(
+                getattr(settings, "SM_LLM_POLICY_TASK_COMPRESSION", "app.compression")
+                or "app.compression"
+            ),
+            "fact_extraction": str(
+                getattr(settings, "SM_LLM_POLICY_TASK_FACT_EXTRACTION", "app.fact_extraction")
+                or "app.fact_extraction"
+            ),
+            "equation_description": str(
+                getattr(settings, "SM_LLM_POLICY_TASK_EQUATION_DESCRIPTION", "app.equation_description")
+                or "app.equation_description"
+            ),
+        }
+        return mapping.get(self.task, mapping["default"])
+
+    def _resolve_task_policy(
+        self,
+        *,
+        model_name: str,
+        override_max_tokens: Optional[int] = None,
+        override_temperature: Optional[float] = None,
+        override_retries: Optional[int] = None,
+        override_timeout_secs: Optional[float] = None,
+    ):
+        return self._policy_resolver.resolve(
+            task_id=self._policy_task_id(),
+            model_name=model_name,
+            override_max_output_tokens=override_max_tokens,
+            override_temperature=override_temperature,
+            override_retries=override_retries,
+            override_timeout_secs=override_timeout_secs,
+        )
 
     @staticmethod
     def _split_csv(value: Optional[str]) -> List[str]:
@@ -285,28 +333,55 @@ class LLMClient:
         self,
         messages: List[Dict[str, Any]],
         *,
-        temperature: float = 0.3,
-        max_tokens: int = 512,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
         stream: bool = True,
-        retries: int = 2,
+        retries: Optional[int] = None,
         model: Optional[str] = None,
         provider: Optional[str] = None,
     ) -> Iterable[str] | str:
         self._last_usage = None
+        requested_provider, _, _, requested_model = self._resolve_runtime_config(
+            provider=provider,
+            model=model,
+        )
+        resolved_policy = self._resolve_task_policy(
+            model_name=requested_model,
+            override_max_tokens=max_tokens,
+            override_temperature=temperature,
+            override_retries=retries,
+            override_timeout_secs=self.timeout_secs,
+        )
+        resolved_temperature = resolved_policy.temperature
+        resolved_max_tokens = resolved_policy.max_output_tokens
+        resolved_retries = resolved_policy.retries
+        resolved_timeout_secs = resolved_policy.timeout_secs
+        self._last_runtime_model = {
+            "requested_provider": requested_provider,
+            "requested_model": requested_model,
+            "actual_provider": requested_provider,
+            "actual_model": requested_model,
+            "fallback_applied": False,
+            "policy_version": resolved_policy.policy_version,
+            "task_id": resolved_policy.task_id,
+            "resolved_max_output_tokens": resolved_max_tokens,
+        }
         if stream:
             return self._generate_stream(
                 messages,
-                temperature,
-                max_tokens,
-                retries,
+                resolved_temperature,
+                resolved_max_tokens,
+                resolved_retries,
+                resolved_timeout_secs,
                 model=model,
                 provider=provider,
             )
         return self._generate_once(
             messages,
-            temperature,
-            max_tokens,
-            retries,
+            resolved_temperature,
+            resolved_max_tokens,
+            resolved_retries,
+            resolved_timeout_secs,
             model=model,
             provider=provider,
         )
@@ -319,6 +394,24 @@ class LLMClient:
         """Return the requested and actual model used by the last generation."""
         return dict(self._last_runtime_model) if isinstance(self._last_runtime_model, dict) else None
 
+    def get_policy_snapshot(self, model_name: Optional[str] = None) -> Dict[str, Any]:
+        """Return resolved policy for current task/model."""
+
+        resolved_model = str(model_name or "").strip() or self.model
+        resolved = self._resolve_task_policy(
+            model_name=resolved_model,
+            override_timeout_secs=self.timeout_secs,
+        )
+        return {
+            "policy_version": resolved.policy_version,
+            "task_id": resolved.task_id,
+            "model_name": resolved_model,
+            "token_param": resolved.token_param,
+            "max_output_tokens": resolved.max_output_tokens,
+            "temperature": resolved.temperature,
+            "timeout_secs": resolved.timeout_secs,
+        }
+
     # --- internals ---
     def _generate_stream(
         self,
@@ -326,6 +419,7 @@ class LLMClient:
         temperature: float,
         max_tokens: int,
         retries: int,
+        request_timeout_secs: float,
         *,
         model: Optional[str] = None,
         provider: Optional[str] = None,
@@ -345,6 +439,13 @@ class LLMClient:
                 if resolved_provider in ("dashscope", "openai"):
                     if not base_url or not api_key:
                         raise RuntimeError(f"{resolved_provider} API key not configured")
+                    resolved_policy = self._resolve_task_policy(
+                        model_name=model_name,
+                        override_max_tokens=max_tokens,
+                        override_temperature=temperature,
+                        override_retries=retries,
+                        override_timeout_secs=request_timeout_secs,
+                    )
                     self._last_runtime_model = {
                         "requested_provider": requested_provider,
                         "requested_model": requested_model,
@@ -354,6 +455,9 @@ class LLMClient:
                             resolved_provider != requested_provider
                             or model_name != requested_model
                         ),
+                        "policy_version": resolved_policy.policy_version,
+                        "task_id": resolved_policy.task_id,
+                        "resolved_max_output_tokens": resolved_policy.max_output_tokens,
                     }
                     url = f"{base_url.rstrip('/')}/chat/completions"
                     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -362,14 +466,20 @@ class LLMClient:
                         "messages": messages,
                         "stream": True,
                     }
-                    if self._supports_custom_temperature(model_name) or float(temperature) == 1.0:
-                        payload["temperature"] = temperature
-                    if self._uses_max_completion_tokens(model_name):
-                        payload["max_completion_tokens"] = max_tokens
+                    if resolved_policy.send_temperature:
+                        payload["temperature"] = resolved_policy.temperature
+                    if resolved_policy.token_param == "max_completion_tokens":
+                        payload["max_completion_tokens"] = resolved_policy.max_output_tokens
                     else:
-                        payload["max_tokens"] = max_tokens
+                        payload["max_tokens"] = resolved_policy.max_output_tokens
                     # 直连 SSE，逐行解析 data: {...}
-                    with httpx.stream("POST", url, headers=headers, json=payload, timeout=self.timeout_secs) as resp:
+                    with httpx.stream(
+                        "POST",
+                        url,
+                        headers=headers,
+                        json=payload,
+                        timeout=resolved_policy.timeout_secs,
+                    ) as resp:
                         resp.raise_for_status()
                         for line in resp.iter_lines():
                             if not line:
@@ -413,6 +523,9 @@ class LLMClient:
                         resolved_provider != requested_provider
                         or model_name != requested_model
                     ),
+                    "policy_version": self._policy_resolver.policy_version,
+                    "task_id": self._policy_task_id(),
+                    "resolved_max_output_tokens": max_tokens,
                 }
                 content = self._fake_completion(messages, temperature, max_tokens, model=model_name)
                 self._last_usage = self._estimate_usage(messages=messages, answer=content)
@@ -438,6 +551,7 @@ class LLMClient:
         temperature: float,
         max_tokens: int,
         retries: int,
+        request_timeout_secs: float,
         *,
         model: Optional[str] = None,
         provider: Optional[str] = None,
@@ -456,6 +570,13 @@ class LLMClient:
                 if resolved_provider in ("dashscope", "openai"):
                     if not base_url or not api_key:
                         raise RuntimeError(f"{resolved_provider} API key not configured")
+                    resolved_policy = self._resolve_task_policy(
+                        model_name=model_name,
+                        override_max_tokens=max_tokens,
+                        override_temperature=temperature,
+                        override_retries=retries,
+                        override_timeout_secs=request_timeout_secs,
+                    )
                     self._last_runtime_model = {
                         "requested_provider": requested_provider,
                         "requested_model": requested_model,
@@ -465,6 +586,9 @@ class LLMClient:
                             resolved_provider != requested_provider
                             or model_name != requested_model
                         ),
+                        "policy_version": resolved_policy.policy_version,
+                        "task_id": resolved_policy.task_id,
+                        "resolved_max_output_tokens": resolved_policy.max_output_tokens,
                     }
                     url = f"{base_url.rstrip('/')}/chat/completions"
                     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -473,13 +597,18 @@ class LLMClient:
                         "messages": messages,
                         "stream": False,
                     }
-                    if self._supports_custom_temperature(model_name) or float(temperature) == 1.0:
-                        payload["temperature"] = temperature
-                    if self._uses_max_completion_tokens(model_name):
-                        payload["max_completion_tokens"] = max_tokens
+                    if resolved_policy.send_temperature:
+                        payload["temperature"] = resolved_policy.temperature
+                    if resolved_policy.token_param == "max_completion_tokens":
+                        payload["max_completion_tokens"] = resolved_policy.max_output_tokens
                     else:
-                        payload["max_tokens"] = max_tokens
-                    r = httpx.post(url, headers=headers, json=payload, timeout=self.timeout_secs)
+                        payload["max_tokens"] = resolved_policy.max_output_tokens
+                    r = httpx.post(
+                        url,
+                        headers=headers,
+                        json=payload,
+                        timeout=resolved_policy.timeout_secs,
+                    )
                     r.raise_for_status()
                     obj = r.json()
                     usage = self._coerce_usage(obj.get("usage"))
@@ -506,6 +635,9 @@ class LLMClient:
                         resolved_provider != requested_provider
                         or model_name != requested_model
                     ),
+                    "policy_version": self._policy_resolver.policy_version,
+                    "task_id": self._policy_task_id(),
+                    "resolved_max_output_tokens": max_tokens,
                 }
                 text = self._fake_completion(messages, temperature, max_tokens, model=model_name)
                 self._last_usage = self._estimate_usage(messages=messages, answer=text)

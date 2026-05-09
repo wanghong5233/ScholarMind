@@ -18,12 +18,36 @@ from openai import AsyncOpenAI
 from .base_tool import BaseTool, ToolResult
 from .workspace_utils import get_workspace_path, resolve_path_within_workspace
 from core.config import settings
+from service.llm_policy_adapter import get_policy_resolver
 from .latex_utils import (
     list_workspace_files,
     collect_latex_metadata,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _build_policy_chat_kwargs(
+    *,
+    policy_task_id: str,
+    model_name: str,
+    messages: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    resolver = get_policy_resolver()
+    resolved = resolver.resolve(
+        task_id=str(policy_task_id or "docstudio.ask").strip() or "docstudio.ask",
+        model_name=str(model_name or "").strip(),
+        override_timeout_secs=getattr(settings, "LLM_REQUEST_TIMEOUT", 75),
+    )
+    kwargs: Dict[str, Any] = {
+        "model": model_name,
+        "messages": messages,
+        "stream": False,
+    }
+    if resolved.send_temperature:
+        kwargs["temperature"] = resolved.temperature
+    kwargs[resolved.token_param] = resolved.max_output_tokens
+    return kwargs
 
 
 class _SemanticEmbeddingClient:
@@ -711,6 +735,10 @@ class AnalyzeContextTool(BaseTool):
         self.api_key = os.getenv("DASHSCOPE_API_KEY") or os.getenv("OPENAI_API_KEY")
         self.base_url = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
         self.model = os.getenv("DASHSCOPE_MODEL_NAME", "qwen3-max")
+        self.policy_task_id = str(
+            getattr(settings, "LLM_POLICY_TASK_ANALYSIS", "docstudio.analysis")
+            or "docstudio.analysis"
+        ).strip() or "docstudio.analysis"
         
         # 使用 OpenAI SDK 客户端（和主 API 服务一样）
         if self.api_key:
@@ -813,13 +841,12 @@ class AnalyzeContextTool(BaseTool):
                 raise ValueError("LLM client not configured")
             
             # 使用 OpenAI SDK（和主 API 服务一样，自带超时和重试管理）
-            response = await self.client.chat.completions.create(
-                model=self.model,
+            request_kwargs = _build_policy_chat_kwargs(
+                policy_task_id=self.policy_task_id,
+                model_name=self.model,
                 messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-                max_tokens=2000,
-                stream=False
             )
+            response = await self.client.chat.completions.create(**request_kwargs)
             
             content = response.choices[0].message.content or ""
             
@@ -1825,6 +1852,10 @@ class AnswerWithoutEditTool(BaseTool):
         self.api_key = os.getenv("DASHSCOPE_API_KEY") or os.getenv("OPENAI_API_KEY")
         self.base_url = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
         self.model = os.getenv("DASHSCOPE_MODEL_NAME", "qwen3-max")
+        self.policy_task_id = str(
+            getattr(settings, "LLM_POLICY_TASK_ANSWER_WITHOUT_EDIT", "docstudio.answer_without_edit")
+            or "docstudio.answer_without_edit"
+        ).strip() or "docstudio.answer_without_edit"
         self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url) if self.api_key else None
 
     async def execute(
@@ -1859,15 +1890,15 @@ class AnswerWithoutEditTool(BaseTool):
         )
 
         try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
+            request_kwargs = _build_policy_chat_kwargs(
+                policy_task_id=self.policy_task_id,
+                model_name=self.model,
                 messages=[
                     {"role": "system", "content": "你是一个严谨的学术写作助手。"},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0.3,
-                max_tokens=800,
             )
+            response = await self.client.chat.completions.create(**request_kwargs)
             answer = response.choices[0].message.content if response.choices else ""
         except Exception as exc:
             logger.error("AnswerWithoutEditTool 调用 LLM 失败: %s", exc, exc_info=True)

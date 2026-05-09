@@ -100,6 +100,23 @@ async def health_check():
         "status": "healthy",
         "service": settings.SERVICE_NAME,
         "version": settings.SERVICE_VERSION,
+        "llm_policy": {
+            "enabled": bool(getattr(settings, "LLM_POLICY_ENABLED", True)),
+            "version": str(getattr(settings, "LLM_POLICY_VERSION", "v1")),
+            "manifest_path": str(getattr(settings, "LLM_POLICY_MANIFEST_PATH", "")),
+            "task_ids": {
+                "rag_summary": str(
+                    getattr(settings, "LLM_POLICY_TASK_RAG_SUMMARY", "deepresearch.rag_summary")
+                ),
+                "decision": str(
+                    getattr(settings, "LLM_POLICY_TASK_DECISION", "deepresearch.decision")
+                ),
+                "report": str(getattr(settings, "LLM_POLICY_TASK_REPORT", "deepresearch.report")),
+                "report_section": str(
+                    getattr(settings, "LLM_POLICY_TASK_REPORT_SECTION", "deepresearch.report_section")
+                ),
+            },
+        },
     }
 
 

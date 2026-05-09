@@ -7,6 +7,7 @@ from typing import List, Tuple, Optional
 from service.core.ingestion.interfaces import ParsedBlock, MetadataExtractor
 from service.semantic_scholar_service import semantic_scholar_service
 from service.core.ingestion.grobid_client import get_grobid_client
+from service.document_identity import normalize_doi, normalize_semantic_scholar_id
 
 
 # Pre-compiled regex for speed
@@ -87,6 +88,7 @@ class DefaultMetadataExtractor(MetadataExtractor):
         
         # 先做轻量内容解析，收集候选（但此时不写回，只缓存）
         parsed_title, parsed_doi, parsed_abstract, parsed_keywords = self._extract_from_blocks(blocks)
+        parsed_doi = normalize_doi(parsed_doi)
         logger.info(
             f"[METADATA_FROM_BLOCKS] doc_id={doc_id} "
             f"title={'YES' if parsed_title else 'NO'} "
@@ -122,7 +124,7 @@ class DefaultMetadataExtractor(MetadataExtractor):
                     grobid_metadata = grobid_client.process_header_document(document.local_pdf_path)
                     if grobid_metadata:
                         g_title = grobid_metadata.get("title")
-                        g_doi = grobid_metadata.get("doi")
+                        g_doi = normalize_doi(grobid_metadata.get("doi"))
                         g_abstract = grobid_metadata.get("abstract")
                         g_keywords = grobid_metadata.get("keywords")
                         
@@ -145,7 +147,7 @@ class DefaultMetadataExtractor(MetadataExtractor):
                 logger.warning(f"[METADATA_GROBID_FAILED] doc_id={doc_id} error={e}")
 
         # 1) Semantic Scholar 补强（用Grobid的DOI查询，获取标准化标题和学术元数据）
-        doi = document.doi or parsed_doi
+        doi = normalize_doi(document.doi or parsed_doi)
         detail = None
         if doi:
             logger.info(f"[METADATA_S2_QUERY] doc_id={doc_id} method=doi value={doi}")
@@ -178,7 +180,7 @@ class DefaultMetadataExtractor(MetadataExtractor):
             changed = True
         if parsed_doi and not getattr(document, "doi", None):
             logger.info(f"[METADATA_WRITE] doc_id={doc_id} field=doi source=parsed value={parsed_doi}")
-            document.doi = parsed_doi
+            document.doi = normalize_doi(parsed_doi)
             changed = True
         if parsed_abstract and not getattr(document, "abstract", None):
             abstract_source = "GROBID" if grobid_metadata and grobid_metadata.get("abstract") else "PARSED"
@@ -594,7 +596,7 @@ class DefaultMetadataExtractor(MetadataExtractor):
             document.journal_or_conference = detail.get("venue")
             changed = True
         if not getattr(document, "semantic_scholar_id", None) and detail.get("paperId"):
-            document.semantic_scholar_id = detail.get("paperId")
+            document.semantic_scholar_id = normalize_semantic_scholar_id(detail.get("paperId"))
             changed = True
         if not getattr(document, "citation_count", None) and detail.get("citationCount"):
             document.citation_count = detail.get("citationCount")
@@ -727,6 +729,6 @@ class DefaultMetadataExtractor(MetadataExtractor):
     def _extract_doi_from_text(self, text: str) -> Optional[str]:
         """Extracts the first valid DOI from a given body of text."""
         match = DOI_RE.search(text)
-        return match.group(0) if match else None
+        return normalize_doi(match.group(0)) if match else None
 
 

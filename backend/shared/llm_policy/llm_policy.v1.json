@@ -1,0 +1,240 @@
+{
+  "policy_version": "v1",
+  "default_task": "app.answer",
+  "rollout": {
+    "recommended_steps": [5, 20, 50, 100]
+  },
+  "model_capabilities": [
+    {
+      "profile_id": "openai_gpt5",
+      "model_prefixes": ["gpt-5"],
+      "token_param": "max_completion_tokens",
+      "supports_custom_temperature": false,
+      "context_window_hint": 400000
+    },
+    {
+      "profile_id": "openai_gpt41",
+      "model_prefixes": ["gpt-4.1"],
+      "token_param": "max_tokens",
+      "supports_custom_temperature": true,
+      "context_window_hint": 1048576
+    },
+    {
+      "profile_id": "openai_gpt4o",
+      "model_prefixes": ["gpt-4o"],
+      "token_param": "max_tokens",
+      "supports_custom_temperature": true,
+      "context_window_hint": 128000
+    },
+    {
+      "profile_id": "openai_o_series",
+      "model_prefixes": ["o1", "o3", "o4"],
+      "token_param": "max_tokens",
+      "supports_custom_temperature": true,
+      "context_window_hint": 200000
+    },
+    {
+      "profile_id": "dashscope_vl",
+      "model_prefixes": ["qwen-vl"],
+      "token_param": "max_tokens",
+      "supports_custom_temperature": true,
+      "context_window_hint": 32000
+    },
+    {
+      "profile_id": "dashscope_text",
+      "model_prefixes": ["qwen", "deepseek"],
+      "token_param": "max_tokens",
+      "supports_custom_temperature": true,
+      "context_window_hint": 200000
+    },
+    {
+      "profile_id": "fallback_default",
+      "model_prefixes": [],
+      "token_param": "max_tokens",
+      "supports_custom_temperature": true,
+      "context_window_hint": 128000
+    }
+  ],
+  "task_policies": {
+    "app.answer": {
+      "default_max_output_tokens": 3072,
+      "min_output_tokens": 256,
+      "max_output_tokens": 8192,
+      "default_temperature": 0.3,
+      "min_temperature": 0.0,
+      "max_temperature": 1.0,
+      "default_retries": 2,
+      "default_timeout_secs": 60
+    },
+    "app.aux": {
+      "default_max_output_tokens": 512,
+      "min_output_tokens": 128,
+      "max_output_tokens": 2048,
+      "default_temperature": 0.0,
+      "min_temperature": 0.0,
+      "max_temperature": 1.0,
+      "default_retries": 2,
+      "default_timeout_secs": 60
+    },
+    "app.summary": {
+      "default_max_output_tokens": 256,
+      "min_output_tokens": 128,
+      "max_output_tokens": 1024,
+      "default_temperature": 0.2,
+      "min_temperature": 0.0,
+      "max_temperature": 1.0,
+      "default_retries": 2,
+      "default_timeout_secs": 60
+    },
+    "app.compression": {
+      "default_max_output_tokens": 1024,
+      "min_output_tokens": 256,
+      "max_output_tokens": 2048,
+      "default_temperature": 0.0,
+      "min_temperature": 0.0,
+      "max_temperature": 1.0,
+      "default_retries": 2,
+      "default_timeout_secs": 60
+    },
+    "app.rewrite": {
+      "default_max_output_tokens": 256,
+      "min_output_tokens": 128,
+      "max_output_tokens": 512,
+      "default_temperature": 0.1,
+      "min_temperature": 0.0,
+      "max_temperature": 1.0,
+      "default_retries": 2,
+      "default_timeout_secs": 60
+    },
+    "app.translate": {
+      "default_max_output_tokens": 256,
+      "min_output_tokens": 128,
+      "max_output_tokens": 512,
+      "default_temperature": 0.0,
+      "min_temperature": 0.0,
+      "max_temperature": 1.0,
+      "default_retries": 2,
+      "default_timeout_secs": 60
+    },
+    "app.hyde": {
+      "default_max_output_tokens": 256,
+      "min_output_tokens": 128,
+      "max_output_tokens": 1024,
+      "default_temperature": 0.2,
+      "min_temperature": 0.0,
+      "max_temperature": 1.0,
+      "default_retries": 2,
+      "default_timeout_secs": 60
+    },
+    "app.graph": {
+      "default_max_output_tokens": 512,
+      "min_output_tokens": 128,
+      "max_output_tokens": 1024,
+      "default_temperature": 0.1,
+      "min_temperature": 0.0,
+      "max_temperature": 1.0,
+      "default_retries": 2,
+      "default_timeout_secs": 60
+    },
+    "app.fact_extraction": {
+      "default_max_output_tokens": 512,
+      "min_output_tokens": 128,
+      "max_output_tokens": 1024,
+      "default_temperature": 0.1,
+      "min_temperature": 0.0,
+      "max_temperature": 1.0,
+      "default_retries": 2,
+      "default_timeout_secs": 60
+    },
+    "app.equation_description": {
+      "default_max_output_tokens": 2048,
+      "min_output_tokens": 256,
+      "max_output_tokens": 3072,
+      "default_temperature": 0.2,
+      "min_temperature": 0.0,
+      "max_temperature": 1.0,
+      "default_retries": 2,
+      "default_timeout_secs": 60
+    },
+    "docstudio.ask": {
+      "default_max_output_tokens": 1200,
+      "min_output_tokens": 256,
+      "max_output_tokens": 1600,
+      "default_temperature": 0.2,
+      "min_temperature": 0.0,
+      "max_temperature": 1.0,
+      "default_retries": 2,
+      "default_timeout_secs": 75
+    },
+    "docstudio.guardrail": {
+      "default_max_output_tokens": 520,
+      "min_output_tokens": 256,
+      "max_output_tokens": 800,
+      "default_temperature": 0.2,
+      "min_temperature": 0.0,
+      "max_temperature": 0.3,
+      "default_retries": 2,
+      "default_timeout_secs": 75
+    },
+    "docstudio.analysis": {
+      "default_max_output_tokens": 2000,
+      "min_output_tokens": 512,
+      "max_output_tokens": 2400,
+      "default_temperature": 0.3,
+      "min_temperature": 0.0,
+      "max_temperature": 1.0,
+      "default_retries": 2,
+      "default_timeout_secs": 75
+    },
+    "docstudio.answer_without_edit": {
+      "default_max_output_tokens": 800,
+      "min_output_tokens": 256,
+      "max_output_tokens": 1200,
+      "default_temperature": 0.3,
+      "min_temperature": 0.0,
+      "max_temperature": 1.0,
+      "default_retries": 2,
+      "default_timeout_secs": 75
+    },
+    "deepresearch.rag_summary": {
+      "default_max_output_tokens": 512,
+      "min_output_tokens": 256,
+      "max_output_tokens": 1024,
+      "default_temperature": 0.2,
+      "min_temperature": 0.0,
+      "max_temperature": 1.0,
+      "default_retries": 2,
+      "default_timeout_secs": 120
+    },
+    "deepresearch.decision": {
+      "default_max_output_tokens": 768,
+      "min_output_tokens": 256,
+      "max_output_tokens": 2048,
+      "default_temperature": 0.2,
+      "min_temperature": 0.0,
+      "max_temperature": 1.0,
+      "default_retries": 2,
+      "default_timeout_secs": 120
+    },
+    "deepresearch.report": {
+      "default_max_output_tokens": 2560,
+      "min_output_tokens": 512,
+      "max_output_tokens": 4096,
+      "default_temperature": 0.2,
+      "min_temperature": 0.0,
+      "max_temperature": 1.0,
+      "default_retries": 2,
+      "default_timeout_secs": 120
+    },
+    "deepresearch.report_section": {
+      "default_max_output_tokens": 1280,
+      "min_output_tokens": 512,
+      "max_output_tokens": 2048,
+      "default_temperature": 0.2,
+      "min_temperature": 0.0,
+      "max_temperature": 1.0,
+      "default_retries": 2,
+      "default_timeout_secs": 120
+    }
+  }
+}

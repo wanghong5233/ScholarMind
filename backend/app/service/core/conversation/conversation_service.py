@@ -282,12 +282,12 @@ class ConversationService:
             {"role": "user", "content": body},
         ]
         try:
-            summary = self.llm_client.generate(messages, temperature=0.2, max_tokens=256, stream=False)
+            summary = self.llm_client.generate(messages, stream=False)
         except Exception:
             summary = ""
         if not summary:
             try:
-                summary = self.llm_client.generate(messages, temperature=0.2, max_tokens=256, stream=False)
+                summary = self.llm_client.generate(messages, stream=False)
             except Exception:
                 summary = ""
         return summary or ""

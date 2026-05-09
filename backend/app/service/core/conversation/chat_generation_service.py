@@ -179,8 +179,6 @@ class ChatGenerationService:
         )
         messages: List[Dict[str, Any]] = [{"role": s.role, "content": s.content} for s in sections]
         messages = self._inject_multimodal_images(messages, image_attachments)
-        temperature = settings.SM_TEMPERATURE if temperature is None else temperature
-        max_tokens = settings.SM_MAX_TOKENS if max_tokens is None else max_tokens
         try:
             self.logger.info(
                 "Chat.generate stream=%s temp=%s max_tokens=%s prompt_chars=%s",
@@ -550,9 +548,9 @@ class ChatGenerationService:
                 },
                 {"role": "user", "content": body},
             ]
-            summary = self.llm.generate(messages, temperature=0.2, max_tokens=256, stream=False)
+            summary = self.llm.generate(messages, stream=False)
             if not summary:
-                summary = self.llm.generate(messages, temperature=0.2, max_tokens=256, stream=False)
+                summary = self.llm.generate(messages, stream=False)
             return summary or ""
         except Exception:
             return ""
@@ -642,8 +640,6 @@ class ChatGenerationService:
                 messages = [{"role": "user", "content": prompt}]
                 compressed = llm.generate(
                     messages,
-                    temperature=0.0,
-                    max_tokens=min(len(text) // 2 + 100, 1024),
                     stream=False,
                     model=compress_model,
                 )

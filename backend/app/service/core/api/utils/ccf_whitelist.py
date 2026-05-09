@@ -484,7 +484,7 @@ def classify_venue_quality(
         "label": primary["label"],
         "score": RANK_ORDER.get(primary["label"], 0),
         "labels": labels,
-    }
+}
 
 
 def is_high_quality_venue(venue: str) -> bool:

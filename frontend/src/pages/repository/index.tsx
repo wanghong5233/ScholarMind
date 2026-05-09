@@ -587,6 +587,7 @@ export default function Index() {
       .map((key) => Number(key))
       .filter((value) => Number.isFinite(value))
   }, [selectedRowKeys])
+  const [batchDeleting, setBatchDeleting] = useState(false)
   // 受控分页：观察到生产环境中只传 defaultPageSize 时，antd Table 的内部
   // useState init-once 仍会渲染成 10 / 页（pagination 对象每渲染都重建，
   // 但 useState init 只跑一次）。直接受控管 page + pageSize 才能让 15 稳定生效。
@@ -632,6 +633,63 @@ export default function Index() {
     })
   }, [currentKbId, selectedDocIds, requestParseIndex])
 
+  const handleBatchDeleteConfirm = useCallback(async () => {
+    if (!currentKbId || selectedDocIds.length === 0 || batchDeleting) return
+    setBatchDeleting(true)
+    try {
+      const targets = [...selectedDocIds]
+      const results = await Promise.allSettled(
+        targets.map((docId) =>
+          api.repository.remove(
+            {
+              kbId: currentKbId,
+              docId,
+            },
+            {
+              errorToast: false,
+              loading: false,
+            },
+          ),
+        ),
+      )
+      const failedDocIds: number[] = []
+      let firstErrorDetail: string | null = null
+
+      results.forEach((result, index) => {
+        if (result.status === 'rejected') {
+          failedDocIds.push(targets[index])
+          if (!firstErrorDetail) {
+            const reason: any = result.reason
+            firstErrorDetail =
+              reason?.response?.data?.detail ||
+              reason?.response?.data?.message ||
+              reason?.message ||
+              null
+          }
+        }
+      })
+
+      const okCount = results.length - failedDocIds.length
+      if (okCount > 0) {
+        message.success(`已删除 ${okCount} 篇文档`)
+      }
+      if (failedDocIds.length > 0) {
+        message.error(
+          firstErrorDetail
+            ? `有 ${failedDocIds.length} 篇删除失败：${firstErrorDetail}`
+            : `有 ${failedDocIds.length} 篇删除失败`,
+        )
+      }
+
+      if (okCount > 0) {
+        await reloadDocuments()
+      }
+      setSelectedRowKeys(failedDocIds)
+    } finally {
+      setBatchDeleting(false)
+    }
+  }, [batchDeleting, currentKbId, reloadDocuments, selectedDocIds])
+
   const parsePayload = (raw: unknown): any => {
     if (!raw) return null
     if (typeof raw === 'string') {
@@ -644,13 +702,36 @@ export default function Index() {
     return raw
   }
 
+  const normalizeJobDetailRows = (raw: unknown, jobStatus?: string): JobDetail[] => {
+    if (!Array.isArray(raw)) return []
+    const status: JobDetail['status'] =
+      (jobStatus || '').toLowerCase() === 'running' ? 'running' : 'pending'
+    return raw
+      .map((item): JobDetail | null => {
+        if (item && typeof item === 'object') return item as JobDetail
+        if (typeof item === 'number' && Number.isInteger(item) && item > 0) {
+          return { doc_id: item, status }
+        }
+        if (typeof item === 'string') {
+          const parsed = Number(item)
+          if (Number.isInteger(parsed) && parsed > 0) {
+            return { doc_id: parsed, status }
+          }
+        }
+        return null
+      })
+      .filter((item): item is JobDetail => item !== null)
+  }
+
   const extractJobDetails = (info?: JobInfo | null): JobDetail[] => {
     if (!info) return []
     const payload = parsePayload(info.payload)
-    const payloadDetails = payload?.resultDetails
-    if (Array.isArray(payloadDetails)) return payloadDetails as JobDetail[]
-    const infoDetails = parsePayload(info.details)
-    if (Array.isArray(infoDetails)) return infoDetails as JobDetail[]
+    const payloadDetails = normalizeJobDetailRows(payload?.resultDetails, info.status)
+    if (payloadDetails.length) return payloadDetails
+    const infoDetails = normalizeJobDetailRows(parsePayload(info.details), info.status)
+    if (infoDetails.length) return infoDetails
+    const payloadDocs = normalizeJobDetailRows(payload?.docs ?? payload?.documents, info.status)
+    if (payloadDocs.length) return payloadDocs
     return []
   }
 
@@ -893,6 +974,21 @@ export default function Index() {
                   >
                     重新解析入库
                   </Button>
+                  {selectedDocIds.length > 0 ? (
+                    <Popconfirm
+                      title="确定批量删除选中文档吗？"
+                      description={`共 ${selectedDocIds.length} 篇，删除后不可恢复。`}
+                      okText="确认删除"
+                      cancelText="取消"
+                      okButtonProps={{ loading: batchDeleting }}
+                      cancelButtonProps={{ disabled: batchDeleting }}
+                      onConfirm={handleBatchDeleteConfirm}
+                    >
+                      <Button danger loading={batchDeleting}>
+                        批量删除（{selectedDocIds.length}）
+                      </Button>
+                    </Popconfirm>
+                  ) : null}
                   <Button onClick={handleOpenJobModal} disabled={!currentKbId}>
                     查看任务记录
                   </Button>
@@ -1042,7 +1138,14 @@ export default function Index() {
                   <Table
                     rowKey={(record) => `${record.doc_id}-${record.title || ''}`}
                     columns={[
-                      { title: '标题', dataIndex: 'title', ellipsis: true },
+                      {
+                        title: '标题',
+                        dataIndex: 'title',
+                        ellipsis: true,
+                        render(value: string | undefined, record: JobDetail) {
+                          return value || record.filename || (record.doc_id ? `文档 #${record.doc_id}` : '-')
+                        },
+                      },
                       {
                         title: '下载',
                         dataIndex: 'download_status',
@@ -1059,7 +1162,12 @@ export default function Index() {
                         dataIndex: 'parse_status',
                         width: 140,
                         render(value: string | undefined, record: JobDetail) {
-                          if (value === 'parsed') {
+                          if ((record as any).status === 'running') return <Tag color="processing">处理中</Tag>
+                          if ((record as any).status === 'pending') return <Tag>排队中</Tag>
+                          if ((record as any).status === 'duplicate') return <Tag color="warning">重复已合并</Tag>
+                          const effectiveParseStatus =
+                            value || ((record as any).status === 'ok' ? 'parsed' : (record as any).status)
+                          if (effectiveParseStatus === 'parsed') {
                             const chunks = (record as any).chunks
                             return (
                               <Tag color="success">
@@ -1067,9 +1175,9 @@ export default function Index() {
                               </Tag>
                             )
                           }
-                          if (value === 'failed') return <Tag color="error">失败</Tag>
-                          if (value === 'not_applicable') return <Tag>未执行</Tag>
-                          return value ? <Tag>{value}</Tag> : '-'
+                          if (effectiveParseStatus === 'failed') return <Tag color="error">失败</Tag>
+                          if (effectiveParseStatus === 'not_applicable') return <Tag>未执行</Tag>
+                          return effectiveParseStatus ? <Tag>{effectiveParseStatus}</Tag> : '-'
                         },
                       },
                       {
@@ -1078,7 +1186,15 @@ export default function Index() {
                         ellipsis: true,
                         render(value: string | undefined, record: JobDetail) {
                           const parseError = (record as any).parse_error
-                          const text = value || parseError
+                          const error = (record as any).error
+                          const status = (record as any).status
+                          const processingNote =
+                            status === 'running'
+                              ? '解析任务正在执行，请稍后刷新。'
+                              : status === 'pending'
+                                ? '任务尚未开始执行。'
+                                : undefined
+                          const text = value || parseError || error || processingNote
                           return text || '-'
                         },
                       },
@@ -1109,7 +1225,7 @@ export default function Index() {
                   </Typography.Paragraph>
                 </>
               ) : (
-                <Typography.Text type="secondary">暂无任务明细。</Typography.Text>
+                <Typography.Text type="secondary">暂无任务明细（任务可能仍在排队或运行，请刷新后重试）。</Typography.Text>
               )}
             </Modal>
           </>

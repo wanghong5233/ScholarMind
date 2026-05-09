@@ -9,6 +9,7 @@ from typing import Any, Dict, Iterable
 import httpx
 
 from core.config import settings
+from service.core.rag.llm.policy_adapter import get_policy_resolver
 from service.core.rag.nlp.rag_tokenizer import RagTokenizer
 
 try:
@@ -30,6 +31,7 @@ class ConfigService:
 
     def get_feature_flags(self) -> Dict[str, Any]:
         """Return feature flag settings."""
+        policy_resolver = get_policy_resolver()
         return {
             "retrievalStrategy": settings.SM_RETRIEVAL_STRATEGY,
             "rerankerStrategy": settings.SM_RERANKER_STRATEGY,
@@ -51,6 +53,34 @@ class ConfigService:
             "historyHeadroom": settings.SM_HISTORY_HEADROOM,
             "historyRecentTurns": settings.HISTORY_RECENT_TURNS,
             "enableRollingSummary": settings.ENABLE_ROLLING_SUMMARY,
+            "llmPolicy": {
+                "enabled": bool(getattr(settings, "SM_LLM_POLICY_ENABLED", True)),
+                "version": str(getattr(settings, "SM_LLM_POLICY_VERSION", "v1")),
+                "resolvedVersion": str(getattr(policy_resolver, "policy_version", "legacy")),
+                "rolloutSteps": list(getattr(policy_resolver, "rollout_steps", (5, 20, 50, 100))),
+                "taskIds": {
+                    "answer": str(getattr(settings, "SM_LLM_POLICY_TASK_ANSWER", "app.answer")),
+                    "aux": str(getattr(settings, "SM_LLM_POLICY_TASK_AUX", "app.aux")),
+                    "summary": str(getattr(settings, "SM_LLM_POLICY_TASK_SUMMARY", "app.summary")),
+                    "compression": str(
+                        getattr(settings, "SM_LLM_POLICY_TASK_COMPRESSION", "app.compression")
+                    ),
+                    "rewrite": str(getattr(settings, "SM_LLM_POLICY_TASK_REWRITE", "app.rewrite")),
+                    "translate": str(getattr(settings, "SM_LLM_POLICY_TASK_TRANSLATE", "app.translate")),
+                    "hyde": str(getattr(settings, "SM_LLM_POLICY_TASK_HYDE", "app.hyde")),
+                    "graph": str(getattr(settings, "SM_LLM_POLICY_TASK_GRAPH", "app.graph")),
+                    "factExtraction": str(
+                        getattr(settings, "SM_LLM_POLICY_TASK_FACT_EXTRACTION", "app.fact_extraction")
+                    ),
+                    "equationDescription": str(
+                        getattr(
+                            settings,
+                            "SM_LLM_POLICY_TASK_EQUATION_DESCRIPTION",
+                            "app.equation_description",
+                        )
+                    ),
+                },
+            },
         }
 
     def parsing_health(self) -> Dict[str, Any]:

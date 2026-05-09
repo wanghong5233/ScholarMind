@@ -16,6 +16,12 @@ from schemas.document import DocumentCreate as DocumentCreateSchema
 from service.core.api.utils.file_storage import FileStorageUtil
 from models.document import Document
 from models.job import JobType
+from service.document_identity import (
+    extract_arxiv_id,
+    normalize_doi,
+    normalize_semantic_scholar_id,
+    normalize_source_url,
+)
 
 
 class IngestionService:
@@ -155,30 +161,27 @@ class IngestionService:
     @staticmethod
     def _paper_keys(doc: DocumentCreate) -> set[str]:
         keys: set[str] = set()
-        doi = (doc.doi or "").strip().lower()
+        doi = normalize_doi(doc.doi)
         if doi:
             keys.add(f"doi:{doi}")
-        semantic_id = (doc.semantic_scholar_id or "").strip().lower()
+        semantic_id = normalize_semantic_scholar_id(doc.semantic_scholar_id)
         if semantic_id:
             keys.add(f"s2:{semantic_id}")
-        url = (doc.source_url or "").strip().lower()
+        url = normalize_source_url(doc.source_url)
         if url:
             keys.add(f"url:{url}")
-            arxiv_id = IngestionService._extract_arxiv_id(url)
+            arxiv_id = extract_arxiv_id(url)
             if arxiv_id:
                 keys.add(f"arxiv:{arxiv_id}")
         title = (doc.title or "").strip().lower()
         title = re.sub(r"[^a-z0-9]+", " ", title).strip()
         if title:
             keys.add(f"title:{title}")
-        return keys or {str(doc)}
+        return keys or {f"fallback:{id(doc)}"}
 
     @staticmethod
     def _extract_arxiv_id(url: str) -> Optional[str]:
-        match = re.search(r"arxiv\.org/(?:abs|pdf)/([^?#/]+)", url, flags=re.IGNORECASE)
-        if not match:
-            return None
-        return match.group(1).removesuffix(".pdf").lower()
+        return extract_arxiv_id(url)
 
     @staticmethod
     def _merge_document_candidate(target: DocumentCreate, incoming: DocumentCreate) -> None:

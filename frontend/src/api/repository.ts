@@ -80,7 +80,7 @@ export interface JobDetail {
   doc_id?: number
   title?: string
   filename?: string
-  status?: 'ok' | 'duplicate' | 'skipped_pdf' | 'failed'
+  status?: 'ok' | 'duplicate' | 'skipped_pdf' | 'failed' | 'running' | 'pending'
   download_status?: 'downloaded' | 'skipped' | 'failed'
   parse_status?: 'parsed' | 'failed' | 'not_applicable'
   note?: string

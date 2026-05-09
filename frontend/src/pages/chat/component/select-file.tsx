@@ -78,7 +78,7 @@ function SelectFileSearching(props: { message?: string }) {
     <div className={styles['select-file-searching']}>
       <div className={styles['icon']}></div>
       <div className={styles['title']}>
-        {message?.trim() || '正在搜索知识库'}
+        {message?.trim() || '正在处理请求，请稍候'}
         <span className={styles['duration']}> · {elapsedSeconds}s</span>
       </div>
     </div>

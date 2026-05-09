@@ -523,7 +523,7 @@ class MinerUParser(DocumentParser):
 
         try:
             from service.core.rag.llm.client import LLMClient
-            llm = LLMClient(task="aux")
+            llm = LLMClient(task="equation_description")
         except Exception as exc:
             log.warning("Failed to init LLM for equation description: %s", exc)
             return
@@ -539,12 +539,15 @@ class MinerUParser(DocumentParser):
             + "\n".join(f"公式{i+1}: {ltx}" for i, ltx in enumerate(batch_latex))
         )
         messages = [{"role": "user", "content": prompt}]
+        max_tokens_cap = max(
+            int(getattr(settings, "SM_EQUATION_DESCRIPTION_MAX_TOKENS", 2048) or 2048),
+            256,
+        )
 
         try:
             result = llm.generate(
                 messages,
-                temperature=0.2,
-                max_tokens=min(len(eq_blocks) * 80, 2048),
+                max_tokens=min(len(eq_blocks) * 80, max_tokens_cap),
                 stream=False,
             )
             if not isinstance(result, str):

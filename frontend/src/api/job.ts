@@ -49,12 +49,37 @@ export async function waitForJobCompletion(
   return null
 }
 
+function normalizeLegacyDetails(raw: unknown, jobStatus?: string): JobDetail[] {
+  if (!Array.isArray(raw)) return []
+  const status: JobDetail['status'] =
+    (jobStatus || '').toLowerCase() === 'running' ? 'running' : 'pending'
+  return raw
+    .map((item): JobDetail | null => {
+      if (item && typeof item === 'object') return item as JobDetail
+      if (typeof item === 'number' && Number.isInteger(item) && item > 0) {
+        return { doc_id: item, status }
+      }
+      if (typeof item === 'string') {
+        const parsed = Number(item)
+        if (Number.isInteger(parsed) && parsed > 0) {
+          return { doc_id: parsed, status }
+        }
+      }
+      return null
+    })
+    .filter((item): item is JobDetail => item !== null)
+}
+
 export function extractJobDetails(job: JobInfo | null | undefined): JobDetail[] {
   if (!job) return []
-  const fromPayload = (job.payload as Record<string, unknown> | null | undefined)?.[
+  const payload = job.payload as Record<string, unknown> | null | undefined
+  const fromPayload = normalizeLegacyDetails(payload?.[
     'resultDetails'
-  ] as JobDetail[] | undefined
-  if (Array.isArray(fromPayload)) return fromPayload
-  if (Array.isArray(job.details)) return job.details
+  ], job.status)
+  if (fromPayload.length) return fromPayload
+  const fromComputed = normalizeLegacyDetails(job.details, job.status)
+  if (fromComputed.length) return fromComputed
+  const fromDocs = normalizeLegacyDetails(payload?.['docs'] ?? payload?.['documents'], job.status)
+  if (fromDocs.length) return fromDocs
   return []
 }

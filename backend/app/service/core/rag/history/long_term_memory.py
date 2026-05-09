@@ -172,7 +172,7 @@ class FactExtractor:
 
         from service.core.rag.llm.client import LLMClient
 
-        llm = LLMClient(task="aux")
+        llm = LLMClient(task="fact_extraction")
         answer_summary = (answer or "")[:max_answer_chars]
         template = _EXTRACT_PROMPT_ZH if self.language == "zh" else _EXTRACT_PROMPT_EN
         prompt = template.format(question=question, answer_summary=answer_summary)
@@ -180,8 +180,6 @@ class FactExtractor:
         try:
             raw = llm.generate(
                 [{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_tokens=512,
                 stream=False,
             )
             raw_text = raw if isinstance(raw, str) else "".join(raw)

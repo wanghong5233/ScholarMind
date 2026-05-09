@@ -1,5 +1,6 @@
 from __future__ import annotations
 from typing import Tuple, Type
+from sqlalchemy.exc import SQLAlchemyError
 
 from models.document import Document, DocumentProcessingStatus
 from models.job import Job, JobStatus, JobType
@@ -133,12 +134,37 @@ def execute_job(job_id: int, handler_cls: Type[BaseJobHandler]):
             execute_job(job_id=parse_job.id, handler_cls=ParseIndexHandler)
 
     except Exception as e:
+        log.exception(
+            f"JobRunner: unhandled exception handler={handler_cls.__name__} job_id={job_id} err={e}"
+        )
+        # 关键兜底：handler 内部若触发 SQL 错误，Session 会进入 pending-rollback，
+        # 必须先 rollback 才能把 Job 状态回写为 failed，避免任务永久停留在 running。
+        try:
+            db.rollback()
+        except SQLAlchemyError as rollback_err:
+            log.warning(
+                f"JobRunner: rollback failed before failure update job_id={job_id} err={rollback_err}"
+            )
         # 无法读取 job.user_id 时无法更新权限校验的进度，这里尽力而为
+        job = None
         try:
             job = db.query(Job).filter(Job.id == job_id).first()
-            if job:
-                job_service.update_progress(db, job_id=job_id, user_id=job.user_id, status=JobStatus.FAILED.value, error=str(e))
-        finally:
-            pass
+        except SQLAlchemyError as query_err:
+            log.warning(
+                f"JobRunner: query job failed during exception handling job_id={job_id} err={query_err}"
+            )
+        if job:
+            try:
+                job_service.update_progress(
+                    db,
+                    job_id=job_id,
+                    user_id=job.user_id,
+                    status=JobStatus.FAILED.value,
+                    error=str(e),
+                )
+            except SQLAlchemyError as progress_err:
+                log.warning(
+                    f"JobRunner: failed to persist failure status job_id={job_id} err={progress_err}"
+                )
     finally:
         db.close()

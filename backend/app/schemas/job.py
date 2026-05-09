@@ -29,18 +29,58 @@ class JobInDB(JobBase):
 
     class Config:
         from_attributes = True
+
+    @staticmethod
+    def _coerce_doc_id(value: Any) -> Optional[int]:
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            raw = value.strip()
+            if raw.isdigit():
+                return int(raw)
+            return None
+        if isinstance(value, dict):
+            candidate = value.get("doc_id")
+            if candidate is None:
+                candidate = value.get("id")
+            if isinstance(candidate, int):
+                return candidate
+            if isinstance(candidate, str):
+                raw = candidate.strip()
+                if raw.isdigit():
+                    return int(raw)
+        return None
         
     @computed_field
     @property
     def details(self) -> Optional[list]:
-        """从 payload.resultDetails 或 payload.documents 提取 details（兼容旧数据）"""
+        """从 payload.resultDetails / documents / docs 提取 details（兼容旧数据）"""
         if self.payload and isinstance(self.payload, dict):
             # 优先使用 resultDetails（新格式）
             result = self.payload.get("resultDetails")
-            if result is not None:
+            if isinstance(result, list):
                 return result
-            # 回退到 documents（旧格式或初始 payload）
-            return self.payload.get("documents")
+            # 回退到 documents / docs（旧格式或初始 payload）
+            legacy = self.payload.get("documents")
+            if legacy is None:
+                legacy = self.payload.get("docs")
+            if not isinstance(legacy, list):
+                return None
+            if legacy and isinstance(legacy[0], dict):
+                return legacy
+            default_status = "running" if (self.status or "").lower() == "running" else "pending"
+            normalized = []
+            for item in legacy:
+                doc_id = self._coerce_doc_id(item)
+                if doc_id is None:
+                    continue
+                normalized.append(
+                    {
+                        "doc_id": doc_id,
+                        "status": default_status,
+                    }
+                )
+            return normalized
         return None
 
 

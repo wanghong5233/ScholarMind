@@ -1,8 +1,13 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 
 from models.document import DocumentIngestionSource
+from service.document_identity import (
+    normalize_doi,
+    normalize_semantic_scholar_id,
+    normalize_source_url,
+)
 
 class DocumentBase(BaseModel):
     """
@@ -22,6 +27,21 @@ class DocumentBase(BaseModel):
     local_pdf_path: Optional[str] = None
     file_hash: Optional[str] = None
     ingestion_source: DocumentIngestionSource
+
+    @field_validator("doi", mode="before")
+    @classmethod
+    def _normalize_doi(cls, value: Optional[str]) -> Optional[str]:
+        return normalize_doi(value)
+
+    @field_validator("semantic_scholar_id", mode="before")
+    @classmethod
+    def _normalize_semantic_scholar_id(cls, value: Optional[str]) -> Optional[str]:
+        return normalize_semantic_scholar_id(value)
+
+    @field_validator("source_url", mode="before")
+    @classmethod
+    def _normalize_source_url(cls, value: Optional[str]) -> Optional[str]:
+        return normalize_source_url(value)
 
     class Config:
         from_attributes = True

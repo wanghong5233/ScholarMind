@@ -5225,7 +5225,7 @@ const LatexEditorPage = () => {
       }
       return content ? `结果 · ${content}` : ''
     }
-    if (type === 'finish') return '正在生成最终回答...'
+    if (type === 'finish') return content ? `已生成回答 · ${content}` : '已生成最终回答'
     if (type === 'start') return '任务已启动...'
     if (content) return content
     return ''
@@ -5404,6 +5404,11 @@ const LatexEditorPage = () => {
       refreshSystemStats(true)
       resetLiveAgentPreview()
       activeRunIdRef.current = null
+      setLiveAgentStatus(
+        hasChanges || isFileOpIntent
+          ? '任务已完成，变更已同步'
+          : '任务已完成，回答已生成',
+      )
       setChatLoading(false)
     },
     [
@@ -5844,6 +5849,7 @@ const LatexEditorPage = () => {
             const meta = parseLiveEventMeta(messageEvent, payload)
             const status = String(payload?.status || '')
             if (status) {
+              const upstreamMessage = String(payload?.message || '').trim()
               const statusMap: Record<string, string> = {
                 queued: '任务已排队，等待执行...',
                 running: '任务执行中...',
@@ -5853,7 +5859,10 @@ const LatexEditorPage = () => {
                 failed: '任务执行失败',
                 cancelled: '任务已取消',
               }
-              const statusText = statusMap[status] || `任务状态：${status}`
+              const statusText =
+                upstreamMessage ||
+                statusMap[status] ||
+                `任务状态：${status}`
               setLiveAgentStatus(statusText)
               appendLiveTimelineEvent({
                 text: statusText,
@@ -6231,9 +6240,10 @@ const LatexEditorPage = () => {
             const messageEvent = event as MessageEvent<string>
             const payload = JSON.parse(messageEvent.data || '{}')
             const meta = parseLiveEventMeta(messageEvent, payload)
-            setLiveAgentStatus('正在生成最终回答...')
+            const finishText = '执行完成，正在整理结果...'
+            setLiveAgentStatus(finishText)
             appendLiveTimelineEvent({
-              text: '正在生成最终回答...',
+              text: finishText,
               eventType: 'finish',
               level: 'info',
               eventId: meta.eventId,
@@ -6277,9 +6287,17 @@ const LatexEditorPage = () => {
                 const toLabel = resolveRuntimeModelLabel(actualModel)
                 message.warning(`所选模型不可用，已自动切换为真实使用模型：${fromLabel} → ${toLabel}`)
               }
-              setLiveAgentStatus('结果已生成，正在应用变更...')
+              const resultPayload = payload.result as Partial<DocStudioAPI.AgentResponse>
+              const hasChanges = Boolean(
+                (Array.isArray(resultPayload?.file_diffs) && resultPayload.file_diffs.length > 0) ||
+                (Array.isArray(resultPayload?.changes) && resultPayload.changes.length > 0),
+              )
+              const resultStatusText = hasChanges
+                ? '结果已生成，正在应用变更...'
+                : '结果已生成，正在整理回答...'
+              setLiveAgentStatus(resultStatusText)
               appendLiveTimelineEvent({
-                text: '结果已生成，正在应用变更...',
+                text: resultStatusText,
                 eventType: 'result',
                 level: 'info',
                 eventId: meta.eventId,

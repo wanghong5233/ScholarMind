@@ -51,17 +51,18 @@ RUN pip config set global.index-url "https://mirrors.aliyun.com/pypi/simple/" &&
     pip install --upgrade pip setuptools wheel
 
 # 复制依赖文件
-COPY requirements.txt /app/requirements.txt
+COPY services/doc_studio/requirements.txt /app/requirements.txt
 
 # 安装 Python 依赖
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 复制服务代码
-COPY . /app/
+COPY services/doc_studio/ /app/
+COPY shared/ /shared/
 
 # 设置环境变量
 ENV PYTHONUNBUFFERED=1
-ENV PYTHONPATH=/app
+ENV PYTHONPATH=/app:/shared
 ENV PORT=8003
 ENV RAG_SERVICE_URL=http://scholarmind_api:8000
 

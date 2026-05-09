@@ -90,6 +90,7 @@ export default function RepositoryOnlineImport() {
   const [importing, setImporting] = useState(false)
   const [results, setResults] = useState<OnlineDocumentCandidate[]>([])
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([])
+  const selectedCount = selectedRowKeys.length
   const [previewPaper, setPreviewPaper] = useState<OnlineDocumentCandidate | null>(null)
   const [resultDetails, setResultDetails] = useState<JobDetail[] | null>(null)
   const [resultJob, setResultJob] = useState<JobInfo | null>(null)
@@ -567,11 +568,16 @@ export default function RepositoryOnlineImport() {
           size="middle"
         />
 
-        <Space style={{ justifyContent: 'flex-end', width: '100%' }}>
-          <Button onClick={handleBackToRepository}>取消</Button>
-          <Button type="primary" loading={importing} onClick={handleImport}>
-            导入选中文献
-          </Button>
+        <Space style={{ justifyContent: 'space-between', width: '100%' }}>
+          <Typography.Text type="secondary">
+            已选择 {selectedCount} 篇（支持跨页累计选择）
+          </Typography.Text>
+          <Space>
+            <Button onClick={handleBackToRepository}>取消</Button>
+            <Button type="primary" loading={importing} onClick={handleImport} disabled={!selectedCount}>
+              导入选中文献（{selectedCount}）
+            </Button>
+          </Space>
         </Space>
 
         <Typography.Text type="secondary">

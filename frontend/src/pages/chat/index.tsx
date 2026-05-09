@@ -2193,7 +2193,6 @@ export default function Index() {
           }
         })
         if (needReload) {
-          chat.list.splice(0, chat.list.length)
           await history.run()
         }
         branchResetAbortRef.current = false
@@ -2247,8 +2246,8 @@ export default function Index() {
               parseData(normalizedLine, currentEvent || undefined)
               scrollToBottom()
               if (isCompletion || sawCompletion) {
-                // 始终同步一次历史，兜底处理 SSE 丢片/中途断流导致的“已生成但未渲染”
-                needReload = true
+                // completion 事件已携带最终答案与引用，避免额外历史重载造成闪烁。
+                needReload = false
                 return
               }
             }
@@ -2258,9 +2257,9 @@ export default function Index() {
             if (!sawCompletion) {
               const replayed = await reconnectByReplay()
               if (replayed) return
+              // 未拿到 completion 且回放失败时，再走历史同步兜底。
+              needReload = true
             }
-            // 非 completion 结束，回落一次历史同步，确保最终状态一致
-            needReload = true
             break
           }
         }
@@ -2350,9 +2349,23 @@ export default function Index() {
           const indexModeFromPayload = String(
             json?.index_mode || json?.debug?.index_mode || '',
           ).toLowerCase()
-          const retrievalDisabled = indexModeFromPayload
-            ? indexModeFromPayload === 'disabled'
-            : requestRetrievalDisabled
+          const routeTypeFromPayload = String(
+            json?.route_type || json?.route?.type || '',
+          ).toLowerCase()
+          const retrievalDisabledFromPayload =
+            typeof json?.retrieval_disabled === 'boolean'
+              ? json.retrieval_disabled
+              : typeof json?.route?.retrieval_disabled === 'boolean'
+              ? json.route.retrieval_disabled
+              : null
+          const retrievalDisabled =
+            typeof retrievalDisabledFromPayload === 'boolean'
+              ? retrievalDisabledFromPayload
+              : routeTypeFromPayload
+              ? routeTypeFromPayload === 'chat_only'
+              : indexModeFromPayload
+              ? indexModeFromPayload === 'disabled'
+              : requestRetrievalDisabled
           const stageTextMap: Record<string, string> = {
             accepted: retrievalDisabled
               ? '⏳ 请求已接收，正在准备回答...'
@@ -2366,9 +2379,14 @@ export default function Index() {
           }
           const upstreamMessage =
             typeof json?.message === 'string' ? String(json.message).trim() : ''
+          const normalizeProgressMessage = (text: string) => {
+            const normalized = String(text || '').trim()
+            if (!normalized) return ''
+            return normalized.startsWith('⏳') ? normalized : `⏳ ${normalized}`
+          }
           const statusText = (() => {
-            if (!upstreamMessage) return stageTextMap[json.stage] || ''
-            if (!retrievalDisabled) return upstreamMessage
+            if (!upstreamMessage) return stageTextMap[json.stage] || '⏳ 正在处理请求，请稍候...'
+            if (!retrievalDisabled) return normalizeProgressMessage(upstreamMessage)
             if (json.stage === 'retrieving' && /检索|retriev/i.test(upstreamMessage)) {
               return stageTextMap.retrieving
             }
@@ -2378,7 +2396,7 @@ export default function Index() {
             if (json.stage === 'accepted' && /检索|retriev/i.test(upstreamMessage)) {
               return stageTextMap.accepted
             }
-            return upstreamMessage
+            return normalizeProgressMessage(upstreamMessage)
           })()
           if (statusText && !json?.content) {
             nextTarget.think = statusText
@@ -2407,6 +2425,12 @@ export default function Index() {
           // 这里必须无条件覆盖累积内容，否则用户看到的仍是脏版本，与持久化
           // 到 DB 的干净版本不一致，下次回看时会出现 UI 跳变。
           markPendingCommitted()
+          if (
+            typeof nextTarget.think === 'string' &&
+            nextTarget.think.startsWith('⏳')
+          ) {
+            nextTarget.think = ''
+          }
           nextTarget.content = json.answer
         }
 
@@ -2511,11 +2535,27 @@ export default function Index() {
           window.$app?.message?.warning?.(friendlyError)
         }
 
-        if (json?.message_id) {
+        const messageIdFromPayload =
+          typeof json?.message_id === 'string' ? json.message_id.trim() : ''
+        if (messageIdFromPayload) {
           markPendingCommitted()
-          nextTarget.message_id = json.message_id
+          nextTarget.message_id = messageIdFromPayload
+          const userMessageId =
+            extra?.userItem?.id ||
+            (pendingSendRef.current?.targetAssistantId === targetId
+              ? pendingSendRef.current?.userMessageId
+              : undefined)
+          if (userMessageId) {
+            const userIndex = chat.list.findIndex((item) => item.id === userMessageId)
+            if (userIndex !== -1) {
+              chat.list[userIndex] = {
+                ...(chat.list[userIndex] as API.ChatItem),
+                message_id: messageIdFromPayload,
+              }
+            }
+          }
           if (extra?.userItem) {
-            extra.userItem.message_id = json.message_id
+            extra.userItem.message_id = messageIdFromPayload
           }
         }
 
@@ -4624,7 +4664,11 @@ export default function Index() {
         return
       }
       if (!item.message_id) {
-        message.warning('消息尚未保存，暂无法编辑')
+        setComposerValue(text)
+        setComposerFocusKey((key) => key + 1)
+        setEditingContext(null)
+        setLocalReplaceContext({ index, itemId: item.id })
+        message.info('消息尚未保存，已进入本地编辑模式')
         return
       }
       setComposerValue(text)

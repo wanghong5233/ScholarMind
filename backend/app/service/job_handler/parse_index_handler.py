@@ -3,8 +3,10 @@ import os
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List
+from sqlalchemy.exc import SQLAlchemyError
 from service.job_handler.interfaces import BaseJobHandler, JobResult
 from utils.get_logger import log
+from models.document import Document, DocumentProcessingStatus
 from service.core.ingestion.parser_orchestrator import ParserOrchestrator
 from service.core.ingestion.chunker import RecursiveCharacterChunker, post_filter_chunks_for_embedding
 from service.core.ingestion.interfaces import ParsedBlock
@@ -124,6 +126,72 @@ class ParseIndexHandler(BaseJobHandler):
                     f"[METADATA_OK] doc_id={doc_id} title={doc.title[:50] if doc.title else 'N/A'} "
                     f"doi={doc.doi or 'N/A'} elapsed_ms={int((time.perf_counter() - stage_started_at) * 1000)}"
                 )
+
+                duplicate_doc = document_service.find_duplicate_document_by_identity(
+                    db=db,
+                    kb_id=kb_id,
+                    semantic_scholar_id=doc.semantic_scholar_id,
+                    doi=doc.doi,
+                    file_hash=doc.file_hash,
+                    source_url=doc.source_url,
+                    exclude_doc_id=doc.id,
+                )
+                if duplicate_doc is not None:
+                    duplicate_is_ready = (
+                        duplicate_doc.processing_status == DocumentProcessingStatus.READY.value
+                        and int(getattr(duplicate_doc, "chunk_count", 0) or 0) > 0
+                    )
+                    if duplicate_is_ready:
+                        merged = self._merge_document_metadata(target=duplicate_doc, incoming=doc)
+                        if merged:
+                            db.add(duplicate_doc)
+                            db.commit()
+                            db.refresh(duplicate_doc)
+                        document_service.delete_document(
+                            db=db,
+                            doc_id=doc.id,
+                            user_id=user_id,
+                            kb_id=kb_id,
+                        )
+                        if doc_id in result.touched_doc_ids:
+                            result.touched_doc_ids.remove(doc_id)
+                        result.total = max(0, result.total - 1)
+                        result.succeeded += 1
+                        result.details.append(
+                            {
+                                "doc_id": int(doc_id),
+                                "status": "ok",
+                                "dedupe_action": "keep_ready_drop_current",
+                                "canonical_doc_id": int(duplicate_doc.id),
+                                "dropped_doc_id": int(doc_id),
+                                "chunks": int(getattr(duplicate_doc, "chunk_count", 0) or 0),
+                            }
+                        )
+                        log.info(
+                            f"[DUPLICATE_AFTER_METADATA] current_doc_id={doc_id} "
+                            f"matched_doc_id={duplicate_doc.id} action=keep_ready_drop_current"
+                        )
+                        continue
+
+                    merged = self._merge_document_metadata(target=doc, incoming=duplicate_doc)
+                    if merged:
+                        db.add(doc)
+                        db.commit()
+                        db.refresh(doc)
+                    dropped_doc_id = int(duplicate_doc.id)
+                    document_service.delete_document(
+                        db=db,
+                        doc_id=dropped_doc_id,
+                        user_id=user_id,
+                        kb_id=kb_id,
+                    )
+                    if dropped_doc_id in result.touched_doc_ids:
+                        result.touched_doc_ids.remove(dropped_doc_id)
+                        result.total = max(0, result.total - 1)
+                    log.info(
+                        f"[DUPLICATE_AFTER_METADATA] current_doc_id={doc_id} "
+                        f"matched_doc_id={dropped_doc_id} action=keep_current_drop_old"
+                    )
 
                 # 结构化阶段
                 current_stage = "structure"
@@ -314,8 +382,20 @@ class ParseIndexHandler(BaseJobHandler):
                 # invariant "ready <=> chunk_count > 0" holds.
                 if doc is not None:
                     try:
+                        db.rollback()
+                    except SQLAlchemyError as rollback_err:
+                        log.warning(
+                            f"[LIFECYCLE_PREPARE_FAIL] doc_id={doc_id} action=rollback err={rollback_err}"
+                        )
+                    try:
+                        db.refresh(doc)
+                    except SQLAlchemyError as refresh_err:
+                        log.warning(
+                            f"[LIFECYCLE_PREPARE_FAIL] doc_id={doc_id} action=refresh err={refresh_err}"
+                        )
+                    try:
                         mark_failed(db, doc, stage=current_stage, reason=str(e))
-                    except Exception as lifecycle_err:
+                    except SQLAlchemyError as lifecycle_err:
                         log.warning(
                             f"[LIFECYCLE_WRITE_FAIL] doc_id={doc_id} err={lifecycle_err}"
                         )
@@ -365,3 +445,67 @@ class ParseIndexHandler(BaseJobHandler):
             "logical_types": logical_counter,
             "blocks": preview_blocks,
         }
+
+    def _merge_document_metadata(self, *, target: Document, incoming: Document) -> bool:
+        """Merge metadata from incoming doc into target doc."""
+        changed = False
+
+        incoming_title = (getattr(incoming, "title", None) or "").strip()
+        target_title = (getattr(target, "title", None) or "").strip()
+        if self._is_placeholder_title(target_title) and not self._is_placeholder_title(incoming_title):
+            target.title = incoming_title
+            changed = True
+
+        if not getattr(target, "doi", None) and getattr(incoming, "doi", None):
+            target.doi = incoming.doi
+            changed = True
+        if not getattr(target, "semantic_scholar_id", None) and getattr(incoming, "semantic_scholar_id", None):
+            target.semantic_scholar_id = incoming.semantic_scholar_id
+            changed = True
+        if not getattr(target, "abstract", None) and getattr(incoming, "abstract", None):
+            target.abstract = incoming.abstract
+            changed = True
+        if not getattr(target, "authors", None) and getattr(incoming, "authors", None):
+            target.authors = incoming.authors
+            changed = True
+        if not getattr(target, "keywords", None) and getattr(incoming, "keywords", None):
+            target.keywords = incoming.keywords
+            changed = True
+        if not getattr(target, "fields_of_study", None) and getattr(incoming, "fields_of_study", None):
+            target.fields_of_study = incoming.fields_of_study
+            changed = True
+        if not getattr(target, "publication_year", None) and getattr(incoming, "publication_year", None):
+            target.publication_year = incoming.publication_year
+            changed = True
+
+        target_citation = getattr(target, "citation_count", None)
+        incoming_citation = getattr(incoming, "citation_count", None)
+        if incoming_citation is not None and (target_citation is None or incoming_citation > target_citation):
+            target.citation_count = incoming_citation
+            changed = True
+
+        target_venue = (getattr(target, "journal_or_conference", None) or "").strip().lower()
+        incoming_venue = (getattr(incoming, "journal_or_conference", None) or "").strip()
+        if incoming_venue and target_venue in {"", "arxiv", "preprint", "arxiv preprint"}:
+            target.journal_or_conference = incoming_venue
+            changed = True
+
+        if not getattr(target, "source_url", None) and getattr(incoming, "source_url", None):
+            target.source_url = incoming.source_url
+            changed = True
+        if not getattr(target, "local_pdf_path", None) and getattr(incoming, "local_pdf_path", None):
+            target.local_pdf_path = incoming.local_pdf_path
+            changed = True
+        if not getattr(target, "file_hash", None) and getattr(incoming, "file_hash", None):
+            target.file_hash = incoming.file_hash
+            changed = True
+
+        return changed
+
+    def _is_placeholder_title(self, value: str) -> bool:
+        lowered = (value or "").strip().lower()
+        if not lowered:
+            return True
+        if lowered.endswith(".pdf"):
+            return True
+        return lowered in {"untitled", "paper", "document"}

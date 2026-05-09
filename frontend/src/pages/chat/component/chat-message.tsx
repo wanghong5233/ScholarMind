@@ -300,12 +300,21 @@ export default function ChatMessage(props: {
           const nextItem = list[index + 1]
           const followsDeepResearchCard =
             nextItem?.role === ChatRole.Assistant && nextItem?.type === ChatType.DeepResearch
+          const hasVisibleAssistantReply =
+            nextItem?.role === ChatRole.Assistant &&
+            Boolean(
+              nextItem?.message_id ||
+                (typeof nextItem?.content === 'string' && nextItem.content.trim()) ||
+                nextItem?.error,
+            )
           return (
             <UserMessage
               key={item.id}
               item={item}
               index={index}
-              showToolbar={Boolean(item.message_id || followsDeepResearchCard)}
+              showToolbar={Boolean(
+                item.message_id || followsDeepResearchCard || hasVisibleAssistantReply,
+              )}
               onRetry={onRetryUserMessage}
               onResend={onResendUserMessage}
             />
