@@ -153,6 +153,14 @@ export function chat(
     runId?: string
     llmProvider?: 'dashscope' | 'openai' | 'local'
     llmModel?: string
+    customLlm?: {
+      providerType: 'openai_compatible'
+      providerLabel?: string
+      baseUrl: string
+      apiKey: string
+      model: string
+      allowFallback?: boolean
+    }
     imageAttachments?: {
       id?: string
       name: string

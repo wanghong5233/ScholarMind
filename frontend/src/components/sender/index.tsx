@@ -6,6 +6,7 @@ import {
   ExperimentOutlined,
   FileOutlined,
   PictureOutlined,
+  SettingOutlined,
 } from '@ant-design/icons'
 import { Button, Image, Input, Select, Space, Tooltip } from 'antd'
 import type { TextAreaRef } from 'antd/es/input/TextArea'
@@ -66,6 +67,8 @@ export default function ComSender(
       disabled?: boolean
       width?: string | number
       onChange: (value: string) => void
+      onConfigure?: () => void
+      configureTitle?: string
     }
     systemStatusControl?: {
       title?: string
@@ -239,21 +242,34 @@ export default function ComSender(
       <div className="com-sender__actions">
         <Space className="com-sender__actions-left" size={12}>
           {modelControl ? (
-            <Tooltip title="模型切换">
-              <Select
-                size="small"
-                className="com-sender__model-select"
-                value={modelControl.value}
-                options={modelControl.options}
-                loading={modelControl.loading}
-                disabled={modelControl.disabled}
-                style={modelControl.width ? { width: modelControl.width } : undefined}
-                onChange={(value) => modelControl.onChange(String(value))}
-                optionFilterProp="label"
-                popupMatchSelectWidth={false}
-                showSearch
-              />
-            </Tooltip>
+            <Space size={6}>
+              <Tooltip title="模型切换">
+                <Select
+                  size="small"
+                  className="com-sender__model-select"
+                  value={modelControl.value}
+                  options={modelControl.options}
+                  loading={modelControl.loading}
+                  disabled={modelControl.disabled}
+                  style={modelControl.width ? { width: modelControl.width } : undefined}
+                  onChange={(value) => modelControl.onChange(String(value))}
+                  optionFilterProp="label"
+                  popupMatchSelectWidth={false}
+                  showSearch
+                />
+              </Tooltip>
+              {modelControl.onConfigure ? (
+                <Tooltip title={modelControl.configureTitle || '模型设置'}>
+                  <Button
+                    size="small"
+                    type="text"
+                    className="com-sender__model-config-btn"
+                    icon={<SettingOutlined />}
+                    onClick={modelControl.onConfigure}
+                  />
+                </Tooltip>
+              ) : null}
+            </Space>
           ) : null}
         </Space>
 

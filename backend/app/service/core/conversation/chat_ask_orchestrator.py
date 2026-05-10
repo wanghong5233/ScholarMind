@@ -166,6 +166,13 @@ class ChatAskOrchestrator:
             llm_model_override = getattr(defaults_model, "llmModel", None)
         if isinstance(llm_model_override, str):
             llm_model_override = llm_model_override.strip() or None
+        try:
+            llm_runtime_config = self._normalize_custom_llm_config(payload.get("customLlm"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if llm_runtime_config:
+            llm_provider_override = "custom"
+            llm_model_override = str(llm_runtime_config.get("model") or llm_model_override or "").strip() or None
         fast_mode = self._is_fast_mode(provider_override)
         enable_rerank = (not fast_mode) or bool(getattr(settings, "SM_FAST_MODE_RERANK_ENABLED", False))
 
@@ -980,6 +987,7 @@ class ChatAskOrchestrator:
                         extra_system=extra_system_prompt,
                         llm_model=llm_model_override,
                         llm_provider=llm_provider_override,
+                        llm_runtime_config=llm_runtime_config,
                         image_attachments=image_attachments,
                         rag_mode=not retrieval_disabled,
                     ):
@@ -1484,6 +1492,7 @@ class ChatAskOrchestrator:
                 extra_system=extra_system_prompt_non_stream,
                 llm_model=llm_model_override,
                 llm_provider=llm_provider_override,
+                llm_runtime_config=llm_runtime_config,
                 image_attachments=image_attachments,
                 rag_mode=not retrieval_disabled,
             )
@@ -2094,6 +2103,37 @@ class ChatAskOrchestrator:
         except Exception:
             self.db.rollback()
             raise
+
+    @staticmethod
+    def _normalize_custom_llm_config(raw: Any) -> Optional[Dict[str, Any]]:
+        if raw is None:
+            return None
+        if not isinstance(raw, dict):
+            raise ValueError("customLlm must be an object")
+        provider_type = str(raw.get("providerType") or "").strip().lower()
+        if provider_type != "openai_compatible":
+            raise ValueError("customLlm.providerType must be openai_compatible")
+        base_url = str(raw.get("baseUrl") or "").strip().rstrip("/")
+        model_name = str(raw.get("model") or "").strip()
+        api_key = str(raw.get("apiKey") or "").strip()
+        if not base_url:
+            raise ValueError("customLlm.baseUrl is required")
+        if not model_name:
+            raise ValueError("customLlm.model is required")
+        if not api_key:
+            raise ValueError("customLlm.apiKey is required")
+        if not (base_url.startswith("http://") or base_url.startswith("https://")):
+            raise ValueError("customLlm.baseUrl must start with http:// or https://")
+        provider_label = str(raw.get("providerLabel") or "").strip() or "Custom"
+        allow_fallback = bool(raw.get("allowFallback"))
+        return {
+            "provider_type": "openai_compatible",
+            "provider_label": provider_label,
+            "base_url": base_url,
+            "api_key": api_key,
+            "model": model_name,
+            "allow_fallback": allow_fallback,
+        }
 
     @staticmethod
     def _coerce_confidence(value: Any, *, default: float = 0.0) -> float:

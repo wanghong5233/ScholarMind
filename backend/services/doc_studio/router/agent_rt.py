@@ -46,7 +46,10 @@ class LaTeXEditRequest(BaseModel):
     )
     options: Optional[Dict[str, Any]] = Field(
         default=None,
-        description="Optional overrides (llm_provider/llm_model/llm_temperature/llm_max_tokens/interaction_mode)"
+        description=(
+            "Optional overrides "
+            "(llm_provider/llm_model/llm_temperature/llm_max_tokens/interaction_mode/llm_custom)"
+        )
     )
     collect_training_data: bool = False  # 是否收集训练数据（用于 RL 训练）
     knowledge_base_id: Optional[int] = Field(

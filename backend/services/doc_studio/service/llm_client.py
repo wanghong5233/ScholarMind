@@ -123,6 +123,49 @@ class LLMClient:
     def _normalize_provider_key(provider: str) -> str:
         return str(provider or "").strip().lower()
 
+    @staticmethod
+    def _extract_custom_llm_override(llm_options: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        raw = (llm_options or {}).get("llm_custom")
+        if not isinstance(raw, dict):
+            return None
+        provider_type = str(raw.get("provider_type") or raw.get("providerType") or "").strip().lower()
+        if provider_type != "openai_compatible":
+            return None
+        base_url = str(raw.get("base_url") or raw.get("baseUrl") or "").strip().rstrip("/")
+        api_key = str(raw.get("api_key") or raw.get("apiKey") or "").strip()
+        model_name = str(raw.get("model") or "").strip()
+        if not base_url or not api_key or not model_name:
+            return None
+        if not (base_url.startswith("http://") or base_url.startswith("https://")):
+            return None
+        provider_label = str(raw.get("provider_label") or raw.get("providerLabel") or "Custom").strip() or "Custom"
+        allow_fallback = bool(
+            raw.get("allow_fallback")
+            if "allow_fallback" in raw
+            else raw.get("allowFallback")
+        )
+        return {
+            "provider_type": "openai_compatible",
+            "provider_label": provider_label,
+            "base_url": base_url,
+            "api_key": api_key,
+            "model": model_name,
+            "allow_fallback": allow_fallback,
+        }
+
+    def _resolve_custom_provider_config(self, llm_options: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        custom = self._extract_custom_llm_override(llm_options)
+        if not custom:
+            return None
+        return {
+            "provider": custom["provider_label"],
+            "provider_key": "custom",
+            "api_key": custom["api_key"],
+            "base_url": custom["base_url"],
+            "model": custom["model"],
+            "allow_fallback": bool(custom.get("allow_fallback")),
+        }
+
     def _get_provider_config(self, provider: str) -> Dict[str, Any]:
         """Return provider settings for the given provider."""
 
@@ -140,6 +183,13 @@ class LLMClient:
                 "api_key": settings.OPENAI_API_KEY,
                 "base_url": settings.OPENAI_BASE_URL,
                 "model": settings.OPENAI_MODEL_NAME,
+            }
+        if normalized == "custom":
+            return {
+                "provider": "Custom",
+                "api_key": None,
+                "base_url": None,
+                "model": "",
             }
         raise ValueError(f"Unsupported LLM provider: {provider}")
 
@@ -193,6 +243,8 @@ class LLMClient:
         return None
 
     def _model_matches_provider(self, model_name: Optional[str], provider_key: str) -> bool:
+        if self._normalize_provider_key(provider_key) == "custom":
+            return True
         inferred = self._infer_provider_from_model(model_name)
         return inferred is None or inferred == self._normalize_provider_key(provider_key)
 
@@ -238,6 +290,10 @@ class LLMClient:
         provider_key: str,
     ) -> List[str]:
         normalized = self._normalize_provider_key(provider_key)
+        if normalized == "custom":
+            custom = self._extract_custom_llm_override(llm_options)
+            model_name = str((custom or {}).get("model") or "").strip()
+            return [model_name] if model_name else []
         candidates: List[str] = []
         model_override = (llm_options or {}).get("llm_model")
         if model_override and self._model_matches_provider(str(model_override), normalized):
@@ -260,6 +316,26 @@ class LLMClient:
         provider_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Resolve LLM config based on optional overrides."""
+
+        custom_config = self._resolve_custom_provider_config(llm_options)
+        normalized_provider_key = self._normalize_provider_key(provider_key or "")
+        if custom_config and (not provider_key or normalized_provider_key == "custom"):
+            config = dict(custom_config)
+            model_override = (llm_options or {}).get("llm_model")
+            if model_override:
+                config["model"] = str(model_override).strip() or config["model"]
+            config["temperature"] = self._coerce_float(
+                (llm_options or {}).get("llm_temperature"),
+                self.temperature,
+            )
+            config["max_tokens"] = self._coerce_int(
+                (llm_options or {}).get("llm_max_tokens"),
+                self.max_tokens,
+            )
+            return config
+
+        if normalized_provider_key == "custom" and not custom_config:
+            raise ValueError("Custom LLM config is required when provider is custom")
 
         resolved_provider = provider_key
         if not resolved_provider:
@@ -335,6 +411,16 @@ class LLMClient:
         return providers
 
     def _get_provider_candidates(self, llm_options: Optional[Dict[str, Any]]) -> List[str]:
+        custom = self._extract_custom_llm_override(llm_options)
+        if custom:
+            candidates = ["custom"]
+            if not settings.LLM_FALLBACK_ENABLED or not custom.get("allow_fallback"):
+                return candidates
+            for provider in self._get_available_providers():
+                if provider not in candidates:
+                    candidates.append(provider)
+            return candidates
+
         provider_override = (llm_options or {}).get("llm_provider")
         normalized_override = self._normalize_provider_key(provider_override or "")
         preferred = ""
@@ -554,12 +640,17 @@ class LLMClient:
                 max_tokens_value = None
 
             last_error: Optional[Exception] = None
+            custom_override = self._extract_custom_llm_override(llm_options)
             requested_provider = self._normalize_provider_key(
                 (llm_options or {}).get("llm_provider") or healthy_candidates[0]
             )
+            if custom_override:
+                requested_provider = "custom"
             if requested_provider in {"", "auto"}:
                 requested_provider = healthy_candidates[0]
             requested_model = str((llm_options or {}).get("llm_model") or "").strip()
+            if custom_override and not requested_model:
+                requested_model = str(custom_override.get("model") or "").strip()
             primary_provider = healthy_candidates[0]
             primary_model: Optional[str] = None
 
@@ -587,6 +678,7 @@ class LLMClient:
                             "requested_provider": requested_provider,
                             "requested_model": requested_model or primary_model or model_name,
                             "actual_provider": resolved_provider,
+                            "actual_provider_label": str(llm_config.get("provider") or resolved_provider),
                             "actual_model": model_name,
                             "fallback_applied": (
                                 resolved_provider != requested_provider

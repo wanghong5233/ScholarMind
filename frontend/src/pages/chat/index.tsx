@@ -8,6 +8,15 @@ import { userState } from '@/store/user'
 import { setPageTransport, usePageTransport } from '@/utils'
 import { requireLogin } from '@/utils/auth'
 import { NOTEBOOK_WORKSPACE_ID, createNotebookNoteFile } from '@/utils/notebook'
+import {
+  CUSTOM_LLM_OPTION_VALUE,
+  type CustomLlmProfile,
+  isCustomLlmProfileReady,
+  loadCustomLlmProfile,
+  resolveCustomModelOptionLabel,
+  saveCustomLlmProfile,
+  toCustomLlmPayload,
+} from '@/utils/custom-llm'
 import { MenuUnfoldOutlined } from '@ant-design/icons'
 import { useMount, useRequest, useUnmount } from 'ahooks'
 import {
@@ -16,6 +25,7 @@ import {
   Input,
   Modal,
   Space,
+  Switch,
   Tag,
   Typography,
   message,
@@ -179,6 +189,13 @@ type ChatUsageStats = {
   completion_tokens: number
   total_tokens: number
 }
+type CustomLlmFormValues = {
+  providerLabel?: string
+  baseUrl: string
+  model: string
+  apiKey: string
+  allowFallback?: boolean
+}
 type DeepResearchSuggestionEvaluation = {
   reason: string
   score: number
@@ -251,6 +268,7 @@ const normalizeLlmProvider = (value: unknown): LlmProviderValue => {
 
 const resolveProviderByModel = (value: unknown): LlmProviderValue => {
   if (typeof value === 'string') {
+    if (value === CUSTOM_LLM_OPTION_VALUE) return 'openai'
     return LLM_MODEL_OPTION_MAP.get(value)?.provider || 'dashscope'
   }
   return 'dashscope'
@@ -263,13 +281,17 @@ const defaultVisionModelByProvider = (provider: LlmProviderValue): LlmModelValue
   provider === 'openai' ? DEFAULT_OPENAI_VISION_MODEL : DEFAULT_DASHSCOPE_VISION_MODEL
 
 const normalizeLlmModel = (value: unknown, providerHint?: unknown): LlmModelValue => {
+  if (value === CUSTOM_LLM_OPTION_VALUE) {
+    return CUSTOM_LLM_OPTION_VALUE
+  }
   if (typeof value === 'string' && LLM_MODEL_SET.has(value)) {
     return value
   }
   return defaultModelByProvider(normalizeLlmProvider(providerHint))
 }
 
-const isVisionModel = (value: string) => Boolean(LLM_MODEL_OPTION_MAP.get(value)?.isVision)
+const isVisionModel = (value: string) =>
+  value === CUSTOM_LLM_OPTION_VALUE ? false : Boolean(LLM_MODEL_OPTION_MAP.get(value)?.isVision)
 
 const resolveModelLabel = (value: string) => LLM_MODEL_OPTION_MAP.get(value)?.label || value
 const estimateLabelUnits = (text: string) =>
@@ -1123,6 +1145,11 @@ export default function Index() {
   const [chatImageProcessing, setChatImageProcessing] = useState(false)
   const [sessionDefaults, setSessionDefaults] =
     useState<API.SessionDefaults | null>(null)
+  const [customLlmProfile, setCustomLlmProfile] = useState<CustomLlmProfile | null>(() =>
+    loadCustomLlmProfile(),
+  )
+  const [customLlmModalOpen, setCustomLlmModalOpen] = useState(false)
+  const [customLlmForm] = Form.useForm<CustomLlmFormValues>()
   const [llmModel, setLlmModel] = useState<LlmModelValue>(() => {
     if (typeof window === 'undefined') return DEFAULT_OPENAI_MODEL
     const saved = localStorage.getItem(DEEP_CHAT_LLM_LOCAL_STORAGE_KEY)
@@ -1130,10 +1157,22 @@ export default function Index() {
   })
   const [llmModelCatalog, setLlmModelCatalog] =
     useState<api.config.LlmModelCatalog | null>(null)
-  const llmModelOptions = useMemo(
-    () => buildLlmModelOptionsFromCatalog(llmModelCatalog),
-    [llmModelCatalog],
-  )
+  const llmModelOptions = useMemo(() => {
+    const options = buildLlmModelOptionsFromCatalog(llmModelCatalog)
+    const customLabel = resolveCustomModelOptionLabel(customLlmProfile)
+    return [
+      ...options,
+      {
+        label: customLabel,
+        value: CUSTOM_LLM_OPTION_VALUE,
+        provider: 'openai' as const,
+        isVision: false,
+        available: isCustomLlmProfileReady(customLlmProfile),
+        status: isCustomLlmProfileReady(customLlmProfile) ? 'available' : 'pending',
+        reason: isCustomLlmProfileReady(customLlmProfile) ? null : '需在模型设置里填写 API Key 与 Base URL',
+      },
+    ]
+  }, [customLlmProfile, llmModelCatalog])
   const llmModelOptionMap = useMemo(
     () => new Map<string, LlmModelOption>(llmModelOptions.map((item) => [item.value, item])),
     [llmModelOptions],
@@ -1149,7 +1188,11 @@ export default function Index() {
         return catalogDefault
       }
       const matched = llmModelOptions.find(
-        (item) => item.provider === provider && !item.isVision && item.available !== false,
+        (item) =>
+          item.provider === provider &&
+          item.value !== CUSTOM_LLM_OPTION_VALUE &&
+          !item.isVision &&
+          item.available !== false,
       )
       return matched?.value || defaultModelByProvider(provider)
     },
@@ -1171,6 +1214,7 @@ export default function Index() {
   const resolveRuntimeProviderByModel = useCallback(
     (value: unknown): LlmProviderValue => {
       if (typeof value === 'string') {
+        if (value === CUSTOM_LLM_OPTION_VALUE) return 'openai'
         return llmModelOptionMap.get(value)?.provider || resolveProviderByModel(value)
       }
       return normalizeLlmProvider(llmModelCatalog?.preferredProvider)
@@ -1179,6 +1223,9 @@ export default function Index() {
   )
   const normalizeRuntimeLlmModel = useCallback(
     (value: unknown, providerHint?: unknown): LlmModelValue => {
+      if (value === CUSTOM_LLM_OPTION_VALUE) {
+        return CUSTOM_LLM_OPTION_VALUE
+      }
       if (typeof value === 'string' && llmModelSet.has(value)) {
         const option = llmModelOptionMap.get(value)
         if (option?.available !== false) return value
@@ -1198,7 +1245,9 @@ export default function Index() {
   )
   const isRuntimeVisionModel = useCallback(
     (value: string) =>
-      Boolean(llmModelOptionMap.get(value)?.isVision ?? isVisionModel(value)),
+      value === CUSTOM_LLM_OPTION_VALUE
+        ? false
+        : Boolean(llmModelOptionMap.get(value)?.isVision ?? isVisionModel(value)),
     [llmModelOptionMap],
   )
   const resolveRuntimeModelLabel = useCallback(
@@ -1908,6 +1957,7 @@ export default function Index() {
           nextOptions.find((item) => item.available !== false && !item.isVision)?.value ||
           DEFAULT_OPENAI_MODEL
         setLlmModel((current) => {
+          if (current === CUSTOM_LLM_OPTION_VALUE) return current
           const option = nextMap.get(current)
           if (option && option.available !== false) return current
           if (nextSet.has(fallback)) return fallback
@@ -1944,7 +1994,9 @@ export default function Index() {
           next?.llmModel || fallbackModel,
           next?.llmProvider,
         )
-        setLlmModel(nextModel)
+        setLlmModel((current) =>
+          current === CUSTOM_LLM_OPTION_VALUE ? CUSTOM_LLM_OPTION_VALUE : nextModel,
+        )
       },
     },
   )
@@ -2032,6 +2084,10 @@ export default function Index() {
   }, [llmModel])
 
   useEffect(() => {
+    saveCustomLlmProfile(customLlmProfile)
+  }, [customLlmProfile])
+
+  useEffect(() => {
     if (typeof window === 'undefined') return
     localStorage.setItem(DEEP_CHAT_RESEARCH_PRESET_STORAGE_KEY, deepResearchPreset)
   }, [deepResearchPreset])
@@ -2067,11 +2123,46 @@ export default function Index() {
     [id, sessionDefaults],
   )
 
+  const openCustomLlmSettings = useCallback(() => {
+    customLlmForm.setFieldsValue({
+      providerLabel: customLlmProfile?.providerLabel || '自定义模型',
+      baseUrl: customLlmProfile?.baseUrl || '',
+      model: customLlmProfile?.model || '',
+      apiKey: customLlmProfile?.apiKey || '',
+      allowFallback: Boolean(customLlmProfile?.allowFallback),
+    })
+    setCustomLlmModalOpen(true)
+  }, [customLlmForm, customLlmProfile])
+
+  const handleSaveCustomLlmSettings = useCallback(async () => {
+    const values = await customLlmForm.validateFields()
+    const normalizedBaseUrl = String(values.baseUrl || '').trim().replace(/\/+$/, '')
+    const nextProfile: CustomLlmProfile = {
+      enabled: true,
+      providerType: 'openai_compatible',
+      providerLabel: String(values.providerLabel || '').trim() || '自定义模型',
+      baseUrl: normalizedBaseUrl,
+      model: String(values.model || '').trim(),
+      apiKey: String(values.apiKey || '').trim(),
+      allowFallback: Boolean(values.allowFallback),
+    }
+    setCustomLlmProfile(nextProfile)
+    setCustomLlmModalOpen(false)
+    message.success('自定义模型配置已保存')
+  }, [customLlmForm])
+
   const handleLlmModelChange = useCallback(
     async (value: string) => {
       const normalized = normalizeRuntimeLlmModel(value)
-      const provider = resolveRuntimeProviderByModel(normalized)
       setLlmModel(normalized)
+      if (normalized === CUSTOM_LLM_OPTION_VALUE) {
+        if (!isCustomLlmProfileReady(customLlmProfile)) {
+          message.warning('请先在模型设置中完成自定义模型配置')
+          openCustomLlmSettings()
+        }
+        return
+      }
+      const provider = resolveRuntimeProviderByModel(normalized)
       if (!sessionDefaults || updatingDefaults) return
       if (
         sessionDefaults.llmModel === normalized &&
@@ -2094,6 +2185,8 @@ export default function Index() {
       applyDefaults,
       normalizeRuntimeLlmModel,
       resolveRuntimeProviderByModel,
+      customLlmProfile,
+      openCustomLlmSettings,
     ],
   )
 
@@ -2342,6 +2435,7 @@ export default function Index() {
         replaceMessageId?: string
         llmModel?: string
         llmProvider?: 'dashscope' | 'openai' | 'local'
+        customLlm?: ReturnType<typeof toCustomLlmPayload>
         useRag?: boolean
       },
     ): Promise<{ rolledBack: boolean }> => {
@@ -2431,6 +2525,7 @@ export default function Index() {
           indexMode: requestRetrievalDisabled ? 'disabled' : undefined,
           llmProvider: extra?.llmProvider,
           llmModel: extra?.llmModel,
+          customLlm: extra?.customLlm,
           imageAttachments: Array.isArray(extra?.userItem?.images)
             ? extra.userItem.images.map((item) => ({
                 id: item.id,
@@ -3206,7 +3301,17 @@ export default function Index() {
         return
       }
       let effectiveLlmModel: LlmModelValue = llmModel
-      if (imagesSnapshot.length > 0 && !isRuntimeVisionModel(effectiveLlmModel)) {
+      const customLlmPayload = toCustomLlmPayload(customLlmProfile)
+      const usingCustomModel = effectiveLlmModel === CUSTOM_LLM_OPTION_VALUE
+      if (usingCustomModel) {
+        if (!customLlmPayload) {
+          message.warning('当前已选择自定义模型，但尚未完成 API 配置')
+          openCustomLlmSettings()
+          return
+        }
+        effectiveLlmModel = customLlmPayload.model
+      }
+      if (!usingCustomModel && imagesSnapshot.length > 0 && !isRuntimeVisionModel(effectiveLlmModel)) {
         effectiveLlmModel = defaultRuntimeVisionModelByProvider(
           resolveRuntimeProviderByModel(effectiveLlmModel),
         )
@@ -3374,6 +3479,7 @@ export default function Index() {
           replaceMessageId: effectiveReplaceMessageId || undefined,
           llmProvider: resolveRuntimeProviderByModel(effectiveLlmModel),
           llmModel: effectiveLlmModel,
+          customLlm: usingCustomModel ? customLlmPayload : undefined,
           useRag: usingRag,
         })
         if (result.rolledBack) return
@@ -3403,6 +3509,8 @@ export default function Index() {
       setDocuments,
       resolveBranchReplaceMessageId,
       resolveKeepMessagesBeforeIndex,
+      customLlmProfile,
+      openCustomLlmSettings,
       navigate,
       user.token,
     ],
@@ -5304,12 +5412,29 @@ export default function Index() {
   }, [sessionDisplayTitle, list])
 
   const activeLlmModel = useMemo(
-    () => normalizeRuntimeLlmModel(sessionDefaults?.llmModel || llmModel, sessionDefaults?.llmProvider),
+    () =>
+      llmModel === CUSTOM_LLM_OPTION_VALUE
+        ? CUSTOM_LLM_OPTION_VALUE
+        : normalizeRuntimeLlmModel(sessionDefaults?.llmModel || llmModel, sessionDefaults?.llmProvider),
     [sessionDefaults?.llmModel, sessionDefaults?.llmProvider, llmModel, normalizeRuntimeLlmModel],
   )
   const activeLlmProvider = useMemo(
     () => resolveRuntimeProviderByModel(activeLlmModel),
     [activeLlmModel, resolveRuntimeProviderByModel],
+  )
+  const activeLlmProviderLabel = useMemo(
+    () =>
+      activeLlmModel === CUSTOM_LLM_OPTION_VALUE
+        ? String(customLlmProfile?.providerLabel || 'Custom')
+        : activeLlmProvider,
+    [activeLlmModel, activeLlmProvider, customLlmProfile?.providerLabel],
+  )
+  const activeLlmModelLabel = useMemo(
+    () =>
+      activeLlmModel === CUSTOM_LLM_OPTION_VALUE
+        ? String(customLlmProfile?.model || '未配置')
+        : activeLlmModel,
+    [activeLlmModel, customLlmProfile?.model],
   )
 
   const sessionUsageTotals = useMemo(() => {
@@ -5496,9 +5621,12 @@ export default function Index() {
   const modelControl = useMemo(
     () => {
       const options = llmModelOptions.map((item) => ({
-        label: item.available === false ? `${item.label}（不可用）` : item.label,
+        label:
+          item.available === false && item.value !== CUSTOM_LLM_OPTION_VALUE
+            ? `${item.label}（不可用）`
+            : item.label,
         value: item.value,
-        disabled: item.available === false,
+        disabled: item.available === false && item.value !== CUSTOM_LLM_OPTION_VALUE,
       }))
       const currentLabel = resolveRuntimeModelLabel(activeLlmModel)
       return {
@@ -5508,6 +5636,8 @@ export default function Index() {
         loading: modelCatalogReq.loading,
         disabled: updatingDefaults || defaultsLoading,
         onChange: handleLlmModelChange,
+        onConfigure: openCustomLlmSettings,
+        configureTitle: '模型设置（含自定义模型 API Key）',
       }
     },
     [
@@ -5516,6 +5646,7 @@ export default function Index() {
       handleLlmModelChange,
       llmModelOptions,
       modelCatalogReq.loading,
+      openCustomLlmSettings,
       resolveRuntimeModelLabel,
       updatingDefaults,
     ],
@@ -5728,6 +5859,72 @@ export default function Index() {
         )}
 
         <Modal
+          title="模型设置"
+          open={customLlmModalOpen}
+          onCancel={() => setCustomLlmModalOpen(false)}
+          onOk={() => {
+            void handleSaveCustomLlmSettings()
+          }}
+          okText="保存"
+          cancelText="取消"
+          destroyOnClose
+          width={620}
+        >
+          <Typography.Paragraph type="secondary" style={{ marginBottom: 16 }}>
+            使用 OpenAI-Compatible 协议接入自定义模型。配置仅保存在当前浏览器，本系统不会在数据库落盘。
+          </Typography.Paragraph>
+          <Form form={customLlmForm} layout="vertical">
+            <Form.Item
+              name="providerLabel"
+              label="提供方名称"
+              tooltip="仅用于前端展示，例如 OpenRouter / DeepSeek / vLLM"
+            >
+              <Input placeholder="例如：OpenRouter" maxLength={80} />
+            </Form.Item>
+            <Form.Item
+              name="baseUrl"
+              label="Base URL"
+              rules={[
+                { required: true, message: '请输入 Base URL' },
+                {
+                  validator: async (_, value) => {
+                    const text = String(value || '').trim()
+                    if (!text) return
+                    if (!/^https?:\/\//i.test(text)) {
+                      return Promise.reject(new Error('Base URL 需以 http:// 或 https:// 开头'))
+                    }
+                  },
+                },
+              ]}
+            >
+              <Input placeholder="https://api.example.com/v1" />
+            </Form.Item>
+            <Form.Item
+              name="model"
+              label="模型 ID"
+              rules={[{ required: true, message: '请输入模型 ID' }]}
+            >
+              <Input placeholder="例如：gpt-4.1-mini / deepseek-chat / qwen3-32b" />
+            </Form.Item>
+            <Form.Item
+              name="apiKey"
+              label="API Key"
+              rules={[{ required: true, message: '请输入 API Key' }]}
+            >
+              <Input.Password placeholder="输入 API Key" autoComplete="off" />
+            </Form.Item>
+            <Form.Item
+              name="allowFallback"
+              label="失败时自动回退平台模型"
+              valuePropName="checked"
+              tooltip="关闭时将严格使用自定义模型，失败即报错；开启时会按系统策略尝试回退。"
+            >
+              <Switch />
+            </Form.Item>
+          </Form>
+        </Modal>
+
+        <Modal
           title="系统状态"
           open={systemStatusOpen}
           footer={null}
@@ -5736,8 +5933,8 @@ export default function Index() {
         >
           <Space direction="vertical" size={10} style={{ width: '100%' }}>
             <Space wrap>
-              <Tag color="blue">Provider: {activeLlmProvider}</Tag>
-              <Tag color="geekblue">模型: {activeLlmModel}</Tag>
+              <Tag color="blue">Provider: {activeLlmProviderLabel}</Tag>
+              <Tag color="geekblue">模型: {activeLlmModelLabel}</Tag>
               {isRuntimeVisionModel(activeLlmModel) ? <Tag color="purple">视觉模型</Tag> : <Tag>文本模型</Tag>}
               {autoVisionHint ? (
                 <Tag color="orange">

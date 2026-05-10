@@ -53,6 +53,7 @@ class ChatGenerationService:
         extra_system: Optional[str] = None,
         llm_model: Optional[str] = None,
         llm_provider: Optional[str] = None,
+        llm_runtime_config: Optional[Dict[str, Any]] = None,
         image_attachments: Optional[List[Dict[str, Any]]] = None,
         rag_mode: bool = True,
     ) -> Iterable[str] | str:
@@ -197,6 +198,7 @@ class ChatGenerationService:
             stream=stream,
             model=llm_model,
             provider=llm_provider,
+            runtime_config=llm_runtime_config,
         )
         if not stream:
             try:

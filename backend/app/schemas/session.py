@@ -79,6 +79,45 @@ class AskImageAttachment(BaseModel):
     size: Optional[int] = Field(None, ge=0, description="图片字节大小")
 
 
+class AskCustomLlmConfig(BaseModel):
+    """自定义 OpenAI-Compatible 模型配置（按请求透传）。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    providerType: Literal["openai_compatible"] = Field(
+        "openai_compatible",
+        description="自定义模型协议类型（当前仅支持 OpenAI-Compatible）",
+    )
+    providerLabel: Optional[str] = Field(
+        None,
+        min_length=1,
+        max_length=80,
+        description="展示用提供方名称（如 OpenRouter/DeepSeek/vLLM）",
+    )
+    baseUrl: str = Field(
+        ...,
+        min_length=8,
+        max_length=512,
+        description="OpenAI-Compatible base URL",
+    )
+    apiKey: str = Field(
+        ...,
+        min_length=1,
+        max_length=512,
+        description="OpenAI-Compatible API Key",
+    )
+    model: str = Field(
+        ...,
+        min_length=1,
+        max_length=160,
+        description="自定义模型 ID",
+    )
+    allowFallback: bool = Field(
+        False,
+        description="自定义模型失败时是否允许回退到平台模型",
+    )
+
+
 class AskRequest(BaseModel):
     """会话问答请求体。"""
 
@@ -108,6 +147,10 @@ class AskRequest(BaseModel):
         description="本次请求的 LLM Provider 覆盖",
     )
     llmModel: Optional[str] = Field(None, description="本次请求的 LLM 模型覆盖")
+    customLlm: Optional[AskCustomLlmConfig] = Field(
+        None,
+        description="本次请求的自定义 OpenAI-Compatible 模型配置",
+    )
     imageAttachments: Optional[List[AskImageAttachment]] = Field(
         None,
         description="图片附件列表（最多 4 张，单张不超过前端限制）",

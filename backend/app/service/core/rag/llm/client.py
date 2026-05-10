@@ -33,7 +33,7 @@ class LLMClient:
             prov = "dashscope"
         if prov == "local" and settings.OPENAI_API_KEY:
             prov = "openai"
-        if prov not in {"dashscope", "openai", "local"}:
+        if prov not in {"dashscope", "openai", "local", "custom"}:
             raise ValueError(f"Unsupported LLM provider: {prov}")
         self.provider = prov
         self.task = (task or "default").strip().lower()
@@ -47,7 +47,9 @@ class LLMClient:
     @staticmethod
     def _normalize_provider(provider: Optional[str]) -> str:
         raw = str(provider or "").strip().lower()
-        if raw in {"dashscope", "openai", "local"}:
+        if raw in {"dashscope", "openai", "local", "custom", "openai_compatible"}:
+            if raw == "openai_compatible":
+                return "custom"
             return raw
         if raw in {"", "auto"}:
             return "local"
@@ -70,6 +72,49 @@ class LLMClient:
             return settings.DASHSCOPE_BASE_URL, settings.DASHSCOPE_API_KEY
         return None, None
 
+    @staticmethod
+    def _normalize_runtime_config(runtime_config: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if runtime_config is None:
+            return None
+        if not isinstance(runtime_config, dict):
+            raise ValueError("runtime_config must be a dict")
+        provider_type = str(
+            runtime_config.get("provider_type")
+            or runtime_config.get("providerType")
+            or ""
+        ).strip().lower()
+        if provider_type != "openai_compatible":
+            raise ValueError("runtime_config.provider_type must be openai_compatible")
+        base_url = str(runtime_config.get("base_url") or runtime_config.get("baseUrl") or "").strip().rstrip("/")
+        api_key = str(runtime_config.get("api_key") or runtime_config.get("apiKey") or "").strip()
+        model_name = str(runtime_config.get("model") or "").strip()
+        if not base_url:
+            raise ValueError("runtime_config.base_url is required")
+        if not (base_url.startswith("http://") or base_url.startswith("https://")):
+            raise ValueError("runtime_config.base_url must start with http:// or https://")
+        if not api_key:
+            raise ValueError("runtime_config.api_key is required")
+        if not model_name:
+            raise ValueError("runtime_config.model is required")
+        provider_label = str(
+            runtime_config.get("provider_label")
+            or runtime_config.get("providerLabel")
+            or "Custom"
+        ).strip() or "Custom"
+        allow_fallback = bool(
+            runtime_config.get("allow_fallback")
+            if "allow_fallback" in runtime_config
+            else runtime_config.get("allowFallback")
+        )
+        return {
+            "provider_type": "openai_compatible",
+            "provider_label": provider_label,
+            "base_url": base_url,
+            "api_key": api_key,
+            "model": model_name,
+            "allow_fallback": allow_fallback,
+        }
+
     def _infer_provider_from_model(self, model: Optional[str]) -> Optional[str]:
         name = str(model or "").strip().lower()
         if not name:
@@ -91,6 +136,8 @@ class LLMClient:
         return bool(resolved.supports_custom_temperature)
 
     def _model_matches_provider(self, model: Optional[str], provider: str) -> bool:
+        if provider == "custom":
+            return True
         inferred = self._infer_provider_from_model(model)
         return inferred is None or inferred == provider
 
@@ -99,12 +146,22 @@ class LLMClient:
         *,
         provider: Optional[str] = None,
         model: Optional[str] = None,
+        runtime_config: Optional[Dict[str, Any]] = None,
     ) -> tuple[str, Optional[str], Optional[str], str]:
+        normalized_runtime = self._normalize_runtime_config(runtime_config)
+        if normalized_runtime:
+            runtime_model = str(model or normalized_runtime["model"]).strip() or normalized_runtime["model"]
+            return (
+                "custom",
+                str(normalized_runtime["base_url"]),
+                str(normalized_runtime["api_key"]),
+                runtime_model,
+            )
         resolved_provider = self._resolve_provider(provider)
         inferred_provider = self._infer_provider_from_model(model)
         if provider is None and inferred_provider in {"dashscope", "openai"}:
             resolved_provider = inferred_provider
-        if resolved_provider not in {"dashscope", "openai", "local"}:
+        if resolved_provider not in {"dashscope", "openai", "local", "custom"}:
             raise ValueError(f"Unsupported LLM provider: {resolved_provider}")
         fallback_model = (
             self.model
@@ -118,7 +175,7 @@ class LLMClient:
     def _resolve_task_model(self, task: str, provider: str) -> str:
         default_model = (
             getattr(settings, "OPENAI_MODEL_NAME", "gpt-5.2")
-            if provider == "openai"
+            if provider in {"openai", "custom"}
             else getattr(settings, "DASHSCOPE_MODEL_NAME", "qwen3-max")
         )
         answer = getattr(settings, "SM_LLM_MODEL_ANSWER", None)
@@ -241,10 +298,38 @@ class LLMClient:
         *,
         provider: Optional[str],
         model: Optional[str],
+        runtime_config: Optional[Dict[str, Any]] = None,
     ) -> List[tuple[str, Optional[str], Optional[str], str]]:
+        normalized_runtime = self._normalize_runtime_config(runtime_config)
+        if normalized_runtime:
+            primary_model = str(model or normalized_runtime["model"]).strip() or normalized_runtime["model"]
+            candidates: List[tuple[str, Optional[str], Optional[str], str]] = [
+                (
+                    "custom",
+                    str(normalized_runtime["base_url"]),
+                    str(normalized_runtime["api_key"]),
+                    primary_model,
+                )
+            ]
+            if not normalized_runtime.get("allow_fallback"):
+                return candidates
+            fallback_candidates = self._fallback_candidates(
+                provider=provider,
+                model=model,
+                runtime_config=None,
+            )
+            seen = {("custom", primary_model)}
+            for item in fallback_candidates:
+                key = (item[0], item[3])
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(item)
+            return candidates
         primary_provider, primary_base_url, primary_api_key, primary_model = self._resolve_runtime_config(
             provider=provider,
             model=model,
+            runtime_config=None,
         )
         ordered_providers = [primary_provider]
         inferred = self._infer_provider_from_model(model)
@@ -339,11 +424,14 @@ class LLMClient:
         retries: Optional[int] = None,
         model: Optional[str] = None,
         provider: Optional[str] = None,
+        runtime_config: Optional[Dict[str, Any]] = None,
     ) -> Iterable[str] | str:
         self._last_usage = None
+        normalized_runtime = self._normalize_runtime_config(runtime_config)
         requested_provider, _, _, requested_model = self._resolve_runtime_config(
             provider=provider,
             model=model,
+            runtime_config=normalized_runtime,
         )
         resolved_policy = self._resolve_task_policy(
             model_name=requested_model,
@@ -360,6 +448,11 @@ class LLMClient:
             "requested_provider": requested_provider,
             "requested_model": requested_model,
             "actual_provider": requested_provider,
+            "actual_provider_label": (
+                str((normalized_runtime or {}).get("provider_label") or "Custom")
+                if requested_provider == "custom"
+                else requested_provider
+            ),
             "actual_model": requested_model,
             "fallback_applied": False,
             "policy_version": resolved_policy.policy_version,
@@ -380,6 +473,7 @@ class LLMClient:
                 resolved_timeout_secs,
                 model=model,
                 provider=provider,
+                runtime_config=normalized_runtime,
             )
         return self._generate_once(
             messages,
@@ -389,6 +483,7 @@ class LLMClient:
             resolved_timeout_secs,
             model=model,
             provider=provider,
+            runtime_config=normalized_runtime,
         )
 
     def get_last_usage(self) -> Dict[str, int] | None:
@@ -433,20 +528,25 @@ class LLMClient:
         *,
         model: Optional[str] = None,
         provider: Optional[str] = None,
+        runtime_config: Optional[Dict[str, Any]] = None,
     ) -> Generator[str, None, None]:
         errors: List[str] = []
         candidates = self._fallback_candidates(
             provider=provider,
             model=model,
+            runtime_config=runtime_config,
         )
         requested_provider, _, _, requested_model = self._resolve_runtime_config(
             provider=provider,
             model=model,
+            runtime_config=runtime_config,
         )
+        runtime_profile = self._normalize_runtime_config(runtime_config)
+        custom_provider_label = str((runtime_profile or {}).get("provider_label") or "Custom")
         for resolved_provider, base_url, api_key, model_name in candidates:
             answer_parts: List[str] = []
             try:
-                if resolved_provider in ("dashscope", "openai"):
+                if resolved_provider in ("dashscope", "openai", "custom"):
                     if not base_url or not api_key:
                         raise RuntimeError(f"{resolved_provider} API key not configured")
                     resolved_policy = self._resolve_task_policy(
@@ -460,6 +560,9 @@ class LLMClient:
                         "requested_provider": requested_provider,
                         "requested_model": requested_model,
                         "actual_provider": resolved_provider,
+                        "actual_provider_label": (
+                            custom_provider_label if resolved_provider == "custom" else resolved_provider
+                        ),
                         "actual_model": model_name,
                         "fallback_applied": (
                             resolved_provider != requested_provider
@@ -536,6 +639,9 @@ class LLMClient:
                     "requested_provider": requested_provider,
                     "requested_model": requested_model,
                     "actual_provider": resolved_provider,
+                    "actual_provider_label": (
+                        custom_provider_label if resolved_provider == "custom" else resolved_provider
+                    ),
                     "actual_model": model_name,
                     "fallback_applied": (
                         resolved_provider != requested_provider
@@ -574,19 +680,24 @@ class LLMClient:
         *,
         model: Optional[str] = None,
         provider: Optional[str] = None,
+        runtime_config: Optional[Dict[str, Any]] = None,
     ) -> str:
         errors: List[str] = []
         candidates = self._fallback_candidates(
             provider=provider,
             model=model,
+            runtime_config=runtime_config,
         )
         requested_provider, _, _, requested_model = self._resolve_runtime_config(
             provider=provider,
             model=model,
+            runtime_config=runtime_config,
         )
+        runtime_profile = self._normalize_runtime_config(runtime_config)
+        custom_provider_label = str((runtime_profile or {}).get("provider_label") or "Custom")
         for resolved_provider, base_url, api_key, model_name in candidates:
             try:
-                if resolved_provider in ("dashscope", "openai"):
+                if resolved_provider in ("dashscope", "openai", "custom"):
                     if not base_url or not api_key:
                         raise RuntimeError(f"{resolved_provider} API key not configured")
                     resolved_policy = self._resolve_task_policy(
@@ -600,6 +711,9 @@ class LLMClient:
                         "requested_provider": requested_provider,
                         "requested_model": requested_model,
                         "actual_provider": resolved_provider,
+                        "actual_provider_label": (
+                            custom_provider_label if resolved_provider == "custom" else resolved_provider
+                        ),
                         "actual_model": model_name,
                         "fallback_applied": (
                             resolved_provider != requested_provider
@@ -654,6 +768,9 @@ class LLMClient:
                     "requested_provider": requested_provider,
                     "requested_model": requested_model,
                     "actual_provider": resolved_provider,
+                    "actual_provider_label": (
+                        custom_provider_label if resolved_provider == "custom" else resolved_provider
+                    ),
                     "actual_model": model_name,
                     "fallback_applied": (
                         resolved_provider != requested_provider

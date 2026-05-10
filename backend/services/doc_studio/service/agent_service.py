@@ -178,7 +178,7 @@ class LaTeXEditAgent(BaseAgent):
 
         if not options or not isinstance(options, dict):
             return {}
-        allowed_keys = {"llm_provider", "llm_model", "llm_temperature", "llm_max_tokens"}
+        allowed_keys = {"llm_provider", "llm_model", "llm_temperature", "llm_max_tokens", "llm_custom"}
         return {key: options[key] for key in allowed_keys if options.get(key) is not None}
 
     @staticmethod
