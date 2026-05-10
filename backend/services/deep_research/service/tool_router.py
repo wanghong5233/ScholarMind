@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
@@ -47,6 +48,42 @@ class ToolRouter:
 
         self._registry = registry
         self._observer = observer
+        self._cacheable_tools = {"web.search", "web.open_page", "web.find_in_page", "paper.search"}
+        self._execution_cache: Dict[str, ToolExecutionResult] = {}
+
+    @staticmethod
+    def _clone_result(result: ToolExecutionResult) -> ToolExecutionResult:
+        """Clone cached results so downstream mutations stay isolated."""
+
+        return ToolExecutionResult(
+            tool_name=result.tool_name,
+            purpose=result.purpose,
+            success=bool(result.success),
+            summary=str(result.summary or ""),
+            raw=dict(result.raw or {}),
+            citations=list(result.citations or []),
+            trace=result.trace,
+            error=result.error,
+        )
+
+    def _build_cache_key(self, *, call: ToolCall, context: ToolContext) -> Optional[str]:
+        """Build a deterministic cache key for idempotent tool calls."""
+
+        tool_name = str(call.name or "").strip().lower()
+        if tool_name not in self._cacheable_tools:
+            return None
+        payload = {
+            "tool": tool_name,
+            "block_id": str(context.block.block_id or ""),
+            "session_id": str(context.session_id or ""),
+            "user_id": int(context.user_id),
+            "parameters": call.parameters or {},
+        }
+        try:
+            return json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        except TypeError:
+            logger.warning("Tool cache key fallback to repr for non-serializable payload: %s", payload)
+            return repr(payload)
 
     def _notify(self, payload: Dict[str, Any]) -> None:
         """Notify the optional observer about tool lifecycle events."""
@@ -61,6 +98,7 @@ class ToolRouter:
     async def execute(self, call: ToolCall, context: ToolContext) -> ToolExecutionResult:
         """Execute a single tool call."""
 
+        cache_key = self._build_cache_key(call=call, context=context)
         self._notify(
             {
                 "event_type": "tool.started",
@@ -71,6 +109,30 @@ class ToolRouter:
                 "block_title": context.block.title,
             }
         )
+        if cache_key:
+            cached = self._execution_cache.get(cache_key)
+            if cached is not None:
+                cached_result = self._clone_result(cached)
+                event_type = "tool.completed" if cached_result.success else "tool.failed"
+                self._notify(
+                    {
+                        "event_type": event_type,
+                        "tool": call.name,
+                        "purpose": call.purpose,
+                        "parameters": call.parameters,
+                        "success": cached_result.success,
+                        "error": cached_result.error,
+                        "tool_id": cached_result.trace.tool_id if cached_result.trace else None,
+                        "tool_type": cached_result.trace.tool_type.value if cached_result.trace else None,
+                        "query": cached_result.trace.query if cached_result.trace else None,
+                        "summary": cached_result.summary,
+                        "cache_hit": True,
+                        "block_id": context.block.block_id,
+                        "block_title": context.block.title,
+                    }
+                )
+                return cached_result
+
         tool = self._registry.get_tool(call.name)
         if not tool:
             self._notify(
@@ -164,7 +226,7 @@ class ToolRouter:
             }
         )
 
-        return ToolExecutionResult(
+        final_result = ToolExecutionResult(
             tool_name=call.name,
             purpose=call.purpose,
             success=result.success,
@@ -174,6 +236,9 @@ class ToolRouter:
             trace=result.trace,
             error=result.error,
         )
+        if cache_key and final_result.success:
+            self._execution_cache[cache_key] = self._clone_result(final_result)
+        return final_result
 
     async def execute_plan(self, calls: List[ToolCall], context: ToolContext) -> List[ToolExecutionResult]:
         """Execute a list of tool calls sequentially."""

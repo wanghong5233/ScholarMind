@@ -252,6 +252,7 @@ export interface DeepResearchReportDetails {
 export interface DeepResearchReportPayload {
   research_id?: string
   status?: string
+  title?: string
   report_markdown?: string
   report_markdown_truncated?: boolean
   report_markdown_full_chars?: number

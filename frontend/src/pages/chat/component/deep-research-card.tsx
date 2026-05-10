@@ -127,6 +127,24 @@ function resolveStageIndex(stage?: string) {
   return index === -1 ? 0 : index
 }
 
+function resolveStageFromStatus(status?: string) {
+  const value = String(status || '').trim().toLowerCase()
+  if (value === 'plan' || value === 'queued') return 'planning'
+  if (value === 'running') return 'researching'
+  if (value === 'completed' || value === 'failed' || value === 'cancelled') return 'reporting'
+  return undefined
+}
+
+function resolveStatusMessageFallback(status?: string) {
+  const value = String(status || '').trim().toLowerCase()
+  if (value === 'completed') return '报告已完成'
+  if (value === 'failed') return '任务执行失败'
+  if (value === 'cancelled') return '任务已取消'
+  if (value === 'queued') return '任务排队中'
+  if (value === 'running') return '研究进行中'
+  return '-'
+}
+
 function formatTimestamp(value?: string) {
   const ms = parseServerTimestampMs(value)
   if (ms === null) return '-'
@@ -141,6 +159,12 @@ function formatDurationMs(startMs: number | null, endMs: number | null) {
   const remain = seconds % 60
   if (hours > 0) return `${hours}小时 ${minutes}分 ${remain}秒`
   return `${minutes}分 ${remain}秒`
+}
+
+function formatDurationSeconds(value?: number) {
+  const seconds = Number(value)
+  if (!Number.isFinite(seconds) || seconds < 0) return '-'
+  return formatDurationMs(0, Math.floor(seconds * 1000))
 }
 
 function computeEstimateMinutes(
@@ -200,7 +224,7 @@ export default function DeepResearchCard(props: {
   if (!data) return null
 
   const latestEvent = getLatestEvent(data.progress)
-  const currentStage = data.lastStage || latestEvent?.stage
+  const currentStage = data.lastStage || latestEvent?.stage || resolveStageFromStatus(data.status)
   const stageIndex = resolveStageIndex(currentStage)
   const planItems = data.plan?.items ?? []
   const estimateMinutes = computeEstimateMinutes(planItems.length || 1, data.request)
@@ -208,7 +232,9 @@ export default function DeepResearchCard(props: {
 
   const statusLabel = STATUS_LABEL[data.status] || data.status
   const statusColor = STATUS_COLOR[data.status] || 'default'
-  const statusMessage = localizeProgressMessage(data.statusMessage || latestEvent?.message || '-')
+  const statusMessage = localizeProgressMessage(
+    data.statusMessage || latestEvent?.message || resolveStatusMessageFallback(data.status),
+  )
   const progressPercent =
     data.status === 'completed'
       ? 100
@@ -218,14 +244,18 @@ export default function DeepResearchCard(props: {
       ? 60
       : 25
 
-  const latestProgressAt = data.updatedAt || latestEvent?.timestamp
-  const startedAt = data.progress?.[0]?.timestamp
+  const latestProgressAt = data.updatedAt || data.finishedAt || latestEvent?.timestamp
+  const startedAt =
+    data.status === 'plan'
+      ? data.progress?.[0]?.timestamp || data.startedAt
+      : data.executionStartedAt || data.startedAt || data.progress?.[0]?.timestamp
   const stageStartedAt = resolveStageStartedAt(data.progress, currentStage)
   const startedMs = parseServerTimestampMs(startedAt)
   const stageStartedMs = parseServerTimestampMs(stageStartedAt)
-  const latestProgressMs = parseServerTimestampMs(latestProgressAt)
-  const durationEndMs = isActiveRun ? nowMs : latestProgressMs
-  const durationLabel = formatDurationMs(startedMs, durationEndMs)
+  const durationEndMs = isActiveRun ? nowMs : parseServerTimestampMs(data.finishedAt || latestProgressAt)
+  const durationByTimeline = formatDurationMs(startedMs, durationEndMs)
+  const durationLabel =
+    durationByTimeline !== '-' ? durationByTimeline : formatDurationSeconds(data.durationSeconds)
   const stageDurationLabel = formatDurationMs(stageStartedMs, durationEndMs)
   const activeTool = resolveActiveTool(data.progress)
   const activeToolDuration = formatDurationMs(

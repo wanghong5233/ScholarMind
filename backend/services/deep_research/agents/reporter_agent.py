@@ -48,6 +48,7 @@ class ReporterAgent:
         used_citations = self._collect_used_citations(queue)
         self._citation_manager.build_ref_map_for(used_citations)
         ordered_blocks = self._ordered_blocks(queue)
+        report_topic = self.resolve_report_topic(topic, queue)
         completed_blocks = [
             block for block in ordered_blocks if block.depth > 0 and block.status == TopicStatus.COMPLETED
         ]
@@ -56,7 +57,7 @@ class ReporterAgent:
         ]
         plan_lines = [self._format_outline_line(block) for block in ordered_blocks if block.depth > 0]
         sections = [
-            f"# {self._title_prefix()} {topic}",
+            f"# {self._title_prefix()} {report_topic}",
             "",
             f"## {self._section_title('summary')}",
             *self._build_summary(queue),
@@ -74,6 +75,85 @@ class ReporterAgent:
         sections.extend(self._render_future_work(queue))
         sections.extend(self._render_references())
         return "\n".join(sections).strip()
+
+    def resolve_report_topic(self, topic: str, queue: DynamicTopicQueue) -> str:
+        """Resolve a concise, human-readable report topic.
+
+        Keep the original request topic for planning/retrieval, but avoid using a long
+        instruction prompt as the visible report title.
+        """
+
+        normalized_topic = self._normalize_topic_text(topic)
+        fallback_topic = self._select_representative_topic_from_queue(
+            queue, exclude=normalized_topic
+        )
+        if self._looks_like_instruction_topic(normalized_topic) or len(normalized_topic) > 72:
+            resolved = fallback_topic or normalized_topic
+        else:
+            resolved = normalized_topic or fallback_topic
+        if not resolved:
+            resolved = "深度研究主题" if self._language == "zh" else "Research Topic"
+
+        max_chars = 64 if self._language == "zh" else 96
+        if len(resolved) > max_chars:
+            resolved = f"{resolved[: max_chars - 1].rstrip()}…"
+        return resolved
+
+    def _select_representative_topic_from_queue(
+        self, queue: DynamicTopicQueue, *, exclude: str = ""
+    ) -> str:
+        """Pick the first meaningful non-root block title as display topic."""
+
+        ordered_blocks = self._ordered_blocks(queue)
+        candidates = [
+            block.title
+            for block in ordered_blocks
+            if block.depth > 0 and block.status == TopicStatus.COMPLETED
+        ]
+        if not candidates:
+            candidates = [block.title for block in ordered_blocks if block.depth > 0]
+
+        for title in candidates:
+            normalized = self._normalize_topic_text(title)
+            if not normalized:
+                continue
+            if exclude and normalized == exclude:
+                continue
+            return normalized
+        return ""
+
+    @staticmethod
+    def _normalize_topic_text(topic: str) -> str:
+        """Normalize spacing/punctuation for a stable title."""
+
+        normalized = re.sub(r"\s+", " ", str(topic or "")).strip()
+        return normalized.strip("：:;；,.，。-—")
+
+    @staticmethod
+    def _looks_like_instruction_topic(topic: str) -> bool:
+        """Heuristic: detect long instruction prompts masquerading as titles."""
+
+        text = str(topic or "").strip()
+        if not text:
+            return False
+        lowered = text.lower()
+        markers = (
+            "维度如下",
+            "我的约束",
+            "输出不是",
+            "请检索",
+            "最后基于",
+            "all key judgments",
+            "do not",
+            "constraints",
+        )
+        if any(marker in lowered for marker in markers):
+            return True
+        if re.search(r"\b[1-9][）\)]", text):
+            return True
+        if text.count("；") >= 2 or text.count(";") >= 2:
+            return True
+        return False
 
     def _ordered_blocks(self, queue: DynamicTopicQueue) -> List[TopicBlock]:
         """Return blocks ordered in a parent → children traversal.

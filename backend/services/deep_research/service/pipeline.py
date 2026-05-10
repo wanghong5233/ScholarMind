@@ -292,6 +292,7 @@ class ResearchPipeline:
         )
 
         reporter = ReporterAgent(citation_manager, language=language)
+        report_title = reporter.resolve_report_topic(request.topic, queue)
         self._emit_progress(
             store,
             research_id,
@@ -379,6 +380,7 @@ class ResearchPipeline:
                     llm_provider_override=request_provider_override,
                     llm_model_override=request_model_override,
                     usage_callback=token_tracker.record,
+                    request_metadata=request.metadata,
                 )
             else:
                 llm_report = await self._refine_report(
@@ -483,6 +485,7 @@ class ResearchPipeline:
                 {
                     "research_id": research_id,
                     "status": DeepResearchStatus.COMPLETED.value,
+                    "title": report_title,
                     "report_markdown": report,
                     "outline": report_outline,
                     "notes": report_notes,
@@ -756,6 +759,73 @@ class ResearchPipeline:
             "note_context_title": request.metadata.get("context_title"),
             "note_context_id": request.metadata.get("context_note_id"),
         }
+
+    @staticmethod
+    def _resolve_request_preset(metadata: Optional[Dict[str, Any]]) -> str:
+        """Return normalized deep_research_preset from metadata."""
+
+        if not isinstance(metadata, dict):
+            return ""
+        return str(metadata.get("deep_research_preset") or "").strip().lower()
+
+    @staticmethod
+    def _resolve_report_context_profile(
+        *,
+        metadata: Optional[Dict[str, Any]],
+        section_input_budget: int,
+        section_max_blocks: int,
+        section_max_notes_per_block: int,
+        section_max_notes_total: int,
+        section_max_citations: int,
+    ) -> Dict[str, Any]:
+        """Resolve section evidence limits with preset-aware caps."""
+
+        resolved = {
+            "profile": "standard",
+            "section_input_budget": max(1800, int(section_input_budget or 1800)),
+            "section_max_blocks": max(1, int(section_max_blocks or 1)),
+            "section_max_notes_per_block": max(1, int(section_max_notes_per_block or 1)),
+            "section_max_notes_total": max(8, int(section_max_notes_total or 8)),
+            "section_max_citations": max(8, int(section_max_citations or 8)),
+        }
+        preset_key = ResearchPipeline._resolve_request_preset(metadata)
+        if preset_key != "quick":
+            return resolved
+
+        quick_input_cap = max(
+            1800,
+            int(getattr(settings, "REPORT_SECTION_QUICK_PROMPT_MAX_INPUT_TOKENS", 9000) or 9000),
+        )
+        quick_max_blocks = max(1, int(getattr(settings, "REPORT_SECTION_QUICK_MAX_BLOCKS", 7) or 7))
+        quick_max_notes_per_block = max(
+            1,
+            int(getattr(settings, "REPORT_SECTION_QUICK_MAX_NOTES_PER_BLOCK", 4) or 4),
+        )
+        quick_max_notes_total = max(
+            8,
+            int(getattr(settings, "REPORT_SECTION_QUICK_MAX_NOTES_TOTAL", 28) or 28),
+        )
+        quick_max_citations = max(
+            8,
+            int(getattr(settings, "REPORT_SECTION_QUICK_MAX_CITATIONS", 48) or 48),
+        )
+
+        resolved["profile"] = "quick"
+        resolved["section_input_budget"] = min(int(resolved["section_input_budget"]), quick_input_cap)
+        resolved["section_max_blocks"] = min(int(resolved["section_max_blocks"]), quick_max_blocks)
+        resolved["section_max_notes_per_block"] = min(
+            int(resolved["section_max_notes_per_block"]),
+            quick_max_notes_per_block,
+        )
+        resolved["section_max_notes_total"] = min(
+            int(resolved["section_max_notes_total"]),
+            quick_max_notes_total,
+        )
+        resolved["section_max_citations"] = min(
+            int(resolved["section_max_citations"]),
+            quick_max_citations,
+        )
+        return resolved
 
     def _apply_plan(
         self,
@@ -1431,6 +1501,7 @@ class ResearchPipeline:
             "tool_id": event.get("tool_id"),
             "purpose": event.get("purpose"),
             "query": query_preview or event.get("query"),
+            "cache_hit": event.get("cache_hit") if event.get("cache_hit") else None,
             "success": event.get("success"),
             "error": event.get("error"),
             "summary_preview": str(event.get("summary") or "").strip()[:280]
@@ -1444,6 +1515,8 @@ class ResearchPipeline:
             message = f"Tool started: {label}"
         elif event_type == "tool.failed":
             message = f"Tool failed: {label}"
+        elif bool(event.get("cache_hit")):
+            message = f"Tool cache hit: {label}"
         else:
             message = f"Tool completed: {label}"
 
@@ -2109,6 +2182,7 @@ class ResearchPipeline:
         llm_provider_override: Optional[str] = None,
         llm_model_override: Optional[str] = None,
         usage_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        request_metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Refine the report using an LLM.
 
@@ -2182,6 +2256,7 @@ class ResearchPipeline:
         llm_provider_override: Optional[str] = None,
         llm_model_override: Optional[str] = None,
         usage_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        request_metadata: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Generate a refined report section-by-section.
 
@@ -2204,6 +2279,8 @@ class ResearchPipeline:
             draft_report (str): Deterministic draft report.
             report_style (Optional[str]): Report style hint.
             context_text (Optional[str]): Optional conversation context.
+            request_metadata (Optional[Dict[str, Any]]): Request-level metadata
+                used to resolve preset-aware context profile.
 
         Returns:
             str: LLM-generated report.
@@ -2237,7 +2314,8 @@ class ResearchPipeline:
             raise RuntimeError("Report section template is empty.")
 
         title_prefix = "深度研究报告：" if language == "zh" else "DeepResearch Report:"
-        header = f"# {title_prefix} {topic}".strip()
+        report_topic = reporter.resolve_report_topic(topic, queue)
+        header = f"# {title_prefix} {report_topic}".strip()
         references_section = reporter.render_references_section(
             max_items=max(
                 1,
@@ -2260,6 +2338,19 @@ class ResearchPipeline:
         )
         section_max_notes_total = int(getattr(settings, "REPORT_SECTION_MAX_NOTES_TOTAL", 28) or 28)
         section_max_citations = int(getattr(settings, "REPORT_SECTION_MAX_CITATIONS", 48) or 48)
+        context_profile = self._resolve_report_context_profile(
+            metadata=request_metadata,
+            section_input_budget=section_input_budget,
+            section_max_blocks=section_max_blocks,
+            section_max_notes_per_block=section_max_notes_per_block,
+            section_max_notes_total=section_max_notes_total,
+            section_max_citations=section_max_citations,
+        )
+        section_input_budget = int(context_profile["section_input_budget"])
+        section_max_blocks = int(context_profile["section_max_blocks"])
+        section_max_notes_per_block = int(context_profile["section_max_notes_per_block"])
+        section_max_notes_total = int(context_profile["section_max_notes_total"])
+        section_max_citations = int(context_profile["section_max_citations"])
 
         generated: List[str] = []
         self._emit_progress(
@@ -2271,6 +2362,11 @@ class ResearchPipeline:
                 "sections_total": total,
                 "section_max_tokens": section_max_tokens,
                 "section_input_budget_tokens": section_input_budget,
+                "context_profile": context_profile.get("profile"),
+                "section_max_blocks": section_max_blocks,
+                "section_max_notes_per_block": section_max_notes_per_block,
+                "section_max_notes_total": section_max_notes_total,
+                "section_max_citations": section_max_citations,
                 "provider": section_primary.provider,
                 "model": section_primary.model_name,
                 "policy_version": section_policy.get("policy_version"),
@@ -2308,6 +2404,7 @@ class ResearchPipeline:
                     "section_index": idx,
                     "sections_total": total,
                     "section_title": section.title,
+                    "context_profile": context_profile.get("profile"),
                     "blocks": len(evidence_pack.block_ids),
                     "notes": len(section_notes),
                     "citations": len(section_citation_table),
@@ -2347,6 +2444,7 @@ class ResearchPipeline:
                 {
                     "research_id": research_id,
                     "status": DeepResearchStatus.RUNNING.value,
+                    "title": report_topic,
                     "report_markdown": report_markdown,
                     "report_details": {
                         "outline": report_outline,

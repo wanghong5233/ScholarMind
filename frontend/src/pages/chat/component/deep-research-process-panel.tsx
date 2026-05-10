@@ -47,6 +47,24 @@ function resolveStageIndex(stage?: string) {
   return index === -1 ? 0 : index
 }
 
+function resolveStageFromStatus(status?: string) {
+  const value = String(status || '').trim().toLowerCase()
+  if (value === 'plan' || value === 'queued') return 'planning'
+  if (value === 'running') return 'researching'
+  if (value === 'completed' || value === 'failed' || value === 'cancelled') return 'reporting'
+  return undefined
+}
+
+function resolveStatusMessageFallback(status?: string) {
+  const value = String(status || '').trim().toLowerCase()
+  if (value === 'completed') return '报告已完成'
+  if (value === 'failed') return '任务执行失败'
+  if (value === 'cancelled') return '任务已取消'
+  if (value === 'queued') return '任务排队中'
+  if (value === 'running') return '研究进行中'
+  return '-'
+}
+
 function formatTimestamp(value?: string) {
   const ms = parseServerTimestampMs(value)
   if (ms === null) return '-'
@@ -72,6 +90,12 @@ function formatDurationMs(startMs: number | null, endMs: number | null) {
   const minutes = Math.floor(seconds / 60)
   const remain = seconds % 60
   return `${minutes}m ${remain}s`
+}
+
+function formatDurationSeconds(value?: number) {
+  const seconds = Number(value)
+  if (!Number.isFinite(seconds) || seconds < 0) return '-'
+  return formatDurationMs(0, Math.floor(seconds * 1000))
 }
 
 function blockStatusColor(status?: string) {
@@ -299,14 +323,37 @@ export default function DeepResearchProcessPanel(props: {
 
   const latestEvent = progressEvents.length ? progressEvents[progressEvents.length - 1] : undefined
   const researchId = String(deepResearch.researchId || '').trim()
-  const currentStage = deepResearch.lastStage || latestEvent?.stage
+  const currentStage =
+    deepResearch.lastStage || latestEvent?.stage || resolveStageFromStatus(deepResearch.status)
   const stageIndex = resolveStageIndex(currentStage)
-  const startedAt = progressEvents[0]?.timestamp
-  const lastAt = deepResearch.updatedAt || latestEvent?.timestamp
+  const startedAt =
+    deepResearch.status === 'plan'
+      ? progressEvents[0]?.timestamp || deepResearch.startedAt
+      : deepResearch.executionStartedAt ||
+        deepResearch.startedAt ||
+        progressEvents[0]?.timestamp
+  const lastAt = deepResearch.updatedAt || deepResearch.finishedAt || latestEvent?.timestamp
   const startedMs = parseServerTimestampMs(startedAt)
-  const lastMs = parseServerTimestampMs(lastAt)
-  const durationEndMs = isActiveRun ? nowMs : lastMs
-  const nextActionHint = resolveNextActionHint(progressEvents)
+  const durationEndMs = isActiveRun ? nowMs : parseServerTimestampMs(deepResearch.finishedAt || lastAt)
+  const durationByTimeline = formatDurationMs(startedMs, durationEndMs)
+  const durationLabel =
+    durationByTimeline !== '-'
+      ? durationByTimeline
+      : formatDurationSeconds(deepResearch.durationSeconds)
+  const nextActionHint = progressEvents.length
+    ? resolveNextActionHint(progressEvents)
+    : deepResearch.status === 'completed'
+    ? '报告已完成，可查看与导出'
+    : deepResearch.status === 'failed'
+    ? '任务已失败，可查看失败原因后重试'
+    : deepResearch.status === 'cancelled'
+    ? '任务已取消，可重新发起研究'
+    : '等待下一步动作...'
+  const currentActionText = localizeProgressMessage(
+    latestEvent?.message ||
+      deepResearch.statusMessage ||
+      resolveStatusMessageFallback(deepResearch.status),
+  )
   const blockStats = deepResearch.blockStats || {}
   const requestMetadata =
     deepResearch.request?.metadata && typeof deepResearch.request.metadata === 'object'
@@ -536,13 +583,13 @@ export default function DeepResearchProcessPanel(props: {
         />
         <Descriptions size="small" column={2}>
           <Descriptions.Item label="当前动作" span={2}>
-            {localizeProgressMessage(latestEvent?.message || '-')}
+            {currentActionText}
           </Descriptions.Item>
           <Descriptions.Item label="下一步动作" span={2}>
             {nextActionHint}
           </Descriptions.Item>
           <Descriptions.Item label="运行时长">
-            {formatDurationMs(startedMs, durationEndMs)}
+            {durationLabel}
           </Descriptions.Item>
           <Descriptions.Item label="主进度">
             {typeof blockStats.completed === 'number' || typeof blockStats.total === 'number'

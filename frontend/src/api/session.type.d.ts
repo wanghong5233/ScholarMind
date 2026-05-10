@@ -80,6 +80,10 @@ declare namespace API {
     statusMessage?: string
     lastStage?: string
     updatedAt?: string
+    executionStartedAt?: string
+    startedAt?: string
+    finishedAt?: string
+    durationSeconds?: number
   }
 
   interface ChatItem {

@@ -73,6 +73,7 @@ type DeepResearchPresetKey = 'quick' | 'medium' | 'deep'
 type DeepResearchPlanEditFormValues = {
   topic: string
   plan_text: string
+  plan_instruction?: string
 }
 const DEFAULT_DEEP_RESEARCH_PRESET: DeepResearchPresetKey = 'medium'
 
@@ -601,6 +602,48 @@ function sanitizeDeepResearchTopic(raw: string) {
   return extractTopicFromDeepResearchPrompt(text) || text
 }
 
+function buildDeepResearchTurnItems(params: {
+  userText?: string
+  deepResearch: API.DeepResearchCardState
+  attachments?: API.ChatAttachment[]
+}): {
+  userMessage: API.ChatItem
+  assistantMessage: API.ChatItem
+} {
+  const fallbackUserText = sanitizeDeepResearchTopic(
+    String(params.deepResearch.userMessage || params.deepResearch.topic || '').trim(),
+  )
+  const resolvedUserText =
+    sanitizeDeepResearchTopic(String(params.userText || '').trim()) || fallbackUserText || '深度研究'
+  const normalizedDeepResearch =
+    resolvedUserText && !params.deepResearch.userMessage
+      ? {
+          ...params.deepResearch,
+          userMessage: resolvedUserText,
+        }
+      : params.deepResearch
+
+  return {
+    userMessage: {
+      id: createChatId(),
+      role: ChatRole.User,
+      type: ChatType.Text,
+      content: resolvedUserText,
+      attachments:
+        params.attachments && params.attachments.length
+          ? params.attachments
+          : undefined,
+    },
+    assistantMessage: {
+      id: createChatId(),
+      role: ChatRole.Assistant,
+      type: ChatType.DeepResearch,
+      // 保证 DeepResearch 与普通/RAG 一样：一个用户 turn 对应一个回答 turn。
+      deepResearch: normalizedDeepResearch,
+    },
+  }
+}
+
 function looksLikeDeepResearchPlanPayload(raw: string) {
   const text = String(raw || '').trim()
   if (!text) return false
@@ -631,6 +674,30 @@ function looksLikeDeepResearchPlanPayload(raw: string) {
 
 function nowIsoTimestamp() {
   return new Date().toISOString()
+}
+
+function resolveDeepResearchStageFromStatus(
+  status: API.DeepResearchCardState['status'] | string | undefined,
+): 'planning' | 'researching' | 'reporting' | undefined {
+  const normalized = String(status || '').trim().toLowerCase()
+  if (normalized === 'plan' || normalized === 'queued') return 'planning'
+  if (normalized === 'running') return 'researching'
+  if (normalized === 'completed' || normalized === 'failed' || normalized === 'cancelled') {
+    return 'reporting'
+  }
+  return undefined
+}
+
+function resolveDeepResearchStatusMessage(
+  status: API.DeepResearchCardState['status'] | string | undefined,
+) {
+  const normalized = String(status || '').trim().toLowerCase()
+  if (normalized === 'completed') return '报告已完成'
+  if (normalized === 'failed') return '任务执行失败'
+  if (normalized === 'cancelled') return '任务已取消'
+  if (normalized === 'queued') return '任务排队中'
+  if (normalized === 'running') return '研究进行中'
+  return ''
 }
 
 function normalizeDeepResearchMetadata(metadata: unknown) {
@@ -761,6 +828,38 @@ function parsePlanItemsFromEditorText(rawText: string) {
   }
 
   return { items: parsed, error: '' }
+}
+
+function formatPlanItemsForPrompt(items: PlanItem[] = []) {
+  if (!items.length) return '(暂无结构化计划)'
+  return items
+    .map((item) => {
+      const depth = Math.max(1, Number(item.depth || 1))
+      const prefix = depth <= 1 ? '- ' : `${'  '.repeat(depth - 1)}- `
+      const title = String(item.title || '').trim()
+      const question = String(item.question || '').trim()
+      const parent = String(item.parent_title || '').trim()
+      const parentText = parent ? `（父主题：${parent}）` : ''
+      return `${prefix}${title}${parentText}\n${'  '.repeat(depth)}问题：${question || title}`
+    })
+    .join('\n')
+}
+
+function buildPlanRewriteTopic(params: {
+  topic: string
+  instruction: string
+  currentPlanItems: PlanItem[]
+}) {
+  const topic = String(params.topic || '').trim()
+  const instruction = String(params.instruction || '').trim()
+  const currentPlan = formatPlanItemsForPrompt(params.currentPlanItems)
+  const blocks = [
+    `研究主题：${topic}`,
+    `当前结构化计划（可参考）：\n${currentPlan}`,
+    `用户改写要求：${instruction}`,
+    '请基于上述信息输出更清晰、层级合理、可执行的研究计划。',
+  ]
+  return blocks.join('\n\n').slice(0, 2400)
 }
 
 type DeepResearchPlanStreamProgress = {
@@ -1134,6 +1233,12 @@ export default function Index() {
   const [editingResearchItem, setEditingResearchItem] =
     useState<API.ChatItem | null>(null)
   const [researchPlanForm] = Form.useForm<DeepResearchPlanEditFormValues>()
+  const [planRewriteLoading, setPlanRewriteLoading] = useState(false)
+  const editingPlanText = Form.useWatch('plan_text', researchPlanForm)
+  const editingPlanPreview = useMemo(
+    () => parsePlanItemsFromEditorText(String(editingPlanText || '')),
+    [editingPlanText],
+  )
   const [editingContext, setEditingContext] = useState<{
     messageId: string
   } | null>(null)
@@ -3570,20 +3675,45 @@ export default function Index() {
               state.blockStats = normalizeBlockStats(stats, state.snapshotQueue)
             }
           }
+          if (runMeta?.started_at) {
+            state.startedAt = runMeta.started_at
+          }
+          if (runMeta?.submitted_at) {
+            state.executionStartedAt = runMeta.submitted_at
+          } else if (runMeta?.started_at && !state.executionStartedAt) {
+            state.executionStartedAt = runMeta.started_at
+          }
+          if (runMeta?.finished_at) {
+            state.finishedAt = runMeta.finished_at
+          }
+          const runDurationSeconds = Number(runMeta?.duration_seconds)
+          if (Number.isFinite(runDurationSeconds) && runDurationSeconds >= 0) {
+            state.durationSeconds = runDurationSeconds
+          }
           if (runMeta?.last_progress_at) {
             state.updatedAt = runMeta.last_progress_at
+          } else if (runMeta?.finished_at) {
+            state.updatedAt = runMeta.finished_at
           }
           if (normalizedReport?.report_markdown && reportStatus === 'completed') {
             state.status = 'completed'
             state.statusMessage = '报告已完成'
+            state.lastStage = 'reporting'
+            shouldCloseStream = true
+          } else if (runStatus === 'completed') {
+            state.status = 'completed'
+            state.statusMessage = '报告已完成'
+            state.lastStage = 'reporting'
             shouldCloseStream = true
           } else if (runStatus === 'failed') {
             state.status = 'failed'
             state.statusMessage = runError || '任务执行失败'
+            state.lastStage = state.lastStage || 'reporting'
             shouldCloseStream = true
           } else if (runStatus === 'cancelled') {
             state.status = 'cancelled'
             state.statusMessage = cancelReason || '任务已取消'
+            state.lastStage = state.lastStage || 'reporting'
             shouldCloseStream = true
           } else if (
             normalizedReport?.report_markdown &&
@@ -3592,10 +3722,15 @@ export default function Index() {
           ) {
             // Sectional report preview may persist partial markdown while run is still active.
             state.status = 'running'
+            state.lastStage = 'reporting'
           } else if (runStatus === 'running') {
             state.status = 'running'
+            if (!state.lastStage) {
+              state.lastStage = resolveDeepResearchStageFromStatus(state.status)
+            }
           } else if (runStatus === 'queued') {
             state.status = 'queued'
+            state.lastStage = 'planning'
           }
         })
         if (shouldCloseStream) {
@@ -3655,6 +3790,12 @@ export default function Index() {
               state.lastStage = parsed.stage
               state.statusMessage = parsed.message
               state.updatedAt = parsed.timestamp
+              if (state.status !== 'plan' && parsed.timestamp && !state.executionStartedAt) {
+                state.executionStartedAt = parsed.timestamp
+              }
+              if (!state.startedAt && parsed.timestamp) {
+                state.startedAt = parsed.timestamp
+              }
               const stats = { ...(state.blockStats ?? {}) }
               if (typeof payload.blocks === 'number') stats.total = payload.blocks
               if (typeof payload.completed === 'number') stats.completed = payload.completed
@@ -3688,17 +3829,30 @@ export default function Index() {
               if (Object.keys(toolCounts).length) {
                 state.toolCounts = toolCounts
               }
+              const payloadDurationSeconds = Number(payload.duration_seconds)
+              if (Number.isFinite(payloadDurationSeconds) && payloadDurationSeconds >= 0) {
+                state.durationSeconds = payloadDurationSeconds
+              }
               if (isFailedEvent) {
                 state.status = 'failed'
                 state.statusMessage = eventMessage || state.statusMessage || '任务执行失败'
+                if (parsed.timestamp) {
+                  state.finishedAt = parsed.timestamp
+                }
                 shouldCloseStreamByEvent = true
               } else if (isCancelledEvent) {
                 state.status = 'cancelled'
                 state.statusMessage = eventMessage || state.statusMessage || '任务已取消'
+                if (parsed.timestamp) {
+                  state.finishedAt = parsed.timestamp
+                }
                 shouldCloseStreamByEvent = true
               } else if (isFinalReportingCompletedEvent) {
                 state.status = 'completed'
                 state.statusMessage = eventMessage || '报告已完成'
+                if (parsed.timestamp) {
+                  state.finishedAt = parsed.timestamp
+                }
                 const summary = payload.summary
                 if (summary && typeof summary === 'object') {
                   const summaryRecord = summary as Record<string, unknown>
@@ -3934,14 +4088,6 @@ export default function Index() {
       String(value || '')
         .replace(/\s+/g, ' ')
         .trim()
-    const existingUserPromptCounts = new Map<string, number>()
-    chat.list.forEach((item) => {
-      if (item.role !== ChatRole.User) return
-      const key = normalizePromptKey(String(item.content || ''))
-      if (!key) return
-      existingUserPromptCounts.set(key, (existingUserPromptCounts.get(key) ?? 0) + 1)
-    })
-
     const appendDeepResearchEntry = (
       deepResearch: API.DeepResearchCardState,
       userTextRaw?: string,
@@ -3957,39 +4103,12 @@ export default function Index() {
         }
       }
       if (researchId && existingResearchIds.has(researchId)) return
-      const rawUserText = userTextRaw || deepResearch.userMessage || deepResearch.topic
-      const userText = sanitizeDeepResearchTopic(String(rawUserText || '').trim())
-      const promptKey = normalizePromptKey(userText)
-      let shouldAppendUserPrompt = Boolean(promptKey)
-      if (promptKey) {
-        const rest = existingUserPromptCounts.get(promptKey) ?? 0
-        if (rest > 0) {
-          existingUserPromptCounts.set(promptKey, rest - 1)
-          shouldAppendUserPrompt = false
-        }
-      }
-      if (shouldAppendUserPrompt) {
-        chat.list.push({
-          id: createChatId(),
-          role: ChatRole.User,
-          type: ChatType.Text,
-          content: userText,
-        })
-      }
-      const normalizedDeepResearch: API.DeepResearchCardState =
-        userText && !deepResearch.userMessage
-          ? {
-              ...deepResearch,
-              userMessage: userText,
-            }
-          : deepResearch
-      const assistantItem: API.ChatItem = {
-        id: createChatId(),
-        role: ChatRole.Assistant,
-        type: ChatType.DeepResearch,
-        // DeepResearch 结果卡片会挂在已有会话消息后，不再额外伪造用户消息，避免重复与错位。
-        deepResearch: normalizedDeepResearch,
-      }
+      const { userMessage, assistantMessage } = buildDeepResearchTurnItems({
+        userText: userTextRaw || deepResearch.userMessage || deepResearch.topic,
+        deepResearch,
+      })
+      chat.list.push(userMessage)
+      const assistantItem = assistantMessage
       chat.list.push(assistantItem)
       if (researchId) {
         existingResearchIds.add(researchId)
@@ -4127,8 +4246,10 @@ export default function Index() {
             summary && summary.tool_traces_by_type && typeof summary.tool_traces_by_type === 'object'
               ? (summary.tool_traces_by_type as Record<string, number>)
               : undefined
+          const restoredStatus = normalizeRunStatus(meta.status)
+          const restoredDurationSeconds = Number(meta.duration_seconds)
           const deepResearch: API.DeepResearchCardState = {
-            status: normalizeRunStatus(meta.status),
+            status: restoredStatus,
             topic,
             request,
             source,
@@ -4137,7 +4258,16 @@ export default function Index() {
             progress: [],
             blockStats,
             toolCounts,
+            lastStage: resolveDeepResearchStageFromStatus(restoredStatus),
+            statusMessage: resolveDeepResearchStatusMessage(restoredStatus) || undefined,
             updatedAt: meta.finished_at || meta.started_at || meta.submitted_at,
+            executionStartedAt: meta.submitted_at || meta.started_at,
+            startedAt: meta.started_at || meta.submitted_at,
+            finishedAt: meta.finished_at,
+            durationSeconds:
+              Number.isFinite(restoredDurationSeconds) && restoredDurationSeconds >= 0
+                ? restoredDurationSeconds
+                : undefined,
           }
           appendDeepResearchEntry(deepResearch, deepResearch.userMessage)
           restoredFromServer = true
@@ -4416,13 +4546,6 @@ export default function Index() {
         setDocuments([])
       }
 
-      const userMessage: API.ChatItem = {
-        id: createChatId(),
-        role: ChatRole.User,
-        type: ChatType.Text,
-        content: userLabel,
-        attachments: attachmentsSnapshot.length ? attachmentsSnapshot : undefined,
-      }
       const request = buildDeepResearchRequest(topicForResearch, {
         index_mode: usingRag ? DEEP_RESEARCH_DEFAULTS.index_mode : 'disabled',
         metadata: {
@@ -4433,10 +4556,9 @@ export default function Index() {
           deep_research_use_rag: usingRag,
         },
       })
-      const assistantMessage: API.ChatItem = {
-        id: createChatId(),
-        role: ChatRole.Assistant,
-        type: ChatType.DeepResearch,
+      const { userMessage, assistantMessage } = buildDeepResearchTurnItems({
+        userText: userLabel,
+        attachments: attachmentsSnapshot,
         deepResearch: {
           status: 'plan',
           topic: topicForResearch,
@@ -4445,7 +4567,7 @@ export default function Index() {
           userMessage: userLabel,
           planLoading: true,
         },
-      }
+      })
       if (insertionIndex >= 0) {
         chat.list.splice(insertionIndex, 0, userMessage, assistantMessage)
       } else {
@@ -4659,8 +4781,13 @@ export default function Index() {
       openDeepResearchProcessPanel(latestItem, { openPanel: true })
       setResearchMode('chat')
       updateDeepResearchItem(item.id, (state) => {
+        const submittedAt = nowIsoTimestamp()
         state.status = 'queued'
         state.statusMessage = '已提交任务'
+        // Runtime duration should start from submit/queue, not from plan editing time.
+        state.executionStartedAt = submittedAt
+        state.finishedAt = undefined
+        state.durationSeconds = undefined
       })
       try {
         const { data } = await api.deepResearch.submitDeepResearch(
@@ -4734,21 +4861,123 @@ export default function Index() {
     (item: API.ChatItem) => {
       if (!item.deepResearch?.request) return
       const request = item.deepResearch.request
+      const metadata = normalizeDeepResearchMetadata(request.metadata)
       const planItems =
         item.deepResearch.plan?.items ||
         item.deepResearch.snapshotOutline?.items ||
-        (normalizeDeepResearchMetadata(request.metadata).plan_override_items as PlanItem[] | undefined) ||
+        (metadata.plan_override_items as PlanItem[] | undefined) ||
         []
       const fallbackTopic = String(request.topic || item.deepResearch.topic || '研究主题').trim()
       const fallbackPlanText = `1 | ${fallbackTopic} 的核心问题 | ${fallbackTopic} 的核心问题 |`
       researchPlanForm.setFieldsValue({
         topic: request.topic,
         plan_text: serializePlanItemsForEditor(planItems) || fallbackPlanText,
+        plan_instruction: String(metadata.plan_rewrite_instruction || ''),
       })
+      setPlanRewriteLoading(false)
       setEditingResearchItem(item)
     },
     [researchPlanForm],
   )
+
+  const handleResearchEditNormalizePlan = useCallback(() => {
+    const rawText = String(researchPlanForm.getFieldValue('plan_text') || '')
+    const parsed = parsePlanItemsFromEditorText(rawText)
+    if (parsed.error) {
+      message.warning(parsed.error)
+      return
+    }
+    researchPlanForm.setFieldValue('plan_text', serializePlanItemsForEditor(parsed.items))
+    message.success('已规范化计划格式')
+  }, [researchPlanForm])
+
+  const handleResearchEditRewriteByInstruction = useCallback(async () => {
+    if (!editingResearchItem?.deepResearch?.request) return
+    if (planRewriteLoading) return
+    const rawValues = researchPlanForm.getFieldsValue([
+      'topic',
+      'plan_text',
+      'plan_instruction',
+    ]) as Partial<DeepResearchPlanEditFormValues>
+    const topic = String(rawValues.topic || '').trim()
+    const instruction = String(rawValues.plan_instruction || '').trim()
+    if (!topic) {
+      message.warning('请先输入研究主题')
+      return
+    }
+    if (!instruction) {
+      message.warning('请先输入自然语言修改说明')
+      return
+    }
+
+    const parsedCurrent = parsePlanItemsFromEditorText(String(rawValues.plan_text || ''))
+    const currentPlanItems = parsedCurrent.error ? [] : parsedCurrent.items
+    const oldRequest = editingResearchItem.deepResearch.request
+    const oldMetadata = normalizeDeepResearchMetadata(oldRequest.metadata)
+    const presetKey = resolveDeepResearchPresetKey(oldMetadata.deep_research_preset, deepResearchPreset)
+    const preset = DEEP_RESEARCH_PRESET_PARAMS[presetKey] || DEEP_RESEARCH_PRESET_PARAMS.medium
+    const rewriteMetadata: Record<string, unknown> = {
+      ...oldMetadata,
+      deep_research_preset: presetKey,
+      deep_research_preset_force: true,
+      plan_rewrite_instruction: instruction,
+      plan_rewrite_source: 'chat_plan_editor',
+    }
+    delete rewriteMetadata.plan_override_items
+    delete rewriteMetadata.plan_override_source
+
+    const rewriteTopic = buildPlanRewriteTopic({
+      topic,
+      instruction,
+      currentPlanItems,
+    })
+
+    const rewriteRequest = normalizeDeepResearchRequestForExecution(
+      {
+        ...oldRequest,
+        ...preset,
+        topic: rewriteTopic,
+        metadata: rewriteMetadata,
+      },
+      presetKey,
+    )
+
+    setPlanRewriteLoading(true)
+    try {
+      let streamedPlan: DeepResearchPlan | null = null
+      await streamDeepResearchPlanPreview(rewriteRequest, {
+        onPlan: (plan) => {
+          streamedPlan = plan
+        },
+      })
+      if (!streamedPlan) {
+        const { data } = await api.deepResearch.previewDeepResearchPlan(rewriteRequest, {
+          loading: false,
+          errorToast: false,
+        })
+        streamedPlan = data
+      }
+      const items = streamedPlan?.items || []
+      if (!items.length) {
+        message.warning('未生成有效计划，请调整描述后重试')
+        return
+      }
+      researchPlanForm.setFieldsValue({
+        plan_text: serializePlanItemsForEditor(items),
+      })
+      message.success(`已根据自然语言重写计划（${items.length} 项）`)
+    } catch (error) {
+      message.error(resolveErrorMessage(error, '自动重写计划失败'))
+    } finally {
+      setPlanRewriteLoading(false)
+    }
+  }, [
+    deepResearchPreset,
+    editingResearchItem,
+    planRewriteLoading,
+    researchPlanForm,
+    resolveErrorMessage,
+  ])
 
   const handleResearchEditSave = useCallback(async () => {
     if (!editingResearchItem?.deepResearch?.request) return
@@ -4914,7 +5143,14 @@ export default function Index() {
       message.warning('暂无可保存的研究报告')
       return
     }
-    const topic = data?.topic || data?.request?.topic || '深度研究报告'
+    const reportTitle = (data?.report as { title?: string } | undefined)?.title
+    const topic = String(
+      reportTitle ||
+        data?.snapshotOutline?.items?.[0]?.title ||
+        data?.topic ||
+        data?.request?.topic ||
+        '深度研究报告',
+    ).trim()
     try {
       const savedPath = await createNotebookNoteFile(reportMarkdown, topic)
       message.success('报告已导入笔记本，正在打开文档...')
@@ -5549,7 +5785,10 @@ export default function Index() {
         <Modal
           title="修改研究计划"
           open={!!editingResearchItem}
-          onCancel={() => setEditingResearchItem(null)}
+          onCancel={() => {
+            setPlanRewriteLoading(false)
+            setEditingResearchItem(null)
+          }}
           onOk={handleResearchEditSave}
           okText="保存计划"
           cancelText="取消"
@@ -5576,6 +5815,71 @@ export default function Index() {
                 }
               />
             </Form.Item>
+            <Space size={8} wrap style={{ marginBottom: 12 }}>
+              <Button onClick={handleResearchEditNormalizePlan}>规范化结构</Button>
+              <Button
+                loading={planRewriteLoading}
+                onClick={() => {
+                  void handleResearchEditRewriteByInstruction()
+                }}
+              >
+                根据自然语言重写计划
+              </Button>
+            </Space>
+            <Form.Item
+              name="plan_instruction"
+              label="自然语言修改说明（可选）"
+            >
+              <TextArea
+                autoSize={{ minRows: 2, maxRows: 6 }}
+                placeholder="示例：保留当前一级主题，但把“方法对比”拆成“单智能体”和“多智能体”两个子主题，并强调时延-能耗联合优化的可验证指标。"
+              />
+            </Form.Item>
+            <div
+              style={{
+                border: '1px solid var(--color-border, #f0f0f0)',
+                borderRadius: 8,
+                padding: 12,
+                marginBottom: 12,
+                background: 'var(--color-bg-layout, #fafafa)',
+              }}
+            >
+              <Typography.Text strong>结构化预览</Typography.Text>
+              {!String(editingPlanText || '').trim() ? (
+                <Typography.Text type="secondary" style={{ display: 'block', marginTop: 6 }}>
+                  在上方输入计划后，这里会显示可读化预览。
+                </Typography.Text>
+              ) : editingPlanPreview.error ? (
+                <Typography.Text type="danger" style={{ display: 'block', marginTop: 6 }}>
+                  {editingPlanPreview.error}
+                </Typography.Text>
+              ) : (
+                <Space direction="vertical" size={8} style={{ width: '100%', marginTop: 8 }}>
+                  {editingPlanPreview.items.map((plan, index) => (
+                    <div
+                      key={`${plan.title}-${index}`}
+                      style={{
+                        border: '1px solid var(--color-border, #f0f0f0)',
+                        borderRadius: 6,
+                        padding: '8px 10px',
+                        background: '#fff',
+                      }}
+                    >
+                      <Space size={8} wrap>
+                        <Tag color={plan.depth > 1 ? 'geekblue' : 'blue'}>L{plan.depth}</Tag>
+                        <Typography.Text strong>{plan.title}</Typography.Text>
+                        {plan.parent_title ? (
+                          <Tag>父主题：{plan.parent_title}</Tag>
+                        ) : null}
+                      </Space>
+                      <Typography.Text type="secondary" style={{ display: 'block', marginTop: 4 }}>
+                        {plan.question}
+                      </Typography.Text>
+                    </div>
+                  ))}
+                </Space>
+              )}
+            </div>
             <Typography.Text type="secondary">
               系统默认自动执行（Web / 论文 / 代码工具已预配置）。如需干预，仅建议微调计划内容。
             </Typography.Text>
