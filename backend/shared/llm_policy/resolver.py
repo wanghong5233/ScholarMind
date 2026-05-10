@@ -76,6 +76,7 @@ class LLMPolicyResolver:
             temperature=temperature,
             retries=retries,
             timeout_secs=timeout_secs,
+            policy_source="manifest",
         )
 
     @staticmethod

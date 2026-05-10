@@ -56,7 +56,14 @@ class ConfigService:
             "llmPolicy": {
                 "enabled": bool(getattr(settings, "SM_LLM_POLICY_ENABLED", True)),
                 "version": str(getattr(settings, "SM_LLM_POLICY_VERSION", "v1")),
-                "resolvedVersion": str(getattr(policy_resolver, "policy_version", "legacy")),
+                "resolvedVersion": str(
+                    getattr(
+                        policy_resolver,
+                        "policy_version",
+                        getattr(settings, "SM_LLM_POLICY_VERSION", "v1"),
+                    )
+                ),
+                "resolvedSource": str(getattr(policy_resolver, "policy_source", "manifest")),
                 "rolloutSteps": list(getattr(policy_resolver, "rollout_steps", (5, 20, 50, 100))),
                 "taskIds": {
                     "answer": str(getattr(settings, "SM_LLM_POLICY_TASK_ANSWER", "app.answer")),

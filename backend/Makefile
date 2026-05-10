@@ -59,6 +59,7 @@ help:
 	@echo CI guardrails:
 	@echo   policy-lint    - Block new LLM magic-number literals in migrated paths
 	@echo   policy-eval    - Enforce FRR/FNR threshold guardrails
+	@echo   policy-quality - Enforce quality redline + rollout decision gate
 	@echo   policy-ci      - Run policy-lint + policy-eval
 
 
@@ -273,6 +274,10 @@ policy-lint:
 .PHONY: policy-eval
 policy-eval:
 	python scripts/check_intent_routing_thresholds.py --samples app/scripts/intent_routing_eval_samples.jsonl --max-frr 0.25 --max-fnr 0.25
+
+.PHONY: policy-quality
+policy-quality:
+	python scripts/check_adaptive_retrieval_quality_gate.py --policy scripts/adaptive_retrieval_quality_policy.v1.json
 
 .PHONY: policy-ci
 policy-ci: policy-lint policy-eval

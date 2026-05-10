@@ -79,6 +79,7 @@ class ResolvedTaskPolicy:
     temperature: float
     retries: int
     timeout_secs: float
+    policy_source: str = "manifest"
 
 
 def clamp_int(value: int, *, low: int, high: int) -> int:

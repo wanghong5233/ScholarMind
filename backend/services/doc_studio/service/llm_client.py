@@ -392,7 +392,12 @@ class LLMClient:
             "failure_threshold": settings.LLM_HEALTH_FAILURE_THRESHOLD,
             "cooldown_seconds": settings.LLM_HEALTH_COOLDOWN_SECONDS,
             "request_timeout": settings.LLM_REQUEST_TIMEOUT,
-            "policy_version": getattr(self._policy_resolver, "policy_version", "legacy"),
+            "policy_version": getattr(
+                self._policy_resolver,
+                "policy_version",
+                getattr(settings, "LLM_POLICY_VERSION", "v1"),
+            ),
+            "policy_source": getattr(self._policy_resolver, "policy_source", "manifest"),
             "task_ids": {
                 "ask": getattr(settings, "LLM_POLICY_TASK_ASK", "docstudio.ask"),
                 "guardrail": getattr(settings, "LLM_POLICY_TASK_GUARDRAIL", "docstudio.guardrail"),
@@ -591,6 +596,11 @@ class LLMClient:
                                 )
                             ),
                             "policy_version": resolved_policy.policy_version,
+                            "policy_source": getattr(
+                                resolved_policy,
+                                "policy_source",
+                                getattr(self._policy_resolver, "policy_source", "manifest"),
+                            ),
                             "task_id": resolved_policy.task_id,
                             "resolved_max_output_tokens": resolved_policy.max_output_tokens,
                         }
@@ -787,6 +797,11 @@ class LLMClient:
                 "model": model,
                 "cost": cost,
                 "policy_version": policy.policy_version,
+                "policy_source": getattr(
+                    policy,
+                    "policy_source",
+                    getattr(self._policy_resolver, "policy_source", "manifest"),
+                ),
                 "task_id": policy.task_id,
             }
         

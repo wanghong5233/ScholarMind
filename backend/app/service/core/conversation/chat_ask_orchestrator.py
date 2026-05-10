@@ -248,6 +248,7 @@ class ChatAskOrchestrator:
             "threshold": min_confidence,
             "reason": "not_evaluated",
             "policy_version": str(getattr(settings, "SM_LLM_POLICY_VERSION", "v1")),
+            "policy_source": "manifest",
             "skip": False,
             "rollout": {
                 "enabled": bool(getattr(settings, "SM_ADAPTIVE_RETRIEVAL_ENABLED", False)),
@@ -294,6 +295,7 @@ class ChatAskOrchestrator:
                     intent.get("policy_version")
                     or getattr(settings, "SM_LLM_POLICY_VERSION", "v1")
                 ),
+                "policy_source": str(intent.get("policy_source") or "manifest"),
                 "skip": False,
                 "rollout": {
                     "enabled": bool(getattr(settings, "SM_ADAPTIVE_RETRIEVAL_ENABLED", False)),
@@ -343,6 +345,7 @@ class ChatAskOrchestrator:
             "reason": route_reason,
             "confidence": route_confidence,
             "policy_version": intent_debug.get("policy_version"),
+            "policy_source": intent_debug.get("policy_source"),
             "retrieval_disabled": retrieval_disabled,
             "requested_index_mode": requested_index_mode or "auto",
             "resolved_index_mode": index_mode,

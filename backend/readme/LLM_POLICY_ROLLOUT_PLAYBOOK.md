@@ -8,7 +8,11 @@
 2. 执行本地门禁：
    - `make policy-lint`
    - `make policy-eval`
-3. 变更单必须说明：
+   - `make policy-quality`
+3. 质量红线策略文件：
+   - `backend/scripts/adaptive_retrieval_quality_policy.v1.json`
+   - 该文件定义了离线（FRR/FNR/accuracy）与在线（P95/legacy_ratio）红线，以及回滚档位。
+4. 变更单必须说明：
    - 变更原因（质量、成本、延迟、稳定性）
    - 预期影响任务（`task_id`）
    - 观测指标阈值（FRR/FNR、P95、错误率）
@@ -42,6 +46,14 @@
 2. 连续 5 分钟 P95 超阈值
 3. 错误率连续 5 分钟超阈值
 4. 发现关键任务（`app.answer` / `docstudio.ask` / `deepresearch.report`）出现系统性退化
+
+建议在每次灰度窗口末尾执行：
+
+```bash
+make policy-quality
+```
+
+若命令返回 `status=failed action=rollback`，按第 5 节立即执行回滚。
 
 ## 5. 回滚步骤（100→20→5→0）
 

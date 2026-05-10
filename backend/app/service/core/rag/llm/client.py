@@ -363,6 +363,11 @@ class LLMClient:
             "actual_model": requested_model,
             "fallback_applied": False,
             "policy_version": resolved_policy.policy_version,
+            "policy_source": getattr(
+                resolved_policy,
+                "policy_source",
+                getattr(self._policy_resolver, "policy_source", "manifest"),
+            ),
             "task_id": resolved_policy.task_id,
             "resolved_max_output_tokens": resolved_max_tokens,
         }
@@ -404,6 +409,11 @@ class LLMClient:
         )
         return {
             "policy_version": resolved.policy_version,
+            "policy_source": getattr(
+                resolved,
+                "policy_source",
+                getattr(self._policy_resolver, "policy_source", "manifest"),
+            ),
             "task_id": resolved.task_id,
             "model_name": resolved_model,
             "token_param": resolved.token_param,
@@ -456,6 +466,11 @@ class LLMClient:
                             or model_name != requested_model
                         ),
                         "policy_version": resolved_policy.policy_version,
+                        "policy_source": getattr(
+                            resolved_policy,
+                            "policy_source",
+                            getattr(self._policy_resolver, "policy_source", "manifest"),
+                        ),
                         "task_id": resolved_policy.task_id,
                         "resolved_max_output_tokens": resolved_policy.max_output_tokens,
                     }
@@ -527,6 +542,7 @@ class LLMClient:
                         or model_name != requested_model
                     ),
                     "policy_version": self._policy_resolver.policy_version,
+                    "policy_source": getattr(self._policy_resolver, "policy_source", "manifest"),
                     "task_id": self._policy_task_id(),
                     "resolved_max_output_tokens": max_tokens,
                 }
@@ -590,6 +606,11 @@ class LLMClient:
                             or model_name != requested_model
                         ),
                         "policy_version": resolved_policy.policy_version,
+                        "policy_source": getattr(
+                            resolved_policy,
+                            "policy_source",
+                            getattr(self._policy_resolver, "policy_source", "manifest"),
+                        ),
                         "task_id": resolved_policy.task_id,
                         "resolved_max_output_tokens": resolved_policy.max_output_tokens,
                     }
@@ -639,6 +660,7 @@ class LLMClient:
                         or model_name != requested_model
                     ),
                     "policy_version": self._policy_resolver.policy_version,
+                    "policy_source": getattr(self._policy_resolver, "policy_source", "manifest"),
                     "task_id": self._policy_task_id(),
                     "resolved_max_output_tokens": max_tokens,
                 }

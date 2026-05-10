@@ -25,6 +25,7 @@ DEFAULT_TARGETS = (
 
 TOKEN_LITERAL_RE = re.compile(r"\b(max_tokens|max_completion_tokens)\s*=\s*(\d+)\b")
 TEMPERATURE_LITERAL_RE = re.compile(r"\btemperature\s*=\s*([01](?:\.\d+)?)\b")
+LEGACY_POLICY_VERSION_RE = re.compile(r"\bpolicy_version\b\s*[:=]\s*[\"']legacy[\"']")
 
 
 def _iter_python_files(targets: Iterable[str]) -> Iterable[Path]:
@@ -70,7 +71,8 @@ def scan_magic_literals(targets: Iterable[str]) -> list[str]:
                 continue
             token_match = TOKEN_LITERAL_RE.search(line)
             temp_match = TEMPERATURE_LITERAL_RE.search(line)
-            if token_match or temp_match:
+            legacy_policy_match = LEGACY_POLICY_VERSION_RE.search(line)
+            if token_match or temp_match or legacy_policy_match:
                 rel = path.relative_to(ROOT)
                 violations.append(f"{rel}:{idx}: {line.strip()}")
     return violations

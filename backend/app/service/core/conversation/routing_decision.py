@@ -175,6 +175,7 @@ def classify_query_intent(
                 "confidence": coerce_confidence(parsed.get("confidence", 0.0), default=0.0),
                 "reason": reason[:80],
                 "policy_version": runtime.get("policy_version"),
+                "policy_source": runtime.get("policy_source"),
             }
         logger.warning(
             "[ADAPTIVE_RETRIEVAL] intent output missing JSON object; "

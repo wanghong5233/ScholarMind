@@ -245,6 +245,11 @@ class LLMClient:
         )
         return {
             "policy_version": policy.policy_version,
+            "policy_source": getattr(
+                policy,
+                "policy_source",
+                getattr(self._policy_resolver, "policy_source", "manifest"),
+            ),
             "task_id": policy.task_id,
             "model_name": resolved_model,
             "token_param": policy.token_param,
@@ -424,6 +429,7 @@ class LLMClient:
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
             "policy_version": self._policy_resolver.policy_version,
+            "policy_source": getattr(self._policy_resolver, "policy_source", "manifest"),
             "task_id": self._task_id,
         }
         self._last_usage = payload

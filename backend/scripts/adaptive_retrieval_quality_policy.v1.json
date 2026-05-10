@@ -1,0 +1,26 @@
+{
+  "policy_version": "v1",
+  "offline_eval": {
+    "threshold": 0.75,
+    "max_false_retrieval_rate": 0.25,
+    "max_missed_retrieval_rate": 0.25,
+    "min_accuracy": 0.75,
+    "min_query_type_accuracy": 0.6,
+    "min_samples": 30,
+    "require_human_verified": false,
+    "strict_provider_check": false
+  },
+  "online_metrics": {
+    "min_events": 20,
+    "max_p95_total_ms": 80000.0,
+    "max_p95_retrieval_ms": 35000.0,
+    "max_p95_generation_ms": 50000.0,
+    "max_legacy_missing_route_ratio": 0.01
+  },
+  "rollout": {
+    "steps": [5, 20, 50, 100],
+    "rollback_percent": 5,
+    "promote_on_pass": false,
+    "fail_on_violation": true
+  }
+}

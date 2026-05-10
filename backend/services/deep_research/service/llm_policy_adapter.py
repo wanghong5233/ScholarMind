@@ -31,9 +31,16 @@ except Exception:  # pragma: no cover
     LLMPolicyResolver = None  # type: ignore[assignment]
 
 
+def _resolve_declared_policy_version() -> str:
+    version = str(getattr(settings, "LLM_POLICY_VERSION", "v1") or "").strip()
+    return version or "v1"
+
+
 class _FallbackResolver:
-    policy_version = "legacy"
-    rollout_steps = (5, 20, 50, 100)
+    def __init__(self) -> None:
+        self.policy_version = _resolve_declared_policy_version()
+        self.policy_source = "compat_fallback"
+        self.rollout_steps = (5, 20, 50, 100)
 
     def refresh(self, *, manifest_path: Optional[str] = None) -> None:
         _ = manifest_path
@@ -65,7 +72,8 @@ class _FallbackResolver:
             "ResolvedTaskPolicy",
             (),
             {
-                "policy_version": "legacy",
+                "policy_version": self.policy_version,
+                "policy_source": self.policy_source,
                 "task_id": task_id,
                 "model_name": model_name,
                 "token_param": token_param,
@@ -88,7 +96,14 @@ def get_policy_resolver():
     if _RESOLVER is not None:
         return _RESOLVER
     manifest_path = str(getattr(settings, "LLM_POLICY_MANIFEST_PATH", "") or "").strip() or None
-    if bool(getattr(settings, "LLM_POLICY_ENABLED", True)) and LLMPolicyResolver is not None:
+    policy_enabled = bool(getattr(settings, "LLM_POLICY_ENABLED", True))
+    if policy_enabled and LLMPolicyResolver is None:
+        logger.warning(
+            "Shared LLM policy resolver unavailable; using compatibility fallback "
+            "(policy_version=%s).",
+            _resolve_declared_policy_version(),
+        )
+    if policy_enabled and LLMPolicyResolver is not None:
         try:
             _RESOLVER = LLMPolicyResolver(manifest_path=manifest_path)
             return _RESOLVER
