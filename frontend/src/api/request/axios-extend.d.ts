@@ -7,6 +7,10 @@ declare module 'axios' {
      * plugins/loading.ts
      */
     loading?: boolean
+    /**
+     * loading 遮罩文案，未传则默认“加载中...”
+     */
+    loadingTitle?: string
 
     /**
      * 请求异常时是否显示 toast 提示

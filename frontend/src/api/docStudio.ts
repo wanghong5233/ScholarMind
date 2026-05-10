@@ -124,7 +124,12 @@ export async function listAgentKnowledgeBases(options?: AxiosRequestConfig) {
 }
 
 export async function createWorkspace(
-  params: { name: string; workspaceId?: string; config?: Record<string, any> },
+  params: {
+    name: string
+    workspaceId?: string
+    config?: Record<string, any>
+    initializeFiles?: boolean
+  },
   options?: AxiosRequestConfig,
 ) {
   const { data: dto } = await request.post<{
@@ -140,6 +145,7 @@ export async function createWorkspace(
       name: params.name,
       workspace_id: params.workspaceId,
       config: params.config,
+      initialize_files: params.initializeFiles ?? true,
     },
     withDocStudioConfig(options),
   )

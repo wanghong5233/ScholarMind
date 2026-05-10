@@ -1,9 +1,10 @@
 import { AxiosRequestConfig } from 'axios'
 import { IRequestPlugin } from './plugin'
 
-function show() {
+function show(title?: string) {
+  const normalizedTitle = String(title || '').trim() || '加载中...'
   window.$showLoading({
-    title: '加载中...',
+    title: normalizedTitle,
   })
 }
 function hide() {
@@ -44,7 +45,7 @@ export const loadingPlugin: IRequestPlugin = {
 
   postinstall(instance) {
     instance.interceptors.request.use((config) => {
-      if (shouldShowLoading(config)) show()
+      if (shouldShowLoading(config)) show(config.loadingTitle)
       return config
     })
   },

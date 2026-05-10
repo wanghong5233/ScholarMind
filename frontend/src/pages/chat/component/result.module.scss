@@ -1,12 +1,56 @@
 .chat-message-result {
+  font-family: var(
+    --chat-ui-font-family,
+    'Inter',
+    'SF Pro Text',
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    'PingFang SC',
+    'Hiragino Sans GB',
+    'Noto Sans SC',
+    'Microsoft YaHei UI',
+    'Noto Sans CJK SC',
+    sans-serif
+  );
+  font-size: var(--chat-ui-font-size, 15px);
+
   .chat-message-result__think {
-    color: #8b8b8b;
-    border-left: 2px solid #e5e5e5;
-    padding-left: 10px;
+    color: #5f6878;
+    border-left: 3px solid #dbe3f1;
+    background: #f8fafe;
+    border-radius: 10px;
+    padding: 8px 12px;
     margin-bottom: 10px;
   }
   .chat-message-result__md {
+    color: #111827;
+    font-size: var(--chat-ui-font-size, 15px);
+    line-height: var(--chat-ui-line-height, 1.72);
+
     :global {
+      .com-markdown {
+        line-height: var(--chat-ui-line-height, 1.72) !important;
+        font-size: var(--chat-ui-font-size, 15px);
+      }
+
+      .com-markdown h1 {
+        font-size: 1.45em !important;
+      }
+
+      .com-markdown h2 {
+        font-size: 1.3em !important;
+      }
+
+      .com-markdown h3 {
+        font-size: 1.18em !important;
+      }
+
+      .com-markdown p,
+      .com-markdown li {
+        line-height: 1.78 !important;
+      }
+
       .refrence-token {
         display: inline-block;
         min-width: 20px;
@@ -32,11 +76,11 @@
   }
 
   .chat-message-result__streaming {
-    color: rgba(0, 0, 0, 0.45);
+    color: #3f4a5f;
     white-space: pre-wrap;
     word-break: break-word;
-    line-height: 1.6;
-    font-size: 14px;
+    line-height: var(--chat-ui-line-height, 1.72);
+    font-size: var(--chat-ui-font-size, 15px);
   }
 
   .chat-message-result__streaming-window {
@@ -52,13 +96,13 @@
   }
 
   .chat-message-result__actions {
-    margin-top: 6px;
+    margin-top: 10px;
     display: flex;
     align-items: center;
 
     .date {
       margin-right: 4px;
-      color: var(--ant-color-primary);
+      color: #637089;
       font-size: 12px;
 
       .elapsed {

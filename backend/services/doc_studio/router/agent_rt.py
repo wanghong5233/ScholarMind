@@ -257,6 +257,7 @@ class CreateWorkspaceRequest(BaseModel):
     workspace_id: Optional[str] = None
     config: Optional[Dict[str, Any]] = None
     template: Optional[str] = None
+    initialize_files: bool = True
 
 
 class UpdateWorkspaceRequest(BaseModel):
@@ -1825,36 +1826,38 @@ async def create_workspace(
     main_file_name = config.get("main_file", "main.tex")
     primary_format = config.get("primary_format")
     is_latex = primary_format == "latex" or Path(main_file_name).suffix.lower() == ".tex"
+    should_initialize_files = bool(payload.initialize_files)
 
-    if is_latex:
+    if should_initialize_files and is_latex:
         (workspace_path / "sections").mkdir(exist_ok=True)
         (workspace_path / "figures").mkdir(exist_ok=True)
     
     _write_workspace_config(workspace_path, config)
     
-    main_file = workspace_path / main_file_name
-    if not main_file.exists():
-        main_file.parent.mkdir(parents=True, exist_ok=True)
-        if is_latex:
-            main_file.write_text(
-                "\\documentclass{article}\n\\begin{document}\nHello Doc Studio!\n\\end{document}\n",
-                encoding="utf-8",
-            )
-        else:
-            suffix = main_file.suffix.lower()
-            if suffix in {".md", ".markdown"}:
+    if should_initialize_files:
+        main_file = workspace_path / main_file_name
+        if not main_file.exists():
+            main_file.parent.mkdir(parents=True, exist_ok=True)
+            if is_latex:
                 main_file.write_text(
-                    f"# {payload.name}\n\nStart writing here.\n",
+                    "\\documentclass{article}\n\\begin{document}\nHello Doc Studio!\n\\end{document}\n",
                     encoding="utf-8",
                 )
             else:
-                main_file.write_text(f"{payload.name}\n", encoding="utf-8")
+                suffix = main_file.suffix.lower()
+                if suffix in {".md", ".markdown"}:
+                    main_file.write_text(
+                        f"# {payload.name}\n\nStart writing here.\n",
+                        encoding="utf-8",
+                    )
+                else:
+                    main_file.write_text(f"{payload.name}\n", encoding="utf-8")
 
-    bibliography_file = config.get("bibliography_file")
-    if is_latex and bibliography_file:
-        references_file = workspace_path / bibliography_file
-        if not references_file.exists():
-            references_file.write_text("% references.bib\n", encoding="utf-8")
+        bibliography_file = config.get("bibliography_file")
+        if is_latex and bibliography_file:
+            references_file = workspace_path / bibliography_file
+            if not references_file.exists():
+                references_file.write_text("% references.bib\n", encoding="utf-8")
     
     stat = workspace_path.stat()
     return WorkspaceDetail(
@@ -2302,7 +2305,7 @@ async def upload_file(
     workspace_path = _workspace_path(user_id, workspace_id)
     _ensure_workspace(workspace_path)
     _assert_workspace_unlocked(workspace_path)
-    
+
     # 处理目录路径
     if directory:
         # 清理路径，移除前导/尾随斜杠
@@ -2311,26 +2314,35 @@ async def upload_file(
         dir_path = _safe_join(workspace_path, directory)
     else:
         dir_path = workspace_path
-    
+
     dir_path.mkdir(parents=True, exist_ok=True)
-    target = dir_path / file.filename
+
+    # 浏览器在目录上传场景下可能把相对路径塞进 filename（例如 "root/figures/a.eps"）；
+    # 这里统一只取 basename，目录结构完全由 directory 参数决定，避免重复拼接和路径穿透。
+    raw_filename = str(file.filename or "").strip().replace("\\", "/")
+    safe_filename = Path(raw_filename).name
+    if not safe_filename:
+        raise HTTPException(status_code=400, detail="Invalid upload filename")
+
+    target = dir_path / safe_filename
     relative_target = target.relative_to(workspace_path).as_posix()
     _assert_notebook_path_mutable(workspace_path, relative_target, request=request)
     content = await file.read()
+    target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(content)
-    
+
     relative_path = target.relative_to(workspace_path).as_posix()
     logger.info(
         f"📤 文件上传成功: workspace={workspace_id}, "
-        f"directory={directory}, filename={file.filename}, "
+        f"directory={directory}, filename={safe_filename}, "
         f"size={len(content)} bytes, path={relative_path}"
     )
-    
+
     # 验证文件确实已保存
     if not target.exists():
         logger.error(f"❌ 文件保存失败: {target}")
         raise HTTPException(status_code=500, detail="文件保存失败")
-    
+
     return {"path": relative_path, "size": len(content)}
 
 

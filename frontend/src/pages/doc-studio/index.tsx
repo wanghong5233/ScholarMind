@@ -991,6 +991,7 @@ const LatexEditorPage = () => {
   const [newWorkspaceName, setNewWorkspaceName] = useState('')
   const [newWorkspaceType, setNewWorkspaceType] = useState<'latex' | 'markdown'>('latex')
   const [workspaceSubmitting, setWorkspaceSubmitting] = useState(false)
+  const [workspaceImportSubmitting, setWorkspaceImportSubmitting] = useState(false)
   const [workspaceDeleteModalOpen, setWorkspaceDeleteModalOpen] = useState(false)
   const [workspaceDeleteConfirmInput, setWorkspaceDeleteConfirmInput] = useState('')
   const [workspaceDeleteSubmitting, setWorkspaceDeleteSubmitting] = useState(false)
@@ -3565,6 +3566,104 @@ const LatexEditorPage = () => {
     workspaceDeleteDisplayName,
   ])
 
+  const buildWorkspaceConfig = useCallback((workspaceType: 'latex' | 'markdown') => {
+    if (workspaceType === 'markdown') {
+      return {
+        workspace_type: 'doc_studio',
+        primary_format: 'markdown',
+        supported_formats: ['markdown', 'plaintext'],
+        main_file: 'notes.md',
+      }
+    }
+    return {
+      workspace_type: 'latex',
+      primary_format: 'latex',
+      supported_formats: ['latex', 'bib'],
+      main_file: 'main.tex',
+      bibliography_file: 'references.bib',
+    }
+  }, [])
+
+  const importWorkspaceFromDirectoryFiles = useCallback(
+    async (files: File[]) => {
+      if (!files.length) return
+      const firstRelative = normalizeWorkspacePath(
+        String((files[0] as File & { webkitRelativePath?: string }).webkitRelativePath || ''),
+      )
+      const rootSegment = firstRelative.split('/').filter(Boolean)[0] || ''
+      const hasTex = files.some((file) => file.name.toLowerCase().endsWith('.tex'))
+      const inferredType: 'latex' | 'markdown' = hasTex ? 'latex' : 'markdown'
+      const workspaceType = hasTex ? inferredType : newWorkspaceType
+      const workspaceName =
+        rootSegment ||
+        newWorkspaceName.trim() ||
+        `workspace-import-${new Date().toISOString().slice(0, 10)}`
+
+      setWorkspaceImportSubmitting(true)
+      try {
+        const workspace = await createWorkspace(
+          {
+            name: workspaceName,
+            config: buildWorkspaceConfig(workspaceType),
+            initializeFiles: false,
+          },
+          { loading: false, errorToast: false },
+        )
+
+        let successCount = 0
+        const failed: Array<{ path: string; reason: string }> = []
+        for (const file of files) {
+          const relativeRaw = normalizeWorkspacePath(
+            String((file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name),
+          )
+          const segments = relativeRaw.split('/').filter(Boolean)
+          const pathWithoutRoot =
+            segments.length > 1 ? segments.slice(1).join('/') : segments[0] || file.name
+          const { name, parentPath } = splitWorkspacePath(pathWithoutRoot)
+          if (!name) continue
+          const targetPath = normalizeWorkspacePath(
+            [parentPath, name].filter(Boolean).join('/'),
+          )
+          try {
+            await uploadFile(
+              {
+                workspaceId: workspace.workspaceId,
+                file,
+                directory: parentPath || undefined,
+              },
+              { loading: false, errorToast: false },
+            )
+            successCount += 1
+          } catch (error) {
+            failed.push({
+              path: targetPath || file.name,
+              reason: getErrorMessage(error),
+            })
+          }
+        }
+
+        setWorkspaceModalOpen(false)
+        setNewWorkspaceName('')
+        setNewWorkspaceType('latex')
+        await loadWorkspaces(workspace.workspaceId)
+        navigate(`/doc-studio/${workspace.workspaceId}`, { replace: true })
+        if (failed.length > 0) {
+          console.error('Workspace import failed files:', failed)
+          message.warning(
+            `工作区已创建（${workspaceName}），导入成功 ${successCount}，失败 ${failed.length}`,
+          )
+        } else {
+          message.success(`工作区已创建（${workspaceName}），共导入 ${successCount} 个文件`)
+        }
+      } catch (error) {
+        message.error(getErrorMessage(error))
+      } finally {
+        setWorkspaceImportSubmitting(false)
+      }
+    },
+    [buildWorkspaceConfig, loadWorkspaces, navigate, newWorkspaceName, newWorkspaceType],
+  )
+
   const handleCreateWorkspace = async () => {
     if (!newWorkspaceName.trim()) {
       message.warning('请输入工作区名称')
@@ -3572,24 +3671,9 @@ const LatexEditorPage = () => {
     }
     setWorkspaceSubmitting(true)
     try {
-      const workspaceConfig =
-        newWorkspaceType === 'markdown'
-          ? {
-              workspace_type: 'doc_studio',
-              primary_format: 'markdown',
-              supported_formats: ['markdown', 'plaintext'],
-              main_file: 'notes.md',
-            }
-          : {
-              workspace_type: 'latex',
-              primary_format: 'latex',
-              supported_formats: ['latex', 'bib'],
-              main_file: 'main.tex',
-              bibliography_file: 'references.bib',
-            }
       const workspace = await createWorkspace({
         name: newWorkspaceName.trim(),
-        config: workspaceConfig,
+        config: buildWorkspaceConfig(newWorkspaceType),
       })
       setWorkspaceModalOpen(false)
       setNewWorkspaceName('')
@@ -3684,7 +3768,37 @@ const LatexEditorPage = () => {
     openCreateModalAtPath('directory', directoryPath)
   }
   
-  // ??????????
+  const pickSingleFile = (onPicked: (file: File) => void) => {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.accept = '*/*'
+    input.onchange = () => {
+      const file = input.files?.[0]
+      if (file) onPicked(file)
+    }
+    input.click()
+  }
+
+  const pickDirectoryFiles = (onPicked: (files: File[]) => void) => {
+    const input = document.createElement('input')
+    input.type = 'file'
+    input.multiple = true
+    input.setAttribute('webkitdirectory', '')
+    input.setAttribute('directory', '')
+    input.onchange = () => {
+      const files = Array.from(input.files || [])
+      if (files.length) onPicked(files)
+    }
+    input.click()
+  }
+
+  const handleImportWorkspaceFromDirectoryClick = () => {
+    if (workspaceImportSubmitting) return
+    pickDirectoryFiles((files) => {
+      void importWorkspaceFromDirectoryFiles(files)
+    })
+  }
+
   const handleUploadToDirectory = (directoryPath: string) => {
     if (isNotebookSystemPath(directoryPath, { protectParents: true })) {
       message.warning('Notebook 系统目录不允许手动上传文件')
@@ -3692,68 +3806,21 @@ const LatexEditorPage = () => {
       return
     }
     setContextMenuVisible(false)
-    // ?????????????
-    const input = document.createElement('input')
-    input.type = 'file'
-    input.accept = '*/*'  // ?????????
-    input.onchange = async (e: Event) => {
-      const target = e.target as HTMLInputElement
-      const file = target.files?.[0]
-      if (!file || !snap.workspaceId) return
-      
-      setUploading(true)
-      try {
-        console.log('准备上传文件', {
-          fileName: file.name,
-          fileSize: file.size,
-          directory: directoryPath,
-          workspaceId: snap.workspaceId,
-        })
-        
-        // ????????
-        const result = await uploadFile({ 
-          workspaceId: snap.workspaceId, 
-          file,
-          directory: directoryPath  // ?? directory ????????
-        })
-        
-        console.log('上传完成响应:', result)
-        message.success(
-          `上传成功 ${directoryPath || '根目录'}: ${file.name} (${(file.size / 1024).toFixed(2)} KB)`,
-        )
-        
-        // ???????????????????
-        await new Promise(resolve => setTimeout(resolve, 500))
-        
-        // ??????
-        console.log('刷新工作区文件...')
-        await loadWorkspaceFiles(snap.workspaceId, false)
-        console.log('刷新完成')
-        
-        // ????????????????????
-        if (directoryPath && !expandedKeys.includes(directoryPath)) {
-          setExpandedKeys(prev => [...prev, directoryPath])
-        }
-        
-        // ???????????????
-        if (
-          file.name.endsWith('.tex') ||
-          file.name.endsWith('.bib') ||
-          file.name.endsWith('.md') ||
-          file.name.endsWith('.markdown') ||
-          file.name.endsWith('.txt')
-        ) {
-          const fullPath = directoryPath ? `${directoryPath}/${file.name}` : file.name
-          setTimeout(() => openFile(fullPath), 500)  // ??????????????
-        }
-      } catch (error) {
-        console.error('上传失败:', error)
-        message.error(`上传失败: ${getErrorMessage(error)}`)
-      } finally {
-        setUploading(false)
-      }
+    pickSingleFile((file) => {
+      void uploadFilesBatch([file], { baseDirectoryPath: directoryPath, preserveRelativePath: false })
+    })
+  }
+
+  const handleUploadFolderToDirectory = (directoryPath: string) => {
+    if (isNotebookSystemPath(directoryPath, { protectParents: true })) {
+      message.warning('Notebook 系统目录不允许手动上传文件夹')
+      setContextMenuVisible(false)
+      return
     }
-    input.click()
+    setContextMenuVisible(false)
+    pickDirectoryFiles((files) => {
+      void uploadFilesBatch(files, { baseDirectoryPath: directoryPath, preserveRelativePath: true })
+    })
   }
   
   // ??????
@@ -3964,10 +4031,15 @@ const LatexEditorPage = () => {
     })
 
     try {
-      const result = await compileWorkspace({
-        workspaceId: snap.workspaceId,
-        mainFile,
-      })
+      const result = await compileWorkspace(
+        {
+          workspaceId: snap.workspaceId,
+          mainFile,
+        },
+        {
+          loadingTitle: '正在编译文档...',
+        },
+      )
       docStudioActions.setCompileResult(result)
       if (result.success) {
         setLatexCenterMode('preview')
@@ -4380,23 +4452,134 @@ const LatexEditorPage = () => {
     [loadWorkspaceFiles, snap.workspaceId],
   )
 
+  const uploadFilesBatch = useCallback(
+    async (
+      files: File[],
+      options?: { baseDirectoryPath?: string; preserveRelativePath?: boolean },
+    ) => {
+      if (!snap.workspaceId) {
+        message.warning('请先选择工作区')
+        return
+      }
+      if (!files.length) return
+      const baseDirectoryPath = normalizeWorkspacePath(options?.baseDirectoryPath || '')
+      const preserveRelativePath = Boolean(options?.preserveRelativePath)
+      const targets: Array<{
+        file: File
+        directory: string
+        targetPath: string
+      }> = []
+      const skippedProtected: string[] = []
+
+      files.forEach((file) => {
+        const relativeRaw = preserveRelativePath
+          ? String((file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name)
+          : file.name
+        const relativePath = normalizeWorkspacePath(relativeRaw)
+        const { name, parentPath } = splitWorkspacePath(relativePath)
+        if (!name) return
+        const directory = normalizeWorkspacePath(
+          [baseDirectoryPath, parentPath].filter(Boolean).join('/'),
+        )
+        const targetPath = normalizeWorkspacePath([directory, name].filter(Boolean).join('/'))
+        if (!targetPath) return
+        if (isNotebookSystemPath(targetPath, { protectParents: true })) {
+          skippedProtected.push(targetPath)
+          return
+        }
+        targets.push({ file, directory, targetPath })
+      })
+
+      if (!targets.length) {
+        if (skippedProtected.length) {
+          message.warning(`已跳过 ${skippedProtected.length} 个系统保护路径文件`)
+        } else {
+          message.warning('没有可上传的文件')
+        }
+        return
+      }
+
+      setUploading(true)
+      const failed: Array<{ path: string; reason: string }> = []
+      let successCount = 0
+      try {
+        // 顺序上传避免并发高峰把浏览器与后端连接打满
+        for (const target of targets) {
+          try {
+            // eslint-disable-next-line no-await-in-loop
+            await uploadFile({
+              workspaceId: snap.workspaceId,
+              file: target.file,
+              directory: target.directory || undefined,
+            })
+            successCount += 1
+          } catch (error) {
+            failed.push({
+              path: target.targetPath,
+              reason: getErrorMessage(error),
+            })
+          }
+        }
+
+        await loadWorkspaceFiles(snap.workspaceId, false)
+        if (successCount > 0) {
+          const dirsToExpand = new Set<string>()
+          targets.forEach((target) => {
+            if (!target.directory) return
+            const segs = target.directory.split('/').filter(Boolean)
+            let cur = ''
+            segs.forEach((seg) => {
+              cur = cur ? `${cur}/${seg}` : seg
+              dirsToExpand.add(cur)
+            })
+          })
+          if (dirsToExpand.size) {
+            setExpandedKeys((prev) => {
+              const next = [...prev]
+              dirsToExpand.forEach((dir) => {
+                if (!next.includes(dir)) next.push(dir)
+              })
+              return next
+            })
+          }
+        }
+
+        if (successCount > 0) {
+          const successMsg =
+            failed.length > 0
+              ? `上传完成：成功 ${successCount}，失败 ${failed.length}`
+              : `上传完成：成功 ${successCount}`
+          message.success(successMsg)
+        }
+        if (failed.length > 0) {
+          console.error('DocStudio upload failed files:', failed)
+          message.warning(`有 ${failed.length} 个文件上传失败，请查看控制台详情`)
+        }
+        if (skippedProtected.length > 0) {
+          message.warning(`已跳过 ${skippedProtected.length} 个系统保护路径文件`)
+        }
+      } finally {
+        setUploading(false)
+      }
+    },
+    [isNotebookSystemPath, loadWorkspaceFiles, snap.workspaceId],
+  )
+
   const handleWorkspaceUploadClick = () => {
     fileInputRef.current?.click()
   }
 
+  const handleWorkspaceUploadDirectoryClick = () => {
+    pickDirectoryFiles((files) => {
+      void uploadFilesBatch(files, { preserveRelativePath: true })
+    })
+  }
+
   const handleFileInputChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
-    if (!snap.workspaceId) return
-    const file = event.target.files?.[0]
-    if (!file) return
-    setUploading(true)
+    const files = Array.from(event.target.files || [])
     try {
-      await uploadFile({ workspaceId: snap.workspaceId, file })
-      message.success('上传成功')
-      await loadWorkspaceFiles(snap.workspaceId, false)
-    } catch (error) {
-      message.error(getErrorMessage(error))
+      await uploadFilesBatch(files, { preserveRelativePath: false })
     } finally {
-      setUploading(false)
       event.target.value = ''
     }
   }
@@ -6956,6 +7139,15 @@ const LatexEditorPage = () => {
           },
         },
         {
+          key: 'workspace-upload-folder',
+          label: '上传文件夹',
+          icon: <FolderOpenOutlined />,
+          onClick: () => {
+            closeContextMenu()
+            handleWorkspaceUploadDirectoryClick()
+          },
+        },
+        {
           key: 'workspace-refresh',
           label: '刷新文件树',
           icon: <ReloadOutlined />,
@@ -7037,6 +7229,15 @@ const LatexEditorPage = () => {
           onClick: () => {
             closeContextMenu()
             handleUploadToDirectory(contextMenuPath)
+          },
+        },
+        {
+          key: 'directory-upload-folder',
+          label: '上传文件夹',
+          icon: <FolderOpenOutlined />,
+          onClick: () => {
+            closeContextMenu()
+            handleUploadFolderToDirectory(contextMenuPath)
           },
         },
         {
@@ -7346,6 +7547,14 @@ const LatexEditorPage = () => {
                   size="small"
                   onClick={() => setWorkspaceModalOpen(true)}
                 />
+                <Tooltip title="导入文件夹并创建工作区">
+                  <Button
+                    icon={<FolderOpenOutlined />}
+                    size="small"
+                    loading={workspaceImportSubmitting}
+                    onClick={handleImportWorkspaceFromDirectoryClick}
+                  />
+                </Tooltip>
                 <Tooltip title={isNotebookWorkspace ? 'Notebook 工作区不可删除' : '删除当前工作区'}>
                   <Button
                     icon={<DeleteOutlined />}
@@ -7395,6 +7604,16 @@ const LatexEditorPage = () => {
                     disabled={!snap.workspaceId}
                   />
                 </Tooltip>
+                <Tooltip title="上传文件夹">
+                  <Button
+                    type="text"
+                    className="doc-studio__explorer-action-btn"
+                    icon={<FolderOpenOutlined />}
+                    loading={uploading}
+                    onClick={handleWorkspaceUploadDirectoryClick}
+                    disabled={!snap.workspaceId}
+                  />
+                </Tooltip>
                 <Tooltip title="刷新文件树">
                   <Button
                     type="text"
@@ -7417,6 +7636,7 @@ const LatexEditorPage = () => {
             <input
               ref={fileInputRef}
               type="file"
+              multiple
               style={{ display: 'none' }}
               onChange={handleFileInputChange}
             />
@@ -9109,7 +9329,7 @@ const LatexEditorPage = () => {
           setWorkspaceModalOpen(false)
           setNewWorkspaceType('latex')
         }}
-        confirmLoading={workspaceSubmitting}
+        confirmLoading={workspaceSubmitting || workspaceImportSubmitting}
       >
         <Form layout="vertical">
           <Form.Item label="工作区类型">
@@ -9128,6 +9348,21 @@ const LatexEditorPage = () => {
               value={newWorkspaceName}
               onChange={(event) => setNewWorkspaceName(event.target.value)}
             />
+          </Form.Item>
+          <Form.Item label="快速导入">
+            <Space direction="vertical" size={6} style={{ width: '100%' }}>
+              <Button
+                block
+                icon={<FolderOpenOutlined />}
+                loading={workspaceImportSubmitting}
+                onClick={handleImportWorkspaceFromDirectoryClick}
+              >
+                选择本地文件夹并自动创建工作区
+              </Button>
+              <Text type="secondary">
+                会自动按文件夹名创建工作区，并保留目录结构导入全部文件。
+              </Text>
+            </Space>
           </Form.Item>
         </Form>
       </Modal>
