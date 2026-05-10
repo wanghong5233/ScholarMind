@@ -161,15 +161,15 @@ services:
 
   doc_studio:
     build:
-      context: ./services/doc_studio
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: ./services/doc_studio/Dockerfile
     container_name: scholarmind_doc_studio
     hostname: doc_studio
     env_file:
       - .env.production
     environment:
       PYTHONUNBUFFERED: "1"
-      PYTHONPATH: /app
+      PYTHONPATH: /app:/shared
       PORT: 8003
       RAG_SERVICE_URL: http://scholarmind_api:8000
       DATABASE_URL: ${DATABASE_URL:-postgresql://postgres:${POSTGRES_PASSWORD:-pg123456}@scholarmind_db:5432/${POSTGRES_DB:-scholarmind}}
@@ -215,15 +215,15 @@ services:
 
   deep_research:
     build:
-      context: ./services/deep_research
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: ./services/deep_research/Dockerfile
     container_name: scholarmind_deep_research
     hostname: deep_research
     env_file:
       - .env.production
     environment:
       PYTHONUNBUFFERED: "1"
-      PYTHONPATH: /app
+      PYTHONPATH: /app:/shared
       PORT: 8004
       RAG_SERVICE_URL: http://scholarmind_api:8000
       DATA_ROOT: /app/data/deep_research

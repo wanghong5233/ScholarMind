@@ -179,7 +179,7 @@ cp .env.production.example .env.production
 - `SM_UNSTRUCTURED_API_KEY`
 - `SM_VECTOR_STORE=pgvector`
 - `SM_RERANKER_TYPE=dashscope`
-- `SM_PARSER_ORDER=llamaparse,unstructured_api,pymupdf`
+- 不在 `.env.production` 显式设置 `SM_PARSER_ORDER`（使用代码默认 `llamaparse,unstructured_api,pymupdf`）
 - `SM_STORAGE_ROOT=/opt/data/scholarmind/storage`
 - `SM_DEMO_ENTRY_ENABLED=true`
 - `SM_DEMO_USERNAME=testuser`
@@ -203,7 +203,7 @@ cp .env.production.example .env.production
 首次部署先构建主 API 镜像，再启动 ScholarMind MVP 全量服务（主站 API、Doc Studio、Deep Research、PostgreSQL、Redis、Cloudflare Tunnel）：
 
 ```bash
-docker compose -f docker-compose.prod.yml --env-file .env.production build scholarmind_api
+docker compose -f docker-compose.prod.yml --env-file .env.production build scholarmind_api doc_studio deep_research
 docker compose -f docker-compose.prod.yml --env-file .env.production up -d
 docker compose -f docker-compose.prod.yml --env-file .env.production ps
 ```
@@ -277,7 +277,7 @@ cd /opt/apps/scholarmind/backend
 docker compose -f docker-compose.prod.yml down -v --remove-orphans
 docker system prune -a -f --volumes
 docker buildx prune -a -f
-docker compose -f docker-compose.prod.yml --env-file .env.production build scholarmind_api
+docker compose -f docker-compose.prod.yml --env-file .env.production build scholarmind_api doc_studio deep_research
 docker compose -f docker-compose.prod.yml --env-file .env.production up -d
 ```
 
@@ -420,7 +420,7 @@ networks:
 
 ### ScholarMind
 
-- [ ] `docker compose -f docker-compose.prod.yml --env-file .env.production build scholarmind_api` 成功
+- [ ] `docker compose -f docker-compose.prod.yml --env-file .env.production build scholarmind_api doc_studio deep_research` 成功
 - [ ] `docker compose -f docker-compose.prod.yml --env-file .env.production up -d` 成功
 - [ ] `scholarmind_api` / `scholarmind_db` / `scholarmind_redis` / `cloudflared` 均为 `Up`
 - [ ] `SM_VECTOR_STORE=pgvector`
