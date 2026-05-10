@@ -1,6 +1,5 @@
 import * as api from '@/api'
 import IconEdit from '@/assets/chat/edit.svg'
-import Markdown from '@/components/markdown'
 import ComPageLayout from '@/components/page-layout'
 import ComSender from '@/components/sender'
 import { ChatRole, ChatType } from '@/configs'
@@ -13,7 +12,6 @@ import { MenuUnfoldOutlined } from '@ant-design/icons'
 import { useMount, useRequest, useUnmount } from 'ahooks'
 import {
   Button,
-  Drawer,
   Form,
   Input,
   Modal,
@@ -38,11 +36,10 @@ import { sessionActions } from '../../store/session'
 import ChatMessage from './component/chat-message'
 import ChatWelcome from './component/chat-welcome'
 import Citations from './component/citations'
-import Contracts from './component/contracts'
 import ChatDrawer from './component/drawer'
 import DeepResearchProcessPanel from './component/deep-research-process-panel'
 import styles from './index.module.scss'
-import { createChatId, transportToChatEnter } from './shared'
+import { createChatId, createChatIdText, transportToChatEnter } from './shared'
 import type { KnowledgeBase } from '@/api/repository'
 import { getDeepResearchPlanStreamUrl } from '@/api/deepResearch'
 import type {
@@ -279,6 +276,17 @@ const estimateLabelUnits = (text: string) =>
 const calcCompactSelectWidth = (label: string, minPx: number, maxPx: number) => {
   const width = Math.round(38 + estimateLabelUnits(label) * 8.6)
   return `${Math.max(minPx, Math.min(maxPx, width))}px`
+}
+
+const buildReferenceIdentity = (item: API.Reference | null | undefined): string => {
+  if (!item) return ''
+  if (item.id) return `id:${item.id}`
+  if (item.chunk_id) return `chunk:${item.chunk_id}`
+  const snippet = String(item.snippet || item.source_text || item.content_with_weight || '').slice(
+    0,
+    80,
+  )
+  return `doc:${item.document_id ?? ''}|page:${item.page ?? ''}|snippet:${snippet}`
 }
 
 const resolveDownloadFilename = (
@@ -985,6 +993,7 @@ export default function Index() {
   const [documents, setDocuments] = useState<API.Document[]>([])
   const [currentChatItem, setCurrentChatItemState] =
     useState<ChatItemWithToken | null>(null)
+  const [activeCitation, setActiveCitation] = useState<API.Reference | null>(null)
   const [rightPanelVisible, setRightPanelVisible] = useState(true)
   const [rightPanelMode, setRightPanelMode] = useState<RightPanelMode>('documents')
   const [rightPanelWidth, setRightPanelWidth] = useState<number>(() => {
@@ -1104,10 +1113,10 @@ export default function Index() {
     Record<string, 'thumbs_up' | 'thumbs_down' | undefined>
   >({})
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([])
-  const [draftRagEnabled, setDraftRagEnabled] = useState(false)
+  const [draftRagEnabled, setDraftRagEnabled] = useState(true)
   const [draftUserKnowledgeBaseId, setDraftUserKnowledgeBaseId] =
     useState<number | null>(null)
-  const [draftRagMode, setDraftRagMode] = useState<'fast' | 'deep'>('fast')
+  const [draftRagMode, setDraftRagMode] = useState<'fast' | 'deep'>('deep')
   const [updatingDefaults, setUpdatingDefaults] = useState(false)
   const [researchMode, setResearchMode] = useState<'chat' | 'deep'>('chat')
   const [deepResearchPreset, setDeepResearchPreset] = useState<DeepResearchPresetKey>(() => {
@@ -1151,6 +1160,7 @@ export default function Index() {
   const suggestionAutoDismissTimerRef = useRef<number | null>(null)
   const suggestionShownCountRef = useRef(0)
   const pendingSendRef = useRef<ChatPendingSendState | null>(null)
+  const citationFollowRafRef = useRef<number | null>(null)
   const sessionNameRef = useRef('')
   const autoTitledSessionRef = useRef<Record<string, boolean>>({})
   const rightPanelVisibleRef = useRef(rightPanelVisible)
@@ -1160,9 +1170,13 @@ export default function Index() {
     (item: API.ChatItem | null, options?: { openPanel?: boolean }) => {
       if (!item) {
         setCurrentChatItemState(null)
+        setActiveCitation(null)
         return
       }
       setRightPanelMode(item.reference?.length ? 'citations' : 'documents')
+      if (!item.reference?.length) {
+        setActiveCitation(null)
+      }
       if (options?.openPanel) {
         setRightPanelVisible(true)
       }
@@ -1170,6 +1184,78 @@ export default function Index() {
     },
     [],
   )
+
+  const pickFocusedAssistantItem = useCallback((): API.ChatItem | null => {
+    const candidates = list.filter(
+      (item) =>
+        item.role === ChatRole.Assistant &&
+        item.type === ChatType.Document,
+    )
+    if (!candidates.length || typeof window === 'undefined') {
+      return null
+    }
+
+    const viewportHeight = window.innerHeight || 0
+    const anchorY = Math.max(120, Math.min(viewportHeight * 0.38, viewportHeight - 120))
+    let bestItem: API.ChatItem | null = null
+    let bestScore = Number.POSITIVE_INFINITY
+
+    candidates.forEach((item) => {
+      const node = document.getElementById(createChatIdText(item.id))
+      if (!node) return
+      const rect = node.getBoundingClientRect()
+      const inViewport = rect.bottom > 92 && rect.top < viewportHeight - 36
+      const centerY = rect.top + Math.min(rect.height, 260) / 2
+      const score = Math.abs(centerY - anchorY) + (inViewport ? 0 : 1400)
+      if (score < bestScore) {
+        bestScore = score
+        bestItem = item
+      }
+    })
+
+    if (bestItem) return bestItem
+    return candidates[candidates.length - 1] || null
+  }, [list])
+
+  const syncCitationsPanelWithViewport = useCallback(() => {
+    if (!rightPanelVisibleRef.current) return
+    if (rightPanelModeRef.current === 'deep_research') return
+
+    const focusedItem = pickFocusedAssistantItem()
+    if (!focusedItem) {
+      if (currentChatItem) {
+        setCurrentChatItemState(null)
+      }
+      if (activeCitation) {
+        setActiveCitation(null)
+      }
+      if (rightPanelModeRef.current !== 'documents') {
+        setRightPanelMode('documents')
+      }
+      return
+    }
+
+    if (currentChatItem?.id !== focusedItem.id) {
+      setCurrentChatItemState({ ...focusedItem, __openToken: Date.now() })
+      setActiveCitation(null)
+    }
+
+    const hasReference =
+      Array.isArray(focusedItem.reference) && focusedItem.reference.length > 0
+    const nextMode: RightPanelMode = hasReference ? 'citations' : 'documents'
+    if (nextMode !== rightPanelModeRef.current) {
+      setRightPanelMode(nextMode)
+    }
+  }, [activeCitation, currentChatItem, pickFocusedAssistantItem])
+
+  const scheduleCitationsPanelSync = useCallback(() => {
+    if (typeof window === 'undefined') return
+    if (citationFollowRafRef.current !== null) return
+    citationFollowRafRef.current = window.requestAnimationFrame(() => {
+      citationFollowRafRef.current = null
+      syncCitationsPanelWithViewport()
+    })
+  }, [syncCitationsPanelWithViewport])
 
   useEffect(() => {
     rightPanelVisibleRef.current = rightPanelVisible
@@ -1182,6 +1268,84 @@ export default function Index() {
   useEffect(() => {
     activeDeepResearchItemIdRef.current = activeDeepResearchItemId
   }, [activeDeepResearchItemId])
+
+  useEffect(() => {
+    if (!currentChatItem) return
+    const latest = list.find((item) => item.id === currentChatItem.id)
+    if (!latest) {
+      setCurrentChatItemState(null)
+      setActiveCitation(null)
+      return
+    }
+
+    setCurrentChatItemState((prev) => {
+      if (!prev || prev.id !== latest.id) return prev
+      const unchanged =
+        prev.content === latest.content &&
+        prev.think === latest.think &&
+        prev.loading === latest.loading &&
+        prev.error === latest.error &&
+        prev.message_id === latest.message_id &&
+        prev.reference === latest.reference &&
+        prev.documents === latest.documents &&
+        prev.deepResearch === latest.deepResearch
+      if (unchanged) return prev
+      return {
+        ...(latest as API.ChatItem),
+        __openToken: prev.__openToken,
+      }
+    })
+
+    if (rightPanelModeRef.current !== 'deep_research') {
+      const hasReference =
+        Array.isArray(latest.reference) && latest.reference.length > 0
+      const nextMode: RightPanelMode = hasReference ? 'citations' : 'documents'
+      if (nextMode !== rightPanelModeRef.current) {
+        setRightPanelMode(nextMode)
+      }
+    }
+
+    const references = Array.isArray(latest.reference) ? latest.reference : []
+    if (!references.length) {
+      if (activeCitation) {
+        setActiveCitation(null)
+      }
+      return
+    }
+    if (!activeCitation) return
+
+    const currentKey = buildReferenceIdentity(activeCitation)
+    const matched = references.find((item) => buildReferenceIdentity(item) === currentKey)
+    if (!matched) {
+      setActiveCitation(null)
+      return
+    }
+    if (matched !== activeCitation) {
+      setActiveCitation(matched)
+    }
+  }, [currentChatItem, list, activeCitation])
+
+  useEffect(() => {
+    if (!rightPanelVisible || rightPanelMode === 'deep_research') return
+    scheduleCitationsPanelSync()
+  }, [rightPanelVisible, rightPanelMode, list, scheduleCitationsPanelSync])
+
+  useEffect(() => {
+    if (!rightPanelVisible || rightPanelMode === 'deep_research') return
+    const handleFollow = () => {
+      scheduleCitationsPanelSync()
+    }
+    window.addEventListener('scroll', handleFollow, { passive: true })
+    window.addEventListener('resize', handleFollow)
+    return () => {
+      window.removeEventListener('scroll', handleFollow)
+      window.removeEventListener('resize', handleFollow)
+      if (citationFollowRafRef.current !== null) {
+        window.cancelAnimationFrame(citationFollowRafRef.current)
+        citationFollowRafRef.current = null
+      }
+    }
+  }, [rightPanelVisible, rightPanelMode, scheduleCitationsPanelSync])
 
   useEffect(() => {
     if (!researchSuggestion && suggestionAutoDismissTimerRef.current) {
@@ -2013,6 +2177,9 @@ export default function Index() {
       void api.session.chatCancel({
         id,
         runId,
+      }, {
+        loading: false,
+        errorToast: false,
       }).catch(() => {})
     }
     if (readerRef.current) {
@@ -2044,6 +2211,9 @@ export default function Index() {
       void api.session.chatCancel({
         id,
         runId,
+      }, {
+        loading: false,
+        errorToast: false,
       }).catch(() => {})
     }
     if (pendingSendRef.current) {
@@ -2123,6 +2293,8 @@ export default function Index() {
             },
             {
               signal: abortControllerRef.current?.signal,
+              loading: false,
+              errorToast: false,
             },
           )
           const replayReader = replayRes.data?.getReader?.()
@@ -2130,7 +2302,16 @@ export default function Index() {
           readerRef.current = replayReader
           await read(replayReader)
           return true
-        } catch {
+        } catch (replayError: unknown) {
+          const replayResponse = (replayError as { response?: { status?: number } } | null)?.response
+          const status = Number(replayResponse?.status)
+          if (
+            status === 404 &&
+            (abortControllerRef.current?.signal.aborted || branchResetAbortRef.current)
+          ) {
+            // User-cancel race: replay buffer may never be established.
+            return true
+          }
           return false
         }
       }
@@ -2157,6 +2338,8 @@ export default function Index() {
         }
         const res = await api.session.chat(payload, {
           signal: abortControllerRef.current.signal,
+          loading: false,
+          errorToast: false,
         })
         sessionActions.updateKey()
 
@@ -2182,8 +2365,8 @@ export default function Index() {
             needReload = false
             return { rolledBack }
           }
-          // 后端可能已经完成并异步落库；中断后主动做一次历史同步，避免必须手动刷新
-          needReload = true
+          // User actively aborted: treat as normal flow and keep UI quiet.
+          needReload = false
           return { rolledBack: false }
         }
         const replayed = await reconnectByReplay()
@@ -2242,6 +2425,9 @@ export default function Index() {
           try {
             readResult = await reader.read()
           } catch (readError) {
+            if (abortControllerRef.current?.signal.aborted) {
+              return
+            }
             const replayed = await reconnectByReplay()
             if (replayed) return
             throw readError
@@ -2287,6 +2473,10 @@ export default function Index() {
 
           if (done) {
             if (!sawCompletion) {
+              if (abortControllerRef.current?.signal.aborted || branchResetAbortRef.current) {
+                needReload = false
+                break
+              }
               const replayed = await reconnectByReplay()
               if (replayed) return
               // 未拿到 completion 且回放失败时，再走历史同步兜底。
@@ -4332,13 +4522,11 @@ export default function Index() {
       }
       if (!id) {
         try {
-          const selectedKbId = draftRagEnabled
-            ? resolvePreferredKnowledgeBaseId(knowledgeBases, [draftUserKnowledgeBaseId])
-            : null
-          if (draftRagEnabled && selectedKbId == null) {
-            message.warning('请先在知识库页面创建可用知识库，再开启 RAG')
-            return
-          }
+          const selectedKbId = resolvePreferredKnowledgeBaseId(knowledgeBases, [
+            draftUserKnowledgeBaseId,
+          ])
+          const enableUserKnowledgeBase =
+            draftRagEnabled && selectedKbId != null
           const { data } = await api.session.create(
             {
               surface: 'deep_chat',
@@ -4346,8 +4534,10 @@ export default function Index() {
                 llmProvider: resolveRuntimeProviderByModel(llmModel),
                 llmModel,
                 useSessionKnowledgeBase: draftRagEnabled,
-                useUserKnowledgeBase: draftRagEnabled,
-                userKnowledgeBaseId: draftRagEnabled ? selectedKbId : null,
+                useUserKnowledgeBase: enableUserKnowledgeBase,
+                userKnowledgeBaseId: enableUserKnowledgeBase
+                  ? selectedKbId
+                  : null,
                 retrievalStrategy:
                   draftRagEnabled && draftRagMode === 'deep'
                     ? 'multimodal_graph'
@@ -4368,7 +4558,9 @@ export default function Index() {
               deepResearchPreset: shouldDeepResearch ? deepResearchPresetRef.current : undefined,
               useRag: draftRagEnabled,
               ragMode: draftRagMode,
-              userKnowledgeBaseId: draftRagEnabled ? selectedKbId : null,
+              userKnowledgeBaseId: enableUserKnowledgeBase
+                ? selectedKbId
+                : null,
               pendingAttachments: pendingAttachments.map((item) => ({ ...item })),
               pendingFiles: [...pendingFiles],
               imageAttachments: imageTransfer,
@@ -4925,7 +5117,6 @@ export default function Index() {
     [chatImageAttachments.length, activeLlmModel, isRuntimeVisionModel],
   )
 
-  const [read, setRead] = useState<API.Reference | null>(null)
   const effectiveUsingUserKb = sessionDefaults
     ? sessionDefaults.useSessionKnowledgeBase || sessionDefaults.useUserKnowledgeBase
     : draftRagEnabled
@@ -5133,6 +5324,25 @@ export default function Index() {
     openDeepResearchProcessPanel,
   ])
 
+  const handleOpenCitationsFromMessage = useCallback(
+    (item: API.ChatItem) => {
+      setActiveCitation(null)
+      openCitationsPanel(item, { openPanel: true })
+    },
+    [openCitationsPanel],
+  )
+
+  const handleOpenCitationFromAnswer = useCallback(
+    (target: API.Reference, sourceItem: API.ChatItem) => {
+      const references = Array.isArray(sourceItem.reference) ? sourceItem.reference : []
+      const targetKey = buildReferenceIdentity(target)
+      const matched = references.find((item) => buildReferenceIdentity(item) === targetKey)
+      setActiveCitation(matched || target)
+      openCitationsPanel(sourceItem, { openPanel: true })
+    },
+    [openCitationsPanel],
+  )
+
   return (
     <ComPageLayout
       className={pageLayoutClassName}
@@ -5212,11 +5422,18 @@ export default function Index() {
               </ChatDrawer>
             ) : currentChatItem && currentChatItem.reference?.length ? (
               <ChatDrawer title="引文" onClose={() => setRightPanelVisible(false)}>
-                <Citations list={currentChatItem.reference} />
+                <Citations
+                  list={currentChatItem.reference}
+                  activeReference={activeCitation}
+                  onActiveReferenceChange={setActiveCitation}
+                />
               </ChatDrawer>
             ) : (
-              <ChatDrawer title="文档" onClose={() => setRightPanelVisible(false)}>
-                <Contracts list={documents} />
+              <ChatDrawer title="引文" onClose={() => setRightPanelVisible(false)}>
+                <div
+                  className={styles['chat-page__right-panel-empty']}
+                  data-documents={documents.length}
+                />
               </ChatDrawer>
             )}
           </div>
@@ -5255,8 +5472,8 @@ export default function Index() {
           <ChatMessage
             list={list}
             onSend={send}
-            onOpenCiations={(item) => openCitationsPanel(item, { openPanel: true })}
-            onRefrence={setRead}
+            onOpenCiations={handleOpenCitationsFromMessage}
+            onRefrence={handleOpenCitationFromAnswer}
             onRetryUserMessage={handleRetryUserMessage}
             onResendUserMessage={handleResendUserMessage}
             onDeepResearchConfirm={handleDeepResearchConfirm}
@@ -5273,23 +5490,6 @@ export default function Index() {
             feedbackByMessageId={feedbackByMessageId}
           />
         )}
-
-        <Drawer
-          title={read?.document_name ?? ''}
-          width={800}
-          onClose={() => setRead(null)}
-          open={!!read}
-          destroyOnClose
-        >
-          <Markdown
-            value={
-              read?.source_text ||
-              read?.content_with_weight ||
-              read?.snippet ||
-              ''
-            }
-          />
-        </Drawer>
 
         <Modal
           title="系统状态"

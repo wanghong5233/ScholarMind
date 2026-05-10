@@ -253,7 +253,7 @@ export default function ChatMessage(props: {
   list: API.ChatItem[]
   onSend?: (text: string) => void
   onOpenCiations?: (item: API.ChatItem) => void
-  onRefrence?: (target: API.Reference) => void
+  onRefrence?: (target: API.Reference, sourceItem: API.ChatItem) => void
   onRetryUserMessage?: (item: API.ChatItem, index: number) => void
   onResendUserMessage?: (item: API.ChatItem, index: number) => void
   onDeepResearchConfirm?: (item: API.ChatItem) => void
@@ -330,7 +330,7 @@ export default function ChatMessage(props: {
             onOpenCiations={() => onOpenCiations?.(item)}
             onRefrence={(index) => {
               const target = item.reference?.[index]
-              if (target) onRefrence?.(target)
+              if (target) onRefrence?.(target, item)
             }}
             onDeepResearchConfirm={onDeepResearchConfirm}
             onDeepResearchCancel={onDeepResearchCancel}

@@ -1,12 +1,9 @@
-import IconFilter from '@/assets/chat/filter.svg'
-import IconObject from '@/assets/chat/object.svg'
-import IconSearch from '@/assets/chat/search.svg'
 import Markdown from '@/components/markdown'
 import '@/components/markdown/index.scss'
 import { getDocumentPreviewUrl } from '@/api/repository'
 import { userState } from '@/store/user'
-import { Button, Drawer, Input, Tooltip, message } from 'antd'
-import { useCallback, useMemo, useState } from 'react'
+import { Button, Drawer, message } from 'antd'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useSnapshot } from 'valtio'
 import styles from './citations.module.scss'
 
@@ -14,6 +11,12 @@ interface MetaDetail {
   label: string
   value: string | number
   hint?: string
+}
+
+type CitationsProps = {
+  list?: API.Reference[]
+  activeReference?: API.Reference | null
+  onActiveReferenceChange?: (value: API.Reference | null) => void
 }
 
 const isNumberArray = (value: unknown): value is number[] =>
@@ -38,6 +41,17 @@ const extractFirstBBox = (
   return null
 }
 
+const buildReferenceIdentity = (item: API.Reference | null | undefined): string => {
+  if (!item) return ''
+  if (item.id) return `id:${item.id}`
+  if (item.chunk_id) return `chunk:${item.chunk_id}`
+  const snippet = String(item.snippet || item.source_text || item.content_with_weight || '').slice(
+    0,
+    80,
+  )
+  return `doc:${item.document_id ?? ''}|page:${item.page ?? ''}|snippet:${snippet}`
+}
+
 function CitationsItem(props: {
   item: API.Reference
   index: number
@@ -55,19 +69,6 @@ function CitationsItem(props: {
 
   return (
     <div className={styles['citations__item']}>
-      <div className={styles['actions']}>
-        <Tooltip
-          classNames={{
-            root: styles['citations-tooltip'],
-          }}
-          title="Drill-down"
-        >
-          <Button color="primary" variant="text" shape="circle" size="small">
-            <img src={IconObject} />
-          </Button>
-        </Tooltip>
-      </div>
-
       <div className={styles['header']}>
         <div className={styles['name']} title={item.document_name || item.document_id}>
           {item.document_name || `文档 ${item.document_id ?? '-'}`}
@@ -94,11 +95,38 @@ function CitationsItem(props: {
   )
 }
 
-export default function Citations(props: { list?: API.Reference[] }) {
-  const { list } = props
+export default function Citations(props: CitationsProps) {
+  const { list, activeReference, onActiveReferenceChange } = props
 
-  const [read, setRead] = useState<API.Reference | null>(null)
+  const isControlled =
+    activeReference !== undefined || typeof onActiveReferenceChange === 'function'
+  const [localRead, setLocalRead] = useState<API.Reference | null>(null)
+  const read = isControlled ? activeReference || null : localRead
+  const setRead = useCallback(
+    (next: API.Reference | null) => {
+      if (isControlled) {
+        onActiveReferenceChange?.(next)
+        return
+      }
+      setLocalRead(next)
+    },
+    [isControlled, onActiveReferenceChange],
+  )
   const user = useSnapshot(userState)
+
+  useEffect(() => {
+    if (!read) return
+    const entries = Array.isArray(list) ? list : []
+    if (!entries.length) {
+      setRead(null)
+      return
+    }
+    const key = buildReferenceIdentity(read)
+    const matched = entries.find((item) => buildReferenceIdentity(item) === key)
+    if (!matched) {
+      setRead(null)
+    }
+  }, [list, read, setRead])
 
   const debugDetails: MetaDetail[] = useMemo(() => {
     if (!read) return []
@@ -342,19 +370,7 @@ export default function Citations(props: { list?: API.Reference[] }) {
 
   return (
     <div className={styles['citations']}>
-      <div className={styles['citations__search']}>
-        <Input
-          placeholder="Search keywords in citations"
-          suffix={<img src={IconSearch} alt="search" />}
-        />
-
-        <Button color="default" variant="outlined">
-          <img src={IconFilter} />
-          Filter
-        </Button>
-      </div>
-
-      <div className={styles['citations__title']}>Selected citations</div>
+      <div className={styles['citations__title']}>当前回答引文</div>
 
       <div className={styles['citations__list']}>
         {list?.map((item, index) => (

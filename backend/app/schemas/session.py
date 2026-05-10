@@ -9,7 +9,7 @@ SessionSurface = Literal["deep_chat", "doc_studio"]
 class SessionDefaults(BaseModel):
     """会话级默认参数（可保存/回读）。"""
 
-    retrievalStrategy: Literal["multi_stage", "graph", "multimodal_graph"] = Field("multi_stage")
+    retrievalStrategy: Literal["multi_stage", "graph", "multimodal_graph"] = Field("multimodal_graph")
     rerankerStrategy: Literal["none", "supervised", "rl"] = Field("none")
     topK: int = Field(default_factory=lambda: getattr(settings, "SM_RAG_TOPK", 6), ge=1, le=50)
     language: Literal["zh", "en"] = Field("zh")

@@ -1,27 +1,8 @@
 .citations {
-  .citations__search {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-
-    :global {
-      .ant-input-affix-wrapper {
-        border-color: #999;
-        border-radius: 100px;
-      }
-
-      .ant-btn {
-        border-color: #999;
-        border-radius: 100px;
-        color: #999;
-      }
-    }
-  }
-
   .citations__title {
     color: #999;
     font-size: 12px;
-    margin-top: 18px;
+    margin-top: 0;
   }
 
   .citations__list {
@@ -34,14 +15,6 @@
       background-color: #ffffff;
       box-shadow: 0px 2px 8px 0px rgba(206, 215, 218, 0.251);
       border-radius: 12px;
-
-      .actions {
-        display: flex;
-        justify-content: flex-end;
-        padding: 0 4px;
-        padding-top: 4px;
-        margin-bottom: -4px;
-      }
 
       .header {
         display: flex;
@@ -107,18 +80,6 @@
           ) !important;
         }
       }
-    }
-  }
-}
-
-.citations-tooltip {
-  --antd-arrow-background-color: white;
-  --ant-color-bg-spotlight: white;
-  --ant-color-text-light-solid: #333;
-  :global {
-    .ant-tooltip-inner {
-      font-weight: bold;
-      border-radius: 12px;
     }
   }
 }

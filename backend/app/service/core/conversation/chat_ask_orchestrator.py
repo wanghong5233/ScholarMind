@@ -1703,6 +1703,52 @@ class ChatAskOrchestrator:
         replay_buffer = get_ask_stream_replay_buffer()
         run_state = replay_buffer.get_run(run_id)
         if not run_state:
+            run_control = get_ask_run_control()
+            pending_run = run_control.get_run(run_id)
+            if (
+                pending_run
+                and bool(pending_run.cancelled)
+                and str(pending_run.session_id) == str(session_id)
+                and int(pending_run.user_id) == int(self.current_user.id)
+            ):
+                def cancelled_gen():
+                    progress_payload = {
+                        "version": "v1",
+                        "type": "progress",
+                        "seq": 1,
+                        "run_id": run_id,
+                        "stage": "cancelled",
+                        "message": "已取消当前请求",
+                    }
+                    completion_payload = {
+                        "version": "v1",
+                        "type": "completion",
+                        "seq": 2,
+                        "run_id": run_id,
+                        "cancelled": True,
+                        "persisted": False,
+                        "answer": "",
+                        "citations": [],
+                        "usage": {
+                            "prompt_tokens": 0,
+                            "completion_tokens": 0,
+                            "total_tokens": 0,
+                        },
+                        "message_id": str(uuid.uuid4()),
+                    }
+                    yield (
+                        "event: progress\n"
+                        f"data: {json.dumps(progress_payload, ensure_ascii=False)}\n\n"
+                    )
+                    yield (
+                        "event: completion\n"
+                        f"data: {json.dumps(completion_payload, ensure_ascii=False)}\n\n"
+                    )
+
+                return StreamingResponse(
+                    cancelled_gen(),
+                    media_type="text/event-stream; charset=utf-8",
+                )
             raise HTTPException(status_code=404, detail="run_id 不存在或已过期")
         if str(run_state.session_id) != str(session_id):
             raise HTTPException(status_code=404, detail="run_id 不属于该会话")
