@@ -295,7 +295,8 @@ class LLMClient:
             model_name = str((custom or {}).get("model") or "").strip()
             return [model_name] if model_name else []
         candidates: List[str] = []
-        model_override = (llm_options or {}).get("llm_model")
+        custom_override = self._extract_custom_llm_override(llm_options)
+        model_override = None if custom_override else (llm_options or {}).get("llm_model")
         if model_override and self._model_matches_provider(str(model_override), normalized):
             candidates.append(str(model_override).strip())
         candidates.extend(self._configured_models_for_provider(normalized))

@@ -313,9 +313,10 @@ class LLMClient:
             ]
             if not normalized_runtime.get("allow_fallback"):
                 return candidates
+            fallback_provider_hint = provider if provider in {"openai", "dashscope", "local"} else None
             fallback_candidates = self._fallback_candidates(
-                provider=provider,
-                model=model,
+                provider=fallback_provider_hint,
+                model=None,
                 runtime_config=None,
             )
             seen = {("custom", primary_model)}
