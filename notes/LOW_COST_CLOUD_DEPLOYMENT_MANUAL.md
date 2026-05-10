@@ -166,6 +166,25 @@ cd scholarmind/backend
 cp .env.production.example .env.production
 ```
 
+### 4.0 NLTK 数据预置（首次部署 / 新增 ECS 必做）
+
+> 经验：`llama-index-core` 在启动时会自动 `nltk.download('punkt_tab' / 'stopwords')`，目标地址 `raw.githubusercontent.com` 在 ECS 不可达（无 VPN/代理）。运行时下载会阻塞 uvicorn 启动 → `/health` Connection refused → 容器永远 `unhealthy`。
+>
+> 解决方式遵循 6.1 / 10.2 节"不在 Docker build 阶段下网络资源"的不变量：把 NLTK 数据当成持久化资源放在 host，由 compose volume 注入容器。脚本走国内 CDN（jsDelivr → ghproxy 系列）多镜像 fallback。
+
+```bash
+sudo mkdir -p /opt/data/nltk_data
+sudo chown -R $USER:$USER /opt/data/nltk_data
+bash /opt/apps/scholarmind/backend/scripts/prepare_nltk_data.sh /opt/data/nltk_data
+ls /opt/data/nltk_data/tokenizers   # 应看到 punkt/ punkt_tab/
+ls /opt/data/nltk_data/corpora      # 应看到 stopwords/ wordnet/
+```
+
+`docker-compose.prod.yml` 已声明该挂载（默认路径 `/opt/data/nltk_data`），如自定义则在 `.env.production` 设置 `SM_NLTK_DATA_ROOT`。
+
+更新代码后再次重建容器（`up -d --force-recreate`）不会触发任何 NLTK 下载，因为容器层 `/usr/local/nltk_data` 由 host 注入，不依赖镜像内文件。
+
+
 `.env.production` 必填：
 
 - `JWT_SECRET_KEY`
@@ -463,7 +482,8 @@ networks:
 | Docker Hub 超时 | 配置 Docker daemon `registry-mirrors` 后再拉基础镜像和第三方镜像 |
 | APT 长时间无输出 | 生产 Dockerfile 显式配置国内 Debian / Ubuntu 镜像源 |
 | PyPI wheel 查找失败 | 先排查镜像源和网络，不直接判断依赖版本不存在 |
-| 外部数据下载卡住 | 不在 Docker build 阶段下载 NLTK、模型权重、parser 数据等非必要资源 |
+| 外部数据下载卡住 | 不在 Docker build 阶段下载 NLTK、模型权重、parser 数据等非必要资源；走 host 目录 + compose volume 注入（见 4.0 节）|
+| 第三方库运行时静默 nltk.download | 镜像保持 `NLTK_DATA=/usr/local/nltk_data` 空目录由 host 注入；新增第三方库前先 `grep -R "nltk.download" venv/` 评估隐式联网行为 |
 | 长构建不可见 | 使用前台 `docker compose build`；SSH 不稳定时用 `tmux` 保持同一个前台会话 |
 | 小内存构建 | 2C2G 主机必须配置 swap，API worker=1，重服务默认关闭 |
 
@@ -597,3 +617,6 @@ networks:
 - 401 跳登录循环：检查 Vercel API base URL 和 CORS
 - OOM：确认 swap、worker=1、日志限额、上传限制
 - tunnel 不通：检查 `CF_TUNNEL_TOKEN` 是否过期，cloudflared 日志是否鉴权失败
+- `scholarmind_api` 启动后 `unhealthy`，日志卡在 `[nltk_data] Downloading package ...`：
+  - 根因：第三方库（llama-index 等）在 import 时静默 `nltk.download`，ECS 无 VPN → 卡死阻塞 uvicorn 启动
+  - 解法：执行 4.0 节 NLTK 数据预置，再 `up -d --no-deps --force-recreate scholarmind_api`

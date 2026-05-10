@@ -1,0 +1,9 @@
+# Force LF for shell scripts and dotfiles consumed by Linux containers / ECS,
+# regardless of contributor's core.autocrlf setting. CRLF here would cause
+# `bash: $'\r': command not found` on ECS.
+*.sh           text eol=lf
+*.bash         text eol=lf
+Dockerfile*    text eol=lf
+*.yml          text eol=lf
+*.yaml         text eol=lf
+.env*          text eol=lf
