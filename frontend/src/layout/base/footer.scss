@@ -76,6 +76,11 @@
     align-items: center;
     justify-content: center;
     cursor: pointer;
+    transition: background-color 0.2s ease;
+
+    &:hover {
+      background: #eef2f7;
+    }
   }
 
   .base-layout-footer__more {
@@ -91,5 +96,26 @@
       background-color: #e8eaed;
       color: #2d333b;
     }
+  }
+
+}
+
+.base-layout-footer__user-menu-overlay {
+  .ant-dropdown-menu {
+    border-radius: 12px;
+    border: 1px solid #e6ebf2;
+    box-shadow: 0 10px 30px rgba(16, 24, 40, 0.12);
+    min-width: 220px;
+    padding: 6px;
+  }
+
+  .ant-dropdown-menu-item,
+  .ant-dropdown-menu-submenu-title {
+    border-radius: 8px;
+    font-size: 13px;
+  }
+
+  .ant-dropdown-menu-item-disabled {
+    opacity: 0.75;
   }
 }

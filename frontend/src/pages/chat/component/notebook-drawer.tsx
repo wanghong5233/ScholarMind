@@ -28,7 +28,7 @@ import styles from './notebook-drawer.module.scss'
 const { Text } = Typography
 
 const NOTEBOOK_MAX_LIST = 100
-const IDEAGEN_DISABLED_TIP = 'IdeaGen 功能暂时关闭，后续开放'
+const IDEAGEN_DISABLED_TIP = 'IdeaGen 功能正在开发中，当前版本暂未开放，敬请期待。'
 
 type NotebookNoteEntry = {
   id: string

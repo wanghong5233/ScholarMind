@@ -9,6 +9,7 @@ import Chat from '@/pages/chat'
 import Index from '@/pages/index'
 import Login from '@/pages/login'
 import Repository from '@/pages/repository'
+import SettingsPage from '@/pages/settings'
 import DemoEntryPage from '@/pages/demo-entry'
 import ParseDebugPage from '@/pages/debug/parse'
 import RetrievalDebugPage from '@/pages/debug/retrieval'
@@ -72,6 +73,10 @@ export const routes: IRouteObject[] = [
   {
     path: '/repository/:kbId/online-import',
     Component: RepositoryOnlineImport,
+  },
+  {
+    path: '/settings',
+    Component: SettingsPage,
   },
   ...(ENABLE_ADMIN_UI
     ? [

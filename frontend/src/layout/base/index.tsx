@@ -20,7 +20,7 @@ import { Nav } from './nav'
 
 const TITLE = import.meta.env.VITE_TITLE || 'ScholarMind'
 const IDEAGEN_TEMP_DISABLED = true
-const IDEAGEN_DISABLED_TIP = 'IdeaGen 功能暂时关闭，后续开放'
+const IDEAGEN_DISABLED_TIP = 'IdeaGen 功能正在开发中，当前版本暂未开放，敬请期待。'
 
 export function BaseLayout({ children }: { children?: React.ReactNode }) {
   const navigate = useNavigate()

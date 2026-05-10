@@ -1,7 +1,7 @@
 import { sessionActions } from '@/store/session'
 import { userActions, userState } from '@/store/user'
 import { buildLoginPath } from '@/utils/auth'
-import { MoreOutlined } from '@ant-design/icons'
+import { LogoutOutlined, MoreOutlined, UserOutlined } from '@ant-design/icons'
 import { Avatar, Button, Dropdown, type MenuProps } from 'antd'
 import { useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
@@ -17,6 +17,13 @@ export function Footer() {
       ? '/chat'
       : `${window.location.pathname}${window.location.search || ''}`
 
+  const handleLogout = () => {
+    userActions.clear()
+    sessionActions.clear()
+    window.$app.message.success('已退出登录')
+    navigate('/chat', { replace: true })
+  }
+
   const menuItems = useMemo<MenuProps['items']>(
     () => [
       {
@@ -26,7 +33,14 @@ export function Footer() {
       },
       { type: 'divider' },
       {
+        key: 'user_center',
+        icon: <UserOutlined />,
+        label: '用户中心',
+      },
+      { type: 'divider' },
+      {
         key: 'logout',
+        icon: <LogoutOutlined />,
         label: '退出登录',
         danger: true,
       },
@@ -35,11 +49,13 @@ export function Footer() {
   )
 
   const handleMenuClick: MenuProps['onClick'] = ({ key }) => {
-    if (key !== 'logout') return
-    userActions.clear()
-    sessionActions.clear()
-    window.$app.message.success('已退出登录')
-    navigate('/chat', { replace: true })
+    if (key === 'user_center') {
+      navigate('/settings?section=account')
+      return
+    }
+    if (key === 'logout') {
+      handleLogout()
+    }
   }
 
   if (!user.token) {
@@ -76,6 +92,7 @@ export function Footer() {
         <Dropdown
           placement="topRight"
           trigger={['click']}
+          overlayClassName="base-layout-footer__user-menu-overlay"
           menu={{
             items: menuItems,
             onClick: handleMenuClick,

@@ -16,7 +16,6 @@ import {
   Select,
   Space,
   Spin,
-  Switch,
   Tabs,
   Tag,
   Timeline,
@@ -113,13 +112,18 @@ import {
 } from '@/api/session'
 import { NOTEBOOK_LOCKED_PATHS, NOTEBOOK_WORKSPACE_ID } from '@/utils/notebook'
 import {
+  CUSTOM_LLM_LEGACY_STORAGE_KEY,
+  CUSTOM_LLM_STORAGE_KEY,
+  CUSTOM_LLM_PROFILES_UPDATED_EVENT,
   CUSTOM_LLM_OPTION_VALUE,
   type CustomLlmProfile,
+  findCustomLlmProfileByOptionValue,
   isCustomLlmProfileReady,
-  loadCustomLlmProfile,
+  isCustomLlmOptionValue,
+  loadCustomLlmProfiles,
   resolveCustomModelOptionLabel,
-  saveCustomLlmProfile,
   toCustomLlmPayload,
+  toCustomLlmOptionValue,
 } from '@/utils/custom-llm'
 import { docStudioActions, docStudioState, type DocStudioChatMessage } from '@/store/docStudio'
 import './index.scss'
@@ -697,14 +701,6 @@ type LiveTimelineEntry = {
   timestamp: number
 }
 
-type CustomLlmFormValues = {
-  providerLabel?: string
-  baseUrl: string
-  model: string
-  apiKey: string
-  allowFallback?: boolean
-}
-
 const MAX_CHAT_IMAGE_COUNT = 4
 const MAX_CHAT_IMAGE_FILE_SIZE = 6 * 1024 * 1024 // 6MB
 const MAX_SELECTION_COUNT = 8
@@ -875,7 +871,7 @@ const normalizeLlmProvider = (value: unknown): LlmProviderValue => {
 
 const resolveProviderByModel = (value: unknown): LlmProviderValue => {
   if (typeof value === 'string') {
-    if (value === CUSTOM_LLM_OPTION_VALUE) return 'openai'
+    if (isCustomLlmOptionValue(value)) return 'openai'
     return LLM_MODEL_OPTION_MAP.get(value)?.provider || 'dashscope'
   }
   return 'dashscope'
@@ -888,7 +884,7 @@ const defaultVisionModelByProvider = (provider: LlmProviderValue): LlmModelValue
   provider === 'openai' ? DEFAULT_OPENAI_VISION_MODEL : DEFAULT_DASHSCOPE_VISION_MODEL
 
 const isVisionModel = (value: string) =>
-  value === CUSTOM_LLM_OPTION_VALUE ? false : Boolean(LLM_MODEL_OPTION_MAP.get(value)?.isVision)
+  isCustomLlmOptionValue(value) ? false : Boolean(LLM_MODEL_OPTION_MAP.get(value)?.isVision)
 
 const resolveModelLabel = (value: string) => LLM_MODEL_OPTION_MAP.get(value)?.label || value
 
@@ -1078,30 +1074,39 @@ const LatexEditorPage = () => {
   const [latexPreviewBlobUrl, setLatexPreviewBlobUrl] = useState('')
   const [latexPreviewLoading, setLatexPreviewLoading] = useState(false)
   const [latexPreviewError, setLatexPreviewError] = useState('')
-  const [customLlmProfile, setCustomLlmProfile] = useState<CustomLlmProfile | null>(() =>
-    loadCustomLlmProfile(),
+  const [customLlmProfiles, setCustomLlmProfiles] = useState<CustomLlmProfile[]>(() =>
+    loadCustomLlmProfiles(),
   )
-  const [customLlmModalOpen, setCustomLlmModalOpen] = useState(false)
-  const [customLlmForm] = Form.useForm<CustomLlmFormValues>()
   const [llmModel, setLlmModel] = useState<LlmModelValue>(DEFAULT_OPENAI_MODEL)
   const [llmModelCatalog, setLlmModelCatalog] = useState<LlmModelCatalog | null>(null)
   const [llmModelCatalogLoading, setLlmModelCatalogLoading] = useState(false)
   const llmModelOptions = useMemo(() => {
     const options = buildLlmModelOptionsFromCatalog(llmModelCatalog)
-    const customLabel = resolveCustomModelOptionLabel(customLlmProfile)
-    return [
-      ...options,
-      {
-        label: customLabel,
+    const customOptions = customLlmProfiles.filter((profile) => profile.enabled).map((profile) => {
+      const ready = isCustomLlmProfileReady(profile)
+      return {
+        label: resolveCustomModelOptionLabel(profile),
+        value: toCustomLlmOptionValue(profile.id),
+        provider: 'openai' as const,
+        isVision: false,
+        available: ready,
+        status: ready ? 'available' : 'pending',
+        reason: ready ? null : '该模型未启用或配置不完整，请前往用户中心修复',
+      }
+    })
+    if (customOptions.length === 0) {
+      customOptions.push({
+        label: '自定义模型（请在用户中心新增）',
         value: CUSTOM_LLM_OPTION_VALUE,
         provider: 'openai' as const,
         isVision: false,
-        available: isCustomLlmProfileReady(customLlmProfile),
-        status: isCustomLlmProfileReady(customLlmProfile) ? 'available' : 'pending',
-        reason: isCustomLlmProfileReady(customLlmProfile) ? null : '需在模型设置中填写 API Key 与 Base URL',
-      },
-    ]
-  }, [customLlmProfile, llmModelCatalog])
+        available: false,
+        status: 'pending',
+        reason: '请先在用户中心新增至少一个自定义模型',
+      })
+    }
+    return [...options, ...customOptions]
+  }, [customLlmProfiles, llmModelCatalog])
   const llmModelOptionMap = useMemo(
     () => new Map<string, LlmModelOption>(llmModelOptions.map((item) => [item.value, item])),
     [llmModelOptions],
@@ -1117,7 +1122,7 @@ const LatexEditorPage = () => {
       const matched = llmModelOptions.find(
         (item) =>
           item.provider === provider &&
-          item.value !== CUSTOM_LLM_OPTION_VALUE &&
+          !isCustomLlmOptionValue(item.value) &&
           !item.isVision &&
           item.available !== false,
       )
@@ -1139,7 +1144,7 @@ const LatexEditorPage = () => {
   const resolveRuntimeProviderByModel = useCallback(
     (value: unknown): LlmProviderValue => {
       if (typeof value === 'string') {
-        if (value === CUSTOM_LLM_OPTION_VALUE) return 'openai'
+        if (isCustomLlmOptionValue(value)) return 'openai'
         return llmModelOptionMap.get(value)?.provider || resolveProviderByModel(value)
       }
       return normalizeLlmProvider(llmModelCatalog?.preferredProvider)
@@ -1148,7 +1153,7 @@ const LatexEditorPage = () => {
   )
   const normalizeRuntimeLlmModel = useCallback(
     (value: unknown, providerHint?: unknown): LlmModelValue => {
-      if (value === CUSTOM_LLM_OPTION_VALUE) return CUSTOM_LLM_OPTION_VALUE
+      if (isCustomLlmOptionValue(value)) return String(value)
       if (typeof value === 'string' && llmModelSet.has(value)) {
         const option = llmModelOptionMap.get(value)
         if (option?.available !== false) return value
@@ -1168,7 +1173,7 @@ const LatexEditorPage = () => {
   )
   const isRuntimeVisionModel = useCallback(
     (value: string) =>
-      value === CUSTOM_LLM_OPTION_VALUE
+      isCustomLlmOptionValue(value)
         ? false
         : Boolean(llmModelOptionMap.get(value)?.isVision ?? isVisionModel(value)),
     [llmModelOptionMap],
@@ -1311,7 +1316,7 @@ const LatexEditorPage = () => {
           nextOptions.find((item) => item.available !== false && !item.isVision)?.value ||
           DEFAULT_OPENAI_MODEL
         setLlmModel((current) => {
-          if (current === CUSTOM_LLM_OPTION_VALUE) return current
+          if (isCustomLlmOptionValue(current)) return current
           const option = nextMap.get(current)
           if (option && option.available !== false) return current
           if (nextSet.has(fallback)) return fallback
@@ -1340,13 +1345,43 @@ const LatexEditorPage = () => {
     localStorage.setItem('doc_studio_llm_options', JSON.stringify(payload))
   }, [interactionMode, llmModel, resolveRuntimeProviderByModel])
 
+  const syncCustomLlmProfiles = useCallback(() => {
+    setCustomLlmProfiles(loadCustomLlmProfiles())
+  }, [])
+
   useEffect(() => {
-    saveCustomLlmProfile(customLlmProfile)
-  }, [customLlmProfile])
+    if (typeof window === 'undefined') return
+    const onStorage = (event: StorageEvent) => {
+      if (
+        event.key &&
+        event.key !== CUSTOM_LLM_STORAGE_KEY &&
+        event.key !== CUSTOM_LLM_LEGACY_STORAGE_KEY
+      ) {
+        return
+      }
+      syncCustomLlmProfiles()
+    }
+    const onProfilesUpdated = () => {
+      syncCustomLlmProfiles()
+    }
+    window.addEventListener('storage', onStorage)
+    window.addEventListener(CUSTOM_LLM_PROFILES_UPDATED_EVENT, onProfilesUpdated)
+    return () => {
+      window.removeEventListener('storage', onStorage)
+      window.removeEventListener(CUSTOM_LLM_PROFILES_UPDATED_EVENT, onProfilesUpdated)
+    }
+  }, [syncCustomLlmProfiles])
+
+  useEffect(() => {
+    if (!isCustomLlmOptionValue(llmModel)) return
+    const profile = findCustomLlmProfileByOptionValue(customLlmProfiles, llmModel)
+    if (profile && profile.enabled && isCustomLlmProfileReady(profile)) return
+    setLlmModel(defaultRuntimeModelByProvider('openai'))
+  }, [customLlmProfiles, defaultRuntimeModelByProvider, llmModel])
 
   const llmOptions = useMemo(() => {
-    const customPayload =
-      llmModel === CUSTOM_LLM_OPTION_VALUE ? toCustomLlmPayload(customLlmProfile) : undefined
+    const selectedCustomProfile = findCustomLlmProfileByOptionValue(customLlmProfiles, llmModel)
+    const customPayload = toCustomLlmPayload(selectedCustomProfile)
     const provider = resolveRuntimeProviderByModel(llmModel)
     return {
       llm_provider: provider,
@@ -1354,7 +1389,7 @@ const LatexEditorPage = () => {
       interaction_mode: interactionMode,
       llm_custom: customPayload,
     }
-  }, [customLlmProfile, interactionMode, llmModel, resolveRuntimeProviderByModel])
+  }, [customLlmProfiles, interactionMode, llmModel, resolveRuntimeProviderByModel])
 
   const llmOptionsConfig = useMemo(() => {
     const provider = resolveRuntimeProviderByModel(llmModel)
@@ -1391,31 +1426,8 @@ const LatexEditorPage = () => {
   )
 
   const openCustomLlmSettings = useCallback(() => {
-    customLlmForm.setFieldsValue({
-      providerLabel: customLlmProfile?.providerLabel || '自定义模型',
-      baseUrl: customLlmProfile?.baseUrl || '',
-      model: customLlmProfile?.model || '',
-      apiKey: customLlmProfile?.apiKey || '',
-      allowFallback: Boolean(customLlmProfile?.allowFallback),
-    })
-    setCustomLlmModalOpen(true)
-  }, [customLlmForm, customLlmProfile])
-
-  const handleSaveCustomLlmSettings = useCallback(async () => {
-    const values = await customLlmForm.validateFields()
-    const nextProfile: CustomLlmProfile = {
-      enabled: true,
-      providerType: 'openai_compatible',
-      providerLabel: String(values.providerLabel || '').trim() || '自定义模型',
-      baseUrl: String(values.baseUrl || '').trim().replace(/\/+$/, ''),
-      model: String(values.model || '').trim(),
-      apiKey: String(values.apiKey || '').trim(),
-      allowFallback: Boolean(values.allowFallback),
-    }
-    setCustomLlmProfile(nextProfile)
-    setCustomLlmModalOpen(false)
-    message.success('自定义模型配置已保存')
-  }, [customLlmForm])
+    navigate('/settings?section=models')
+  }, [navigate])
 
   useEffect(() => {
     setLlmOptionsReady(false)
@@ -1659,13 +1671,17 @@ const LatexEditorPage = () => {
   const handleLlmModelSelectChange = useCallback(
     (value: string) => {
       const normalized = normalizeRuntimeLlmModel(value)
-      setLlmModel(normalized)
-      if (normalized === CUSTOM_LLM_OPTION_VALUE && !isCustomLlmProfileReady(customLlmProfile)) {
-        message.warning('请先在模型设置中完成自定义模型配置')
-        openCustomLlmSettings()
+      if (isCustomLlmOptionValue(normalized)) {
+        const profile = findCustomLlmProfileByOptionValue(customLlmProfiles, normalized)
+        if (!profile || !profile.enabled || !isCustomLlmProfileReady(profile)) {
+          message.warning('该自定义模型不可用，请前往用户中心检查配置')
+          openCustomLlmSettings()
+          return
+        }
       }
+      setLlmModel(normalized)
     },
-    [customLlmProfile, normalizeRuntimeLlmModel, openCustomLlmSettings],
+    [customLlmProfiles, normalizeRuntimeLlmModel, openCustomLlmSettings],
   )
   const ragSelectWidth = useMemo(() => {
     const label = selectedKnowledgeBase?.name || '知识库'
@@ -6309,11 +6325,11 @@ const LatexEditorPage = () => {
       }))
     }
 
-    const customLlmPayload =
-      llmModel === CUSTOM_LLM_OPTION_VALUE ? toCustomLlmPayload(customLlmProfile) : undefined
-    const usingCustomModel = llmModel === CUSTOM_LLM_OPTION_VALUE
+    const selectedCustomProfile = findCustomLlmProfileByOptionValue(customLlmProfiles, llmModel)
+    const customLlmPayload = toCustomLlmPayload(selectedCustomProfile)
+    const usingCustomModel = isCustomLlmOptionValue(llmModel)
     if (usingCustomModel && !customLlmPayload) {
-      message.warning('当前已选择自定义模型，但尚未完成 API 配置')
+      message.warning('当前选择的自定义模型不可用，请前往用户中心检查配置')
       openCustomLlmSettings()
       return
     }
@@ -8976,16 +8992,16 @@ const LatexEditorPage = () => {
                             loading={llmModelCatalogLoading}
                             options={llmModelOptions.map((item) => ({
                               label:
-                                item.available === false && item.value !== CUSTOM_LLM_OPTION_VALUE
+                                item.available === false && !isCustomLlmOptionValue(item.value)
                                   ? `${item.label}（不可用）`
                                   : item.label,
                               value: item.value,
                               disabled:
-                                item.available === false && item.value !== CUSTOM_LLM_OPTION_VALUE,
+                                item.available === false && !isCustomLlmOptionValue(item.value),
                             }))}
                             onChange={(value) => handleLlmModelSelectChange(String(value))}
                           />
-                          <Tooltip title="模型设置（含自定义模型 API Key）">
+                          <Tooltip title="前往用户中心管理自定义模型">
                             <Button
                               size="small"
                               type="text"
@@ -9478,71 +9494,6 @@ const LatexEditorPage = () => {
                 会自动按文件夹名创建工作区，并保留目录结构导入全部文件。
               </Text>
             </Space>
-          </Form.Item>
-        </Form>
-      </Modal>
-      <Modal
-        title="模型设置"
-        open={customLlmModalOpen}
-        onCancel={() => setCustomLlmModalOpen(false)}
-        onOk={() => {
-          void handleSaveCustomLlmSettings()
-        }}
-        okText="保存"
-        cancelText="取消"
-        destroyOnClose
-        width={620}
-      >
-        <Typography.Paragraph type="secondary" style={{ marginBottom: 16 }}>
-          使用 OpenAI-Compatible 协议接入自定义模型。配置仅保存在当前浏览器，本系统不会在工作区配置中落盘 API Key。
-        </Typography.Paragraph>
-        <Form form={customLlmForm} layout="vertical">
-          <Form.Item
-            name="providerLabel"
-            label="提供方名称"
-            tooltip="仅用于前端展示，例如 OpenRouter / DeepSeek / vLLM"
-          >
-            <Input placeholder="例如：OpenRouter" maxLength={80} />
-          </Form.Item>
-          <Form.Item
-            name="baseUrl"
-            label="Base URL"
-            rules={[
-              { required: true, message: '请输入 Base URL' },
-              {
-                validator: async (_, value) => {
-                  const text = String(value || '').trim()
-                  if (!text) return
-                  if (!/^https?:\/\//i.test(text)) {
-                    return Promise.reject(new Error('Base URL 需以 http:// 或 https:// 开头'))
-                  }
-                },
-              },
-            ]}
-          >
-            <Input placeholder="https://api.example.com/v1" />
-          </Form.Item>
-          <Form.Item
-            name="model"
-            label="模型 ID"
-            rules={[{ required: true, message: '请输入模型 ID' }]}
-          >
-            <Input placeholder="例如：gpt-4.1-mini / deepseek-chat / qwen3-32b" />
-          </Form.Item>
-          <Form.Item
-            name="apiKey"
-            label="API Key"
-            rules={[{ required: true, message: '请输入 API Key' }]}
-          >
-            <Input.Password placeholder="输入 API Key" autoComplete="off" />
-          </Form.Item>
-          <Form.Item
-            name="allowFallback"
-            label="失败时自动回退平台模型"
-            valuePropName="checked"
-            tooltip="关闭时将严格使用自定义模型，失败即报错；开启时会按系统策略尝试回退。"
-          >
-            <Switch />
           </Form.Item>
         </Form>
       </Modal>
