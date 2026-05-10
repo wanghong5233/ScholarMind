@@ -404,6 +404,20 @@ class LLMClient:
                 return any(marker in text for marker in markers)
         return False
 
+    @classmethod
+    def _is_provider_connectivity_error(cls, exc: BaseException) -> bool:
+        # Reachability problem with the provider host itself (DNS / TCP /
+        # TLS / read timeout / 5xx gateway). When this happens, every other
+        # model on the same provider would just hit the same wall, so we
+        # short-circuit the whole provider for this request to avoid wasting
+        # `len(models) * timeout_secs` of wall time.
+        if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError)):
+            return True
+        if isinstance(exc, httpx.HTTPStatusError):
+            if exc.response.status_code in {502, 503, 504}:
+                return True
+        return False
+
     @staticmethod
     def _summarize_candidate_error(
         provider: str,
@@ -544,7 +558,10 @@ class LLMClient:
         )
         runtime_profile = self._normalize_runtime_config(runtime_config)
         custom_provider_label = str((runtime_profile or {}).get("provider_label") or "Custom")
+        skipped_providers: set[str] = set()
         for resolved_provider, base_url, api_key, model_name in candidates:
+            if resolved_provider in skipped_providers:
+                continue
             answer_parts: List[str] = []
             try:
                 if resolved_provider in ("dashscope", "openai", "custom"):
@@ -662,12 +679,20 @@ class LLMClient:
                 if answer_parts or not self._is_fallbackable_error(exc):
                     raise
                 errors.append(self._summarize_candidate_error(resolved_provider, model_name, exc))
-                logger.warning(
-                    "LLM stream candidate failed, trying fallback: %s/%s",
-                    resolved_provider,
-                    model_name,
-                    exc_info=True,
-                )
+                if self._is_provider_connectivity_error(exc):
+                    skipped_providers.add(resolved_provider)
+                    logger.warning(
+                        "LLM stream provider unreachable, short-circuiting %s for this request: %s",
+                        resolved_provider,
+                        type(exc).__name__,
+                    )
+                else:
+                    logger.warning(
+                        "LLM stream candidate failed, trying fallback: %s/%s",
+                        resolved_provider,
+                        model_name,
+                        exc_info=True,
+                    )
                 continue
         raise RuntimeError("All LLM fallback candidates failed: " + " | ".join(errors))
 
@@ -696,7 +721,10 @@ class LLMClient:
         )
         runtime_profile = self._normalize_runtime_config(runtime_config)
         custom_provider_label = str((runtime_profile or {}).get("provider_label") or "Custom")
+        skipped_providers: set[str] = set()
         for resolved_provider, base_url, api_key, model_name in candidates:
+            if resolved_provider in skipped_providers:
+                continue
             try:
                 if resolved_provider in ("dashscope", "openai", "custom"):
                     if not base_url or not api_key:
@@ -789,12 +817,20 @@ class LLMClient:
                 if not self._is_fallbackable_error(exc):
                     raise
                 errors.append(self._summarize_candidate_error(resolved_provider, model_name, exc))
-                logger.warning(
-                    "LLM candidate failed, trying fallback: %s/%s",
-                    resolved_provider,
-                    model_name,
-                    exc_info=True,
-                )
+                if self._is_provider_connectivity_error(exc):
+                    skipped_providers.add(resolved_provider)
+                    logger.warning(
+                        "LLM provider unreachable, short-circuiting %s for this request: %s",
+                        resolved_provider,
+                        type(exc).__name__,
+                    )
+                else:
+                    logger.warning(
+                        "LLM candidate failed, trying fallback: %s/%s",
+                        resolved_provider,
+                        model_name,
+                        exc_info=True,
+                    )
                 continue
         raise RuntimeError("All LLM fallback candidates failed: " + " | ".join(errors))
 

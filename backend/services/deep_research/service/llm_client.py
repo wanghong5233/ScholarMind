@@ -7,10 +7,22 @@ from typing import Any, Callable, Dict, List, Optional
 
 import logging
 
-from openai import AsyncOpenAI
+import httpx
+from openai import APIConnectionError, APITimeoutError, AsyncOpenAI
 
 from core.config import settings
 from service.llm_policy_adapter import get_policy_resolver
+
+
+def _is_provider_connectivity_error(exc: BaseException) -> bool:
+    if isinstance(exc, (APIConnectionError, APITimeoutError)):
+        return True
+    if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError)):
+        return True
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status in {502, 503, 504}:
+        return True
+    return False
 
 
 def _is_placeholder(value: Optional[str]) -> bool:
@@ -336,7 +348,10 @@ class LLMClient:
         sampled_temperature = resolved_policy.temperature
 
         last_exc: Optional[Exception] = None
+        skipped_providers: set[str] = set()
         for idx, endpoint in enumerate(self._endpoint_chain, start=1):
+            if endpoint.provider in skipped_providers:
+                continue
             try:
                 content = await self._generate_once(
                     endpoint=endpoint,
@@ -354,12 +369,20 @@ class LLMClient:
                 return content
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
-                self._logger.warning(
-                    "LLM endpoint failed (%s/%s): %s",
-                    endpoint.provider,
-                    endpoint.model_name,
-                    exc,
-                )
+                if _is_provider_connectivity_error(exc):
+                    skipped_providers.add(endpoint.provider)
+                    self._logger.warning(
+                        "LLM provider unreachable, short-circuiting %s for this request: %s",
+                        endpoint.provider,
+                        type(exc).__name__,
+                    )
+                else:
+                    self._logger.warning(
+                        "LLM endpoint failed (%s/%s): %s",
+                        endpoint.provider,
+                        endpoint.model_name,
+                        exc,
+                    )
                 continue
 
         if last_exc is not None:

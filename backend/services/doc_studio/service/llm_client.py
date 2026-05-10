@@ -12,13 +12,25 @@ import logging
 import os
 import json
 import time
-from openai import AsyncOpenAI
+import httpx
+from openai import APIConnectionError, APITimeoutError, AsyncOpenAI
 
 from core.config import settings
 from service.llm_policy_adapter import get_policy_resolver
 from utils.language import guess_language
 from utils.prompt_loader import load_prompt_bundle
 from metrics import record_llm_usage
+
+
+def _is_provider_connectivity_error(exc: BaseException) -> bool:
+    if isinstance(exc, (APIConnectionError, APITimeoutError)):
+        return True
+    if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError)):
+        return True
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    if status in {502, 503, 504}:
+        return True
+    return False
 
 logger = logging.getLogger(__name__)
 
@@ -730,6 +742,13 @@ class LLMClient:
                             raise
                         last_error = exc
                         self._mark_provider_failure(provider_key, exc)
+                        if _is_provider_connectivity_error(exc):
+                            logger.warning(
+                                "LLM provider unreachable, short-circuiting %s for this request: %s",
+                                provider_key,
+                                type(exc).__name__,
+                            )
+                            break
                         logger.warning(
                             "LLM candidate %s/%s failed: %s",
                             provider_key,
