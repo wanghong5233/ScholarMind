@@ -22,6 +22,7 @@ export interface AgentDiffReviewProps {
   filePath: string
   originalContent: string
   modifiedContent: string
+  theme?: 'light' | 'dark'
   /** 只读模式（如 Timeline 版本对比），不显示 Undo/Keep 按钮 */
   readOnly?: boolean
   /** 行内编辑：绿色内容可编辑，编辑后通过此回调更新 */
@@ -86,6 +87,7 @@ export const AgentDiffReview = forwardRef<AgentDiffReviewRef, AgentDiffReviewPro
       filePath,
       originalContent,
       modifiedContent,
+      theme = 'dark',
       readOnly = false,
       onModifiedContentChange,
       diffReverting = false,
@@ -263,7 +265,7 @@ export const AgentDiffReview = forwardRef<AgentDiffReviewRef, AgentDiffReviewPro
   return (
     <div
       ref={containerRef}
-      className="doc-studio__agent-diff-review doc-studio__agent-diff-review--full-file"
+      className={`doc-studio__agent-diff-review doc-studio__agent-diff-review--full-file doc-studio__agent-diff-review--${theme}`}
     >
       <Diff viewType="unified" diffType="modify" hunks={hunks}>
         {(renderedHunks: ParsedHunk[]) => {

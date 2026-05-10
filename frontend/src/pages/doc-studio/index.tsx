@@ -16,7 +16,6 @@ import {
   Select,
   Space,
   Spin,
-  Switch,
   Tabs,
   Tag,
   Timeline,
@@ -73,6 +72,7 @@ import {
   compileWorkspace,
   createFileOrDirectory,
   createWorkspace,
+  deleteWorkspace,
   deleteFile,
   renameFileOrDirectory,
   getAgentAsyncEventsUrl,
@@ -672,6 +672,10 @@ type CompileLogGroup = {
   firstIndex: number
 }
 
+type CompileLogKeyGroup = CompileLogGroup & {
+  keyLines: string[]
+}
+
 type LiveTimelineLevel = 'info' | 'warning' | 'error'
 
 type LiveTimelineEntry = {
@@ -779,6 +783,7 @@ const MAX_MARKDOWN_FONT_SIZE = 22
 
 type MarkdownThemePreset = 'light' | 'dark'
 type MarkdownFontFamilyPreset = 'sans' | 'serif' | 'mono'
+type LatexPreviewFitMode = 'page' | 'width'
 type MarkdownSurfaceStyle = React.CSSProperties & {
   '--doc-markdown-font-size'?: string
   '--doc-markdown-font-family'?: string
@@ -789,7 +794,55 @@ const MARKDOWN_FONT_FAMILY_MAP: Record<MarkdownFontFamilyPreset, string> = {
     "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif",
   serif:
     "'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', 'STSong', 'Times New Roman', Georgia, serif",
-  mono: "'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace",
+  mono:
+    "'JetBrains Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, 'Noto Sans Mono CJK SC', 'Microsoft YaHei UI', monospace",
+}
+
+const COMPILE_WARNING_NOISE_PATTERNS: RegExp[] = [
+  /latex font warning/i,
+  /font shape .* undefined/i,
+  /font shape .* not available/i,
+  /package hyperref warning: rerun/i,
+  /latex warning: labels? may have changed/i,
+  /rerunfilecheck warning/i,
+  /unused global option/i,
+  /package extpstdif warning/i,
+  /missing character/i,
+]
+
+const COMPILE_WARNING_ACTIONABLE_PATTERNS: RegExp[] = [
+  /undefined references?/i,
+  /undefined citation/i,
+  /citation .* undefined/i,
+  /reference .* undefined/i,
+  /i didn't find a database entry/i,
+  /undefined control sequence/i,
+  /file .* not found/i,
+  /fatal error/i,
+  /emergency stop/i,
+  /missing \\begin/i,
+  /missing \\end/i,
+]
+
+const normalizeCompileMessage = (raw: string) => raw.replace(/\s+/g, ' ').trim()
+
+const isCompileErrorMessage = (raw: string) => {
+  const line = normalizeCompileMessage(raw)
+  if (!line) return false
+  return (
+    line.startsWith('!') ||
+    /\bfatal error\b/i.test(line) ||
+    /\berror\b/i.test(line) ||
+    /undefined control sequence/i.test(line)
+  )
+}
+
+const isActionableCompileWarningMessage = (raw: string) => {
+  const line = normalizeCompileMessage(raw)
+  if (!line) return false
+  if (COMPILE_WARNING_NOISE_PATTERNS.some((pattern) => pattern.test(line))) return false
+  if (COMPILE_WARNING_ACTIONABLE_PATTERNS.some((pattern) => pattern.test(line))) return true
+  return /\bwarning\b/i.test(line) && !/package .* warning: rerun/i.test(line)
 }
 
 const resolveMaxRightSiderWidth = (containerWidth: number, leftWidth: number) => {
@@ -938,6 +991,9 @@ const LatexEditorPage = () => {
   const [newWorkspaceName, setNewWorkspaceName] = useState('')
   const [newWorkspaceType, setNewWorkspaceType] = useState<'latex' | 'markdown'>('latex')
   const [workspaceSubmitting, setWorkspaceSubmitting] = useState(false)
+  const [workspaceDeleteModalOpen, setWorkspaceDeleteModalOpen] = useState(false)
+  const [workspaceDeleteConfirmInput, setWorkspaceDeleteConfirmInput] = useState('')
+  const [workspaceDeleteSubmitting, setWorkspaceDeleteSubmitting] = useState(false)
   const [fileModalOpen, setFileModalOpen] = useState(false)
   const [fileModalType, setFileModalType] = useState<'file' | 'directory'>('file')
   const [fileModalPath, setFileModalPath] = useState('')
@@ -959,6 +1015,8 @@ const LatexEditorPage = () => {
     const saved = localStorage.getItem('doc_studio_right_tab')
     return (saved === 'chat' || saved === 'history' || saved === 'compile') ? saved : 'chat'
   })
+  const [showVerboseCompileWarnings, setShowVerboseCompileWarnings] = useState(false)
+  const [showRawCompileLogs, setShowRawCompileLogs] = useState(false)
   const [rightPanelClosed, setRightPanelClosed] = useState(() => {
     if (typeof window === 'undefined') return false
     return localStorage.getItem('doc_studio_right_panel_closed') === 'true'
@@ -982,15 +1040,23 @@ const LatexEditorPage = () => {
     if (!Number.isFinite(saved)) return 15
     return Math.min(MAX_MARKDOWN_FONT_SIZE, Math.max(MIN_MARKDOWN_FONT_SIZE, Math.floor(saved)))
   })
-  const [markdownCentered, setMarkdownCentered] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return false
-    return localStorage.getItem('doc_studio_markdown_centered') === 'true'
-  })
   const [markdownCenterMode, setMarkdownCenterMode] = useState<'source' | 'preview'>(() => {
     if (typeof window === 'undefined') return 'preview'
     const saved = localStorage.getItem('doc_studio_markdown_center_mode')
     return saved === 'source' ? 'source' : 'preview'
   })
+  const [latexCenterMode, setLatexCenterMode] = useState<'source' | 'preview'>(() => {
+    if (typeof window === 'undefined') return 'source'
+    const saved = localStorage.getItem('doc_studio_latex_center_mode')
+    return saved === 'preview' ? 'preview' : 'source'
+  })
+  const [latexPreviewFitMode, setLatexPreviewFitMode] = useState<LatexPreviewFitMode>(() => {
+    if (typeof window === 'undefined') return 'width'
+    return localStorage.getItem('doc_studio_latex_preview_fit_mode') === 'page' ? 'page' : 'width'
+  })
+  const [latexPreviewBlobUrl, setLatexPreviewBlobUrl] = useState('')
+  const [latexPreviewLoading, setLatexPreviewLoading] = useState(false)
+  const [latexPreviewError, setLatexPreviewError] = useState('')
   const [llmModel, setLlmModel] = useState<LlmModelValue>(DEFAULT_OPENAI_MODEL)
   const [llmModelCatalog, setLlmModelCatalog] = useState<LlmModelCatalog | null>(null)
   const [llmModelCatalogLoading, setLlmModelCatalogLoading] = useState(false)
@@ -1375,8 +1441,9 @@ const LatexEditorPage = () => {
   const compileActionTitle = useMemo(() => {
     if (isPlaintextActiveFile) return 'TXT 文件无需编译'
     if (isMarkdownActiveFile) return '编译 Markdown'
+    if (isLatexWorkspace) return '编译并刷新 LaTeX 预览'
     return '编译'
-  }, [isMarkdownActiveFile, isPlaintextActiveFile])
+  }, [isLatexWorkspace, isMarkdownActiveFile, isPlaintextActiveFile])
 
   const isNotebookWorkspace = useMemo(() => {
     const workspaceType = String(
@@ -1563,6 +1630,86 @@ const LatexEditorPage = () => {
     })
     return grouped.map(({ signature: _signature, ...rest }) => rest)
   }, [snap.compileResult?.data?.logs])
+  const compileErrors = useMemo(() => {
+    const raw = (snap.compileResult?.data?.errors || []).map((item) =>
+      normalizeCompileMessage(String(item || '')),
+    )
+    const deduped: string[] = []
+    raw.forEach((item) => {
+      if (item && !deduped.includes(item)) {
+        deduped.push(item)
+      }
+    })
+    return deduped
+  }, [snap.compileResult?.data?.errors])
+  const compileWarningsAll = useMemo(() => {
+    const raw = (snap.compileResult?.data?.warnings || []).map((item) =>
+      normalizeCompileMessage(String(item || '')),
+    )
+    const deduped: string[] = []
+    raw.forEach((item) => {
+      if (item && !deduped.includes(item)) {
+        deduped.push(item)
+      }
+    })
+    return deduped
+  }, [snap.compileResult?.data?.warnings])
+  const compileWarningsVisible = useMemo(
+    () =>
+      showVerboseCompileWarnings
+        ? compileWarningsAll
+        : compileWarningsAll.filter((item) => isActionableCompileWarningMessage(item)),
+    [compileWarningsAll, showVerboseCompileWarnings],
+  )
+  const compileWarningsSuppressedCount = Math.max(
+    0,
+    compileWarningsAll.length - compileWarningsVisible.length,
+  )
+  const compileKeyLogGroups = useMemo<CompileLogKeyGroup[]>(() => {
+    return compileLogGroups
+      .map((group) => {
+        const seen = new Set<string>()
+        const keyLines = String(group.log || '')
+          .split('\n')
+          .map((line) => normalizeCompileMessage(line))
+          .filter(Boolean)
+          .filter(
+            (line) => isCompileErrorMessage(line) || isActionableCompileWarningMessage(line),
+          )
+          .filter((line) => {
+            if (seen.has(line)) return false
+            seen.add(line)
+            return true
+          })
+          .slice(0, 40)
+        return { ...group, keyLines }
+      })
+      .filter((group) => group.returncode !== 0 || group.keyLines.length > 0)
+  }, [compileLogGroups])
+  const compileAllLogsText = useMemo(
+    () =>
+      compileLogGroups
+        .map(
+          (log) =>
+            `=== ${log.command} (返回码: ${log.returncode}${
+              log.count > 1 ? `, 重复 ${log.count} 次` : ''
+            }) ===\n${log.log || '(无日志)'}`,
+        )
+        .join('\n\n'),
+    [compileLogGroups],
+  )
+  const compileKeyLogsText = useMemo(
+    () =>
+      compileKeyLogGroups
+        .map(
+          (log) =>
+            `=== ${log.command} (返回码: ${log.returncode}${
+              log.count > 1 ? `, 重复 ${log.count} 次` : ''
+            }) ===\n${log.keyLines.join('\n') || '(无关键日志)'}`,
+        )
+        .join('\n\n'),
+    [compileKeyLogGroups],
+  )
 
   const compileFormat = useMemo<'latex' | 'markdown' | 'unknown'>(() => {
     const explicit = String(snap.compileResult?.data?.compile_format || '').toLowerCase()
@@ -1601,6 +1748,49 @@ const LatexEditorPage = () => {
     snap.files,
   ])
   const showCenterMarkdownPreview = isMarkdownActiveFile && markdownCenterMode === 'preview'
+  const showCenterLatexPreview =
+    isLatexWorkspace && !isMarkdownActiveFile && latexCenterMode === 'preview'
+  const latexPdfPath = useMemo(() => {
+    const value = snap.compileResult?.data?.pdf_path
+    return typeof value === 'string' ? value.trim() : ''
+  }, [snap.compileResult?.data?.pdf_path])
+  const latexPreviewSrc = useMemo(() => {
+    if (!latexPreviewBlobUrl) return ''
+    const fitDirective = latexPreviewFitMode === 'page' ? 'Fit' : 'FitH'
+    return `${latexPreviewBlobUrl}#toolbar=1&view=${fitDirective}`
+  }, [latexPreviewBlobUrl, latexPreviewFitMode])
+  const loadLatexPreview = useCallback(
+    async (options?: { pdfPath?: string; silent?: boolean }) => {
+      if (!snap.workspaceId) return
+      const resolvedPdfPath = String(options?.pdfPath || latexPdfPath).trim()
+      if (!resolvedPdfPath) {
+        setLatexPreviewBlobUrl('')
+        setLatexPreviewError('暂无 PDF 产物，请先编译 LaTeX。')
+        setLatexPreviewLoading(false)
+        return
+      }
+      setLatexPreviewLoading(true)
+      setLatexPreviewError('')
+      try {
+        const blob = await downloadPdf(
+          { workspaceId: snap.workspaceId, pdfPath: resolvedPdfPath },
+          { loading: false, errorToast: false },
+        )
+        const blobUrl = URL.createObjectURL(blob)
+        setLatexPreviewBlobUrl(blobUrl)
+      } catch (error) {
+        setLatexPreviewBlobUrl('')
+        const detail = getErrorMessage(error)
+        setLatexPreviewError(detail)
+        if (!options?.silent) {
+          message.error(detail)
+        }
+      } finally {
+        setLatexPreviewLoading(false)
+      }
+    },
+    [latexPdfPath, snap.workspaceId],
+  )
   const markdownSurfaceStyle = useMemo<MarkdownSurfaceStyle>(
     () => ({
       '--doc-markdown-font-size': `${markdownFontSize}px`,
@@ -2868,7 +3058,7 @@ const LatexEditorPage = () => {
         docStudioActions.setWorkspaces(list)
         // 兜底候选必须排除 Notebook：Notebook 只能通过 /doc-studio/notebook 显式访问，
         // 否则用户先打开 Notebook 再切到 /doc-studio 时，会把 Notebook 误装进 Doc Studio 视图。
-        const explicit = targetWorkspace || params.workspaceId || ''
+        const explicit = targetWorkspace === undefined ? params.workspaceId || '' : targetWorkspace
         const fallback =
           list.find((item) => item.workspaceId !== NOTEBOOK_WORKSPACE_ID)?.workspaceId || ''
         const preferred = explicit || fallback
@@ -2902,6 +3092,11 @@ const LatexEditorPage = () => {
       setRightTab('chat')
     }
   }, [supportsCompilePanel, rightTab])
+
+  useEffect(() => {
+    setShowVerboseCompileWarnings(false)
+    setShowRawCompileLogs(false)
+  }, [snap.compileResult])
 
   useEffect(() => {
     try {
@@ -3025,6 +3220,16 @@ const LatexEditorPage = () => {
 
   useEffect(() => {
     if (typeof window === 'undefined') return
+    localStorage.setItem('doc_studio_latex_center_mode', latexCenterMode)
+  }, [latexCenterMode])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    localStorage.setItem('doc_studio_latex_preview_fit_mode', latexPreviewFitMode)
+  }, [latexPreviewFitMode])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
     localStorage.setItem('doc_studio_markdown_theme', markdownTheme)
   }, [markdownTheme])
 
@@ -3038,10 +3243,27 @@ const LatexEditorPage = () => {
     localStorage.setItem('doc_studio_markdown_font_size', String(markdownFontSize))
   }, [markdownFontSize])
 
+  useEffect(
+    () => () => {
+      if (latexPreviewBlobUrl) {
+        URL.revokeObjectURL(latexPreviewBlobUrl)
+      }
+    },
+    [latexPreviewBlobUrl],
+  )
+
   useEffect(() => {
-    if (typeof window === 'undefined') return
-    localStorage.setItem('doc_studio_markdown_centered', String(markdownCentered))
-  }, [markdownCentered])
+    if (latexPdfPath) return
+    setLatexPreviewBlobUrl('')
+    if (showCenterLatexPreview) {
+      setLatexPreviewError('暂无 PDF 产物，请先编译 LaTeX。')
+    }
+  }, [latexPdfPath, showCenterLatexPreview])
+
+  useEffect(() => {
+    if (!showCenterLatexPreview || !latexPdfPath) return
+    void loadLatexPreview({ silent: true })
+  }, [latexPdfPath, loadLatexPreview, showCenterLatexPreview])
 
   const rightPanelClosedRef = useRef(rightPanelClosed)
   rightPanelClosedRef.current = rightPanelClosed
@@ -3275,6 +3497,73 @@ const LatexEditorPage = () => {
     setSelectedKnowledgeBaseId(targetKbId)
     persistLastUsedKnowledgeBaseId(targetKbId)
   }, [ragEnabled, knowledgeBases, selectedKnowledgeBaseId, preferredKbFromUrl])
+
+  const workspaceDeleteDisplayName = useMemo(() => activeWorkspaceName.trim(), [activeWorkspaceName])
+  const workspaceDeleteConfirmValid = useMemo(
+    () => workspaceDeleteConfirmInput.trim() === workspaceDeleteDisplayName,
+    [workspaceDeleteConfirmInput, workspaceDeleteDisplayName],
+  )
+  const workspaceDeleteDisabled = !snap.workspaceId || isNotebookWorkspace || workspaceDeleteSubmitting
+
+  const openDeleteWorkspaceModal = useCallback(() => {
+    if (!snap.workspaceId) {
+      message.warning('请先选择工作区')
+      return
+    }
+    if (isNotebookWorkspace) {
+      message.warning('Notebook 系统工作区不允许删除')
+      return
+    }
+    setWorkspaceDeleteConfirmInput('')
+    setWorkspaceDeleteModalOpen(true)
+  }, [isNotebookWorkspace, snap.workspaceId])
+
+  const handleDeleteWorkspace = useCallback(async () => {
+    const deletingWorkspaceId = String(snap.workspaceId || '').trim()
+    if (!deletingWorkspaceId) return
+    if (isNotebookWorkspace) {
+      message.warning('Notebook 系统工作区不允许删除')
+      return
+    }
+    if (!workspaceDeleteConfirmValid) {
+      message.warning(`请输入工作区名称 "${workspaceDeleteDisplayName}" 以确认删除`)
+      return
+    }
+    setWorkspaceDeleteSubmitting(true)
+    try {
+      await deleteWorkspace(
+        { workspaceId: deletingWorkspaceId },
+        { loading: false, errorToast: false },
+      )
+      try {
+        localStorage.removeItem(`latex_editor_workspace_state_${deletingWorkspaceId}`)
+      } catch {
+        // ignore local cleanup failures
+      }
+      setWorkspaceDeleteModalOpen(false)
+      setWorkspaceDeleteConfirmInput('')
+      const nextWorkspaceId =
+        docStudioWorkspaces.find((item) => item.workspaceId !== deletingWorkspaceId)?.workspaceId ||
+        ''
+      await loadWorkspaces(nextWorkspaceId)
+      navigate(nextWorkspaceId ? `/doc-studio/${nextWorkspaceId}` : '/doc-studio', {
+        replace: true,
+      })
+      message.success('工作区已删除')
+    } catch (error) {
+      message.error(getErrorMessage(error))
+    } finally {
+      setWorkspaceDeleteSubmitting(false)
+    }
+  }, [
+    docStudioWorkspaces,
+    isNotebookWorkspace,
+    loadWorkspaces,
+    navigate,
+    snap.workspaceId,
+    workspaceDeleteConfirmValid,
+    workspaceDeleteDisplayName,
+  ])
 
   const handleCreateWorkspace = async () => {
     if (!newWorkspaceName.trim()) {
@@ -3680,10 +3969,18 @@ const LatexEditorPage = () => {
         mainFile,
       })
       docStudioActions.setCompileResult(result)
-      setRightTab('compile')
       if (result.success) {
+        setLatexCenterMode('preview')
+        if (result.data?.pdf_path) {
+          void loadLatexPreview({ pdfPath: result.data.pdf_path, silent: true })
+        } else {
+          setLatexPreviewBlobUrl('')
+          setLatexPreviewError('编译成功，但未找到可预览的 PDF 产物。')
+        }
         message.success(result.summary || '编译成功')
       } else {
+        setRightPanelClosed(false)
+        setRightTab('compile')
         // ???????????"????????
         const allErrors = result.data?.errors || []
         const missingFiles = allErrors
@@ -3760,23 +4057,13 @@ const LatexEditorPage = () => {
     snap.workspaceId,
   ])
 
-  const handlePreviewPdf = async () => {
-    if (!snap.workspaceId) return
-    try {
-      const blob = await downloadPdf({ workspaceId: snap.workspaceId })
-      const url = URL.createObjectURL(blob)
-    window.open(url, '_blank')
-      // ???? URL??????????
-      setTimeout(() => URL.revokeObjectURL(url), 1000)
-    } catch (error) {
-      message.error(getErrorMessage(error))
-    }
-  }
-
   const handleDownloadPdf = async () => {
     if (!snap.workspaceId) return
     try {
-      const blob = await downloadPdf({ workspaceId: snap.workspaceId })
+      const blob = await downloadPdf({
+        workspaceId: snap.workspaceId,
+        pdfPath: latexPdfPath || undefined,
+      })
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
@@ -3899,7 +4186,15 @@ const LatexEditorPage = () => {
       ) {
         return
       }
-      if (renameModalOpen || fileModalOpen || workspaceModalOpen || diffModalOpen || agentDiffReviewOpen) return
+      if (
+        renameModalOpen ||
+        fileModalOpen ||
+        workspaceModalOpen ||
+        workspaceDeleteModalOpen ||
+        diffModalOpen ||
+        agentDiffReviewOpen
+      )
+        return
 
       const candidatePath = treeFocusPath || snap.activeFilePath
       if (!candidatePath) return
@@ -3922,6 +4217,7 @@ const LatexEditorPage = () => {
     snap.activeFilePath,
     snap.fileTree,
     treeFocusPath,
+    workspaceDeleteModalOpen,
     workspaceModalOpen,
   ])
 
@@ -6631,7 +6927,7 @@ const LatexEditorPage = () => {
     }
 
     if (contextMenuType === 'workspace') {
-      return [
+      const workspaceItems: ContextMenuAction[] = [
         {
           key: 'workspace-new-file',
           label: '新建文件',
@@ -6669,6 +6965,20 @@ const LatexEditorPage = () => {
           },
         },
       ]
+      if (!isNotebookWorkspace) {
+        workspaceItems.push({
+          key: 'workspace-delete',
+          label: '删除当前工作区',
+          icon: <DeleteOutlined />,
+          danger: true,
+          separated: true,
+          onClick: () => {
+            closeContextMenu()
+            openDeleteWorkspaceModal()
+          },
+        })
+      }
+      return workspaceItems
     }
 
     if (contextMenuType === 'directory') {
@@ -6792,7 +7102,7 @@ const LatexEditorPage = () => {
     ]
   })()
 
-  const markdownAppearancePanel = useMemo(
+  const appearancePanel = useMemo(
     () => (
       <div className="doc-studio__markdown-appearance-panel">
         <div className="doc-studio__markdown-appearance-row">
@@ -6821,11 +7131,11 @@ const LatexEditorPage = () => {
             value={markdownFontFamily}
             onChange={(value) => setMarkdownFontFamily(value)}
             options={[
-              { label: '无衬线', value: 'sans' },
-              { label: '衬线', value: 'serif' },
-              { label: '等宽', value: 'mono' },
+              { label: '无衬线（中英）', value: 'sans' },
+              { label: '衬线（中英）', value: 'serif' },
+              { label: '等宽（中英）', value: 'mono' },
             ]}
-            style={{ width: 110 }}
+            style={{ width: 146 }}
           />
         </div>
         <div className="doc-studio__markdown-appearance-row">
@@ -6852,19 +7162,31 @@ const LatexEditorPage = () => {
             </Button>
           </Space>
         </div>
-        <div className="doc-studio__markdown-appearance-row">
-          <Text type="secondary">布局</Text>
-          <Switch
-            size="small"
-            checked={markdownCentered}
-            onChange={(checked) => setMarkdownCentered(Boolean(checked))}
-            checkedChildren="居中"
-            unCheckedChildren="铺满"
-          />
-        </div>
+        {isLatexWorkspace && !isMarkdownActiveFile ? (
+          <div className="doc-studio__markdown-appearance-row">
+            <Text type="secondary">PDF 缩放</Text>
+            <Select<LatexPreviewFitMode>
+              size="small"
+              value={latexPreviewFitMode}
+              onChange={(value) => setLatexPreviewFitMode(value)}
+              options={[
+                { label: '适应宽度', value: 'width' },
+                { label: '适应整页', value: 'page' },
+              ]}
+              style={{ width: 110 }}
+            />
+          </div>
+        ) : null}
       </div>
     ),
-    [markdownCentered, markdownFontFamily, markdownFontSize, markdownTheme],
+    [
+      isLatexWorkspace,
+      isMarkdownActiveFile,
+      latexPreviewFitMode,
+      markdownFontFamily,
+      markdownFontSize,
+      markdownTheme,
+    ],
   )
 
   const headerOverflowMenuItems = useMemo<MenuProps['items']>(() => {
@@ -7024,6 +7346,15 @@ const LatexEditorPage = () => {
                   size="small"
                   onClick={() => setWorkspaceModalOpen(true)}
                 />
+                <Tooltip title={isNotebookWorkspace ? 'Notebook 工作区不可删除' : '删除当前工作区'}>
+                  <Button
+                    icon={<DeleteOutlined />}
+                    size="small"
+                    danger
+                    onClick={openDeleteWorkspaceModal}
+                    disabled={workspaceDeleteDisabled}
+                  />
+                </Tooltip>
                 <Button
                   icon={<ReloadOutlined />}
                   size="small"
@@ -7171,19 +7502,25 @@ const LatexEditorPage = () => {
                         />
                       </Tooltip>
                     )}
-                    {isMarkdownActiveFile && (
-                      <Popover
-                        trigger="click"
-                        placement="bottomRight"
-                        content={markdownAppearancePanel}
-                      >
+                    {isLatexWorkspace && !isMarkdownActiveFile && (
+                      <Tooltip title={showCenterLatexPreview ? '切换到源码编辑' : '切换到 PDF 预览'}>
                         <Button
                           type="text"
-                          className="doc-studio__header-icon-btn"
-                          icon={<SettingOutlined />}
+                          className={`doc-studio__header-icon-btn ${showCenterLatexPreview ? 'doc-studio__header-icon-btn--primary' : ''}`}
+                          icon={showCenterLatexPreview ? <EditOutlined /> : <EyeOutlined />}
+                          onClick={() =>
+                            setLatexCenterMode((prev) => (prev === 'preview' ? 'source' : 'preview'))
+                          }
                         />
-                      </Popover>
+                      </Tooltip>
                     )}
+                    <Popover trigger="click" placement="bottomRight" content={appearancePanel}>
+                      <Button
+                        type="text"
+                        className="doc-studio__header-icon-btn"
+                        icon={<SettingOutlined />}
+                      />
+                    </Popover>
                     {supportsCompilePanel && (
                       <Tooltip title={compileActionTitle}>
                         <Button
@@ -7282,6 +7619,7 @@ const LatexEditorPage = () => {
                                 filePath={currentReviewDiff.file_path || ''}
                                 originalContent={resolvedOriginal || currentReviewDiff.original_content}
                                 modifiedContent={resolvedModified || currentReviewDiff.modified_content}
+                                theme={markdownTheme}
                                 diffReverting={diffReverting}
                                 currentHunkIndex={currentHunkIndex}
                                 onModifiedContentChange={(next) => setResolvedModified(next)}
@@ -7301,6 +7639,8 @@ const LatexEditorPage = () => {
                     className={`doc-studio__center-main${
                       showCenterMarkdownPreview ? ' doc-studio__center-main--markdown-preview' : ''
                     }${
+                      showCenterLatexPreview ? ' doc-studio__center-main--latex-preview' : ''
+                    }${
                       showCenterMarkdownPreview && markdownTheme === 'dark'
                         ? ' doc-studio__center-main--markdown-preview-dark'
                         : ''
@@ -7311,11 +7651,7 @@ const LatexEditorPage = () => {
                         <div className="doc-studio__center-markdown-preview">
                           {markdownCompilePreviewContent ? (
                             <div
-                              className={`doc-studio__center-markdown-preview-inner doc-studio__markdown-surface doc-studio__markdown-surface--${markdownTheme} ${
-                                markdownCentered
-                                  ? 'doc-studio__center-markdown-preview-inner--centered'
-                                  : 'doc-studio__center-markdown-preview-inner--fluid'
-                              }`}
+                              className={`doc-studio__center-markdown-preview-inner doc-studio__center-markdown-preview-inner--fluid doc-studio__markdown-surface doc-studio__markdown-surface--${markdownTheme}`}
                               style={markdownSurfaceStyle}
                             >
                               <ChatMarkdown style={markdownTextStyle}>
@@ -7329,16 +7665,42 @@ const LatexEditorPage = () => {
                             />
                           )}
                         </div>
+                      ) : showCenterLatexPreview ? (
+                        <div className="doc-studio__center-latex-preview">
+                          <div className="doc-studio__center-latex-preview-inner doc-studio__center-latex-preview-inner--fluid">
+                            {latexPreviewLoading ? (
+                              <div className="doc-studio__center-latex-preview-state">
+                                <Spin tip="正在加载 PDF 预览..." />
+                              </div>
+                            ) : latexPreviewError ? (
+                              <div className="doc-studio__center-latex-preview-state">
+                                <Alert
+                                  type="warning"
+                                  showIcon
+                                  message="PDF 预览不可用"
+                                  description={latexPreviewError}
+                                />
+                              </div>
+                            ) : latexPreviewSrc ? (
+                              <iframe
+                                className="doc-studio__center-latex-preview-frame"
+                                src={latexPreviewSrc}
+                                title="LaTeX PDF 预览"
+                              />
+                            ) : (
+                              <div className="doc-studio__center-latex-preview-state">
+                                <Empty
+                                  description="暂无 PDF 预览，请先编译"
+                                  image={Empty.PRESENTED_IMAGE_SIMPLE}
+                                />
+                              </div>
+                            )}
+                          </div>
+                        </div>
                       ) : (
                         <Editor
                           key={snap.activeFilePath}
-                          theme={
-                            isMarkdownActiveFile
-                              ? markdownTheme === 'dark'
-                                ? 'vs-dark'
-                                : 'vs'
-                              : 'vs-dark'
-                          }
+                          theme={markdownTheme === 'dark' ? 'vs-dark' : 'vs'}
                           height="100%"
                           language={resolveEditorLanguage(snap.activeFilePath)}
                           loading={<Spin />}
@@ -7348,10 +7710,8 @@ const LatexEditorPage = () => {
                           options={{
                             readOnly: currentFileBuffer?.loading,
                             minimap: { enabled: false },
-                            fontSize: isMarkdownActiveFile ? markdownFontSize : 14,
-                            fontFamily: isMarkdownActiveFile
-                              ? MARKDOWN_FONT_FAMILY_MAP[markdownFontFamily]
-                              : undefined,
+                            fontSize: markdownFontSize,
+                            fontFamily: MARKDOWN_FONT_FAMILY_MAP[markdownFontFamily],
                             wordWrap: 'on',
                             automaticLayout: true,
                             selectOnLineNumbers: true,
@@ -8543,11 +8903,7 @@ const LatexEditorPage = () => {
                           markdownCompilePreviewContent ? (
                             <div className="doc-studio__compile-markdown-preview doc-studio__compile-markdown-preview--full">
                               <div
-                                className={`doc-studio__compile-markdown-preview-inner doc-studio__markdown-surface doc-studio__markdown-surface--${markdownTheme} ${
-                                  markdownCentered
-                                    ? 'doc-studio__compile-markdown-preview-inner--centered'
-                                    : 'doc-studio__compile-markdown-preview-inner--fluid'
-                                }`}
+                                className={`doc-studio__compile-markdown-preview-inner doc-studio__compile-markdown-preview-inner--fluid doc-studio__markdown-surface doc-studio__markdown-surface--${markdownTheme}`}
                                 style={markdownSurfaceStyle}
                               >
                                 <ChatMarkdown style={markdownTextStyle}>
@@ -8577,14 +8933,6 @@ const LatexEditorPage = () => {
                             <div className="doc-studio__compile-actions">
                               <Button
                                 type="primary"
-                                icon={<EyeOutlined />}
-                                size="small"
-                                onClick={handlePreviewPdf}
-                                disabled={!snap.compileResult.data?.pdf_path}
-                              >
-                                预览 PDF
-                              </Button>
-                              <Button
                                 icon={<DownloadOutlined />}
                                 size="small"
                                 onClick={handleDownloadPdf}
@@ -8620,127 +8968,118 @@ const LatexEditorPage = () => {
                                 <Text code>{snap.compileResult.data.pdf_path}</Text>
                               </div>
                             )}
-                            {snap.compileResult.data?.warnings?.length ? (
+                            {compileWarningsAll.length ? (
                               <div className="doc-studio__compile-section">
-                                <Text type="warning">警告</Text>
-                                <ul>
-                                  {snap.compileResult.data.warnings.map((warning, idx) => (
-                                    <li key={`warning-${idx}`}>{warning}</li>
-                                  ))}
-                                </ul>
+                                <div
+                                  style={{
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    alignItems: 'center',
+                                    gap: 8,
+                                  }}
+                                >
+                                  <Space size={8}>
+                                    <Text type="warning">关键告警</Text>
+                                    {compileWarningsSuppressedCount > 0 &&
+                                    !showVerboseCompileWarnings ? (
+                                      <Text type="secondary">
+                                        已隐藏 {compileWarningsSuppressedCount} 条低价值告警
+                                      </Text>
+                                    ) : null}
+                                  </Space>
+                                  {compileWarningsSuppressedCount > 0 ? (
+                                    <Button
+                                      size="small"
+                                      onClick={() =>
+                                        setShowVerboseCompileWarnings((prev) => !prev)
+                                      }
+                                    >
+                                      {showVerboseCompileWarnings
+                                        ? '仅看关键告警'
+                                        : `显示全部告警(${compileWarningsAll.length})`}
+                                    </Button>
+                                  ) : null}
+                                </div>
+                                {compileWarningsVisible.length ? (
+                                  <ul>
+                                    {compileWarningsVisible.map((warning, idx) => (
+                                      <li key={`warning-${idx}`}>{warning}</li>
+                                    ))}
+                                  </ul>
+                                ) : (
+                                  <Text type="secondary">当前无关键告警</Text>
+                                )}
                               </div>
                             ) : null}
-                            {snap.compileResult.data?.errors?.length ? (
+                            {compileErrors.length ? (
                               <div className="doc-studio__compile-section">
                                 <Text type="danger">错误</Text>
                                 <ul>
-                                  {snap.compileResult.data.errors.map((errorMsg, idx) => (
+                                  {compileErrors.map((errorMsg, idx) => (
                                     <li key={`error-${idx}`}>{errorMsg}</li>
                                   ))}
                                 </ul>
                               </div>
                             ) : null}
-                            {snap.compileResult.data?.logs?.length ? (
+                            {compileLogGroups.length ? (
                               <div className="doc-studio__compile-section doc-studio__compile-logs">
-                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                                <div className="doc-studio__compile-logs-toolbar">
                                   <Text strong style={{ fontSize: 14 }}>编译日志</Text>
-                                  <Button
-                                    size="small"
-                                    onClick={async () => {
-                                      const allLogs =
-                                        compileLogGroups
-                                          ?.map((log) =>
-                                            `=== ${log.command} (返回码: ${log.returncode}${
-                                              log.count > 1 ? `, 重复 ${log.count} 次` : ''
-                                            }) ===\n${log.log || '(无日志)'}`
-                                          )
-                                          .join('\n\n') || ''
-                                      if (!allLogs) {
-                                        message.info('没有可复制的日志')
-                                        return
-                                      }
-                                      try {
-                                        await copyTextToClipboard(allLogs)
-                                        message.success('日志已复制')
-                                      } catch (error) {
-                                        // ??????????Clipboard API
-                                        // ????????copyTextToClipboard ????????????
-                                        message.error('复制失败，请手动选择')
-                                      }
-                                    }}
-                                  >
-                                    复制日志
-                                  </Button>
+                                  <Space size={8} wrap>
+                                    <Button
+                                      size="small"
+                                      onClick={async () => {
+                                        if (!compileKeyLogsText) {
+                                          message.info('没有可复制的关键日志')
+                                          return
+                                        }
+                                        try {
+                                          await copyTextToClipboard(compileKeyLogsText)
+                                          message.success('关键日志已复制')
+                                        } catch (error) {
+                                          message.error('复制失败，请手动选择')
+                                        }
+                                      }}
+                                    >
+                                      复制关键日志
+                                    </Button>
+                                    <Button
+                                      size="small"
+                                      onClick={() => setShowRawCompileLogs((prev) => !prev)}
+                                    >
+                                      {showRawCompileLogs ? '收起完整日志' : '展开完整日志'}
+                                    </Button>
+                                    <Button
+                                      size="small"
+                                      onClick={async () => {
+                                        if (!compileAllLogsText) {
+                                          message.info('没有可复制的日志')
+                                          return
+                                        }
+                                        try {
+                                          await copyTextToClipboard(compileAllLogsText)
+                                          message.success('完整日志已复制')
+                                        } catch (error) {
+                                          message.error('复制失败，请手动选择')
+                                        }
+                                      }}
+                                    >
+                                      复制完整日志
+                                    </Button>
+                                  </Space>
                                 </div>
-                                {compileLogGroups.map((log, idx) => {
-                                  const logLines = (log.log || '').split('\n')
-                                  // ????????????????
-                                  const commandName = log.command.split(' ')[0] || 'unknown'
-                                  const stepName =
-                                    log.firstIndex === 0
-                                      ? '编译引擎'
-                                      : commandName.includes('bibtex')
-                                        ? 'BibTeX 处理'
-                                        : '后续编译'
-                                  return (
-                                    <div key={`log-${idx}`} className="doc-studio__compile-log-block">
-                                      <div className="doc-studio__compile-log-header">
-                                        <Tag color={log.returncode === 0 ? 'green' : 'red'}>
-                                          返回码 {log.returncode}
-                                        </Tag>
-                                        <Text type="secondary" style={{ marginLeft: 8, fontSize: 12 }}>
-                                          {stepName}
-                                        </Text>
-                                        {log.count > 1 && (
-                                          <Tag color="blue" style={{ marginLeft: 8 }}>
-                                            重复 x{log.count}
-                                          </Tag>
-                                        )}
-                                        <Text type="secondary" code style={{ flex: 1, marginLeft: 8, fontSize: 11 }}>
-                                          {log.command}
-                                        </Text>
-                                      </div>
-                                      <div className="doc-studio__compile-log">
-                                        {logLines.length > 0 ? (
-                                          logLines.map((line, lineIdx) => {
-                                            const trimmedLine = line.trim()
-                                            const isError = trimmedLine.startsWith('!') ||
-                                                           trimmedLine.includes('Error') ||
-                                                           trimmedLine.includes('Fatal error') ||
-                                                           trimmedLine.includes('Missing character')
-                                            const isWarning = trimmedLine.includes('Warning') ||
-                                                             trimmedLine.includes('LaTeX Warning')
-                                            const isInfo = trimmedLine.includes('Output written') ||
-                                                          trimmedLine.includes('Transcript written') ||
-                                                          trimmedLine.includes('This is')
-
-                                            let className = ''
-                                            if (isError) className = 'doc-studio__compile-log-line--error'
-                                            else if (isWarning) className = 'doc-studio__compile-log-line--warning'
-                                            else if (isInfo) className = 'doc-studio__compile-log-line--info'
-
-                                            return (
-                                              <div
-                                                key={`line-${lineIdx}`}
-                                                className={className}
-                                                style={{
-                                                  padding: '2px 0',
-                                                  fontFamily: 'SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace',
-                                                  fontSize: '12px',
-                                                  lineHeight: '1.5'
-                                                }}
-                                              >
-                                                {line || '\u00A0'}
-                                              </div>
-                                            )
-                                          })
-                                        ) : (
-                                          <div style={{ color: '#888', fontStyle: 'italic' }}>(无日志)</div>
-                                        )}
-                                      </div>
+                                <Text type="secondary">关键日志（默认）</Text>
+                                <div className="doc-studio__compile-log">
+                                  {compileKeyLogsText || '未检测到关键日志，编译输出以信息日志为主。'}
+                                </div>
+                                {showRawCompileLogs ? (
+                                  <div className="doc-studio__compile-section">
+                                    <Text type="secondary">完整日志（原始输出）</Text>
+                                    <div className="doc-studio__compile-log">
+                                      {compileAllLogsText || '(无日志)'}
                                     </div>
-                                  )
-                                })}
+                                  </div>
+                                ) : null}
                               </div>
                             ) : null}
                           </>
@@ -8791,6 +9130,37 @@ const LatexEditorPage = () => {
             />
           </Form.Item>
         </Form>
+      </Modal>
+      <Modal
+        title="删除工作区"
+        open={workspaceDeleteModalOpen}
+        okText="永久删除"
+        cancelText="取消"
+        okType="danger"
+        onOk={() => void handleDeleteWorkspace()}
+        onCancel={() => {
+          setWorkspaceDeleteModalOpen(false)
+          setWorkspaceDeleteConfirmInput('')
+        }}
+        confirmLoading={workspaceDeleteSubmitting}
+        okButtonProps={{ disabled: !workspaceDeleteConfirmValid }}
+      >
+        <Space direction="vertical" size={8} style={{ width: '100%' }}>
+          <Alert
+            type="warning"
+            showIcon
+            message="当前实现为永久删除"
+            description="将删除工作区文件、编译产物和本地状态缓存，操作后不可恢复。"
+          />
+          <Text>
+            请输入工作区名称 <Text code>{workspaceDeleteDisplayName}</Text> 以确认删除。
+          </Text>
+          <Input
+            placeholder="输入工作区名称确认"
+            value={workspaceDeleteConfirmInput}
+            onChange={(event) => setWorkspaceDeleteConfirmInput(event.target.value)}
+          />
+        </Space>
       </Modal>
       <Modal
         title={fileModalType === 'file' ? '新建文件' : '新建文件夹'}
@@ -8851,8 +9221,10 @@ const LatexEditorPage = () => {
         onCancel={() => {
           closeDiffModal(allFileDiffs.map((d) => d.file_path).filter((p): p is string => Boolean(p)))
         }}
-        width="90%"
+        className="doc-studio__timeline-diff-modal"
+        width={1200}
         style={{ top: 20 }}
+        bodyStyle={{ paddingTop: 10, paddingBottom: 8 }}
         footer={
           <Space style={{ width: '100%', justifyContent: 'flex-end' }}>
             <Button
@@ -8893,6 +9265,7 @@ const LatexEditorPage = () => {
                 filePath={allFileDiffs[currentDiffIndex].file_path || ''}
                 originalContent={resolvedOriginal || allFileDiffs[currentDiffIndex].original_content}
                 modifiedContent={resolvedModified || allFileDiffs[currentDiffIndex].modified_content}
+                theme={markdownTheme}
                 readOnly
               />
             )}
