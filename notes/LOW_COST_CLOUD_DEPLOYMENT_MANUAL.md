@@ -540,6 +540,41 @@ networks:
 | 终止语义 | `timeout` 会向 Docker compose 客户端发信号并取消 build | 不用 `timeout` 包裹 Docker build / up |
 | 网络 | ECS 不继承本机 VPN、代理和 DNS | Dockerfile 内显式配置 apt / pip 国内源 |
 
+### 10.8 ECS 拉取 GitHub 代码
+
+ECS 到 `github.com:443` 走的是国内出口 + GitHub Anycast，链路本身就抖。`git pull origin main` 默认开启 HTTP/2 多路复用 + 大对象走 GnuTLS，在抖动窗口里非常容易出现以下三类错误：
+
+| 现象 | 触发层 | 根因 |
+|---|---|---|
+| `RPC failed; curl 16 Error in the HTTP2 framing layer` | HTTP/2 协议帧 | 多路复用流被中断 |
+| `GnuTLS recv error (-110): The TLS connection was non-properly terminated` | TLS | 连接在 TLS 应用数据阶段被切 |
+| `git pull` 第一段 fetch 成功，紧接 `Failed to connect to github.com port 443 after 129273 ms: Connection timed out` | TCP | `git pull` 等价于 `fetch + merge`，两段串行各联网一次，第二次撞上抖动 |
+
+一次性配置（每台 ECS 只配一次，永久生效）：
+
+```bash
+git config --global http.version HTTP/1.1
+git config --global http.postBuffer 524288000
+```
+
+更新代码统一使用两步法，**不再使用 `git pull origin main`**：
+
+```bash
+cd /opt/apps/scholarmind
+git fetch origin
+git merge --ff-only origin/main
+git log -1 --oneline
+```
+
+理由：
+- `git fetch` 失败可重试，不影响工作区
+- `git merge --ff-only origin/main` 是纯本地操作，**不联网**；只要 fetch 拿到 pack 文件，merge 100% 成功
+- 避免 `git pull` 在内部第二次联网撞上抖动
+
+如果 `git fetch` 反复失败超过 3 次，等 1-2 分钟（GitHub 国内出口抖动通常以分钟为单位），不要在不稳态下做 `--force` 类操作。
+
+ScriptLens / homepage 等其他项目的 ECS 仓库同样适用此规则。
+
 ## 11. 本地↔Prod 配置对齐表
 
 > 教训：曾经因为 `SM_LLM_MODEL_AUX` 本地是 `gpt-5-mini`、ECS 是 `qwen-turbo`，导致同一句问题在本地能触发 RAG，在 ECS 走纯 LLM 直答（意图识别走 AUX，AUX 不稳定 → 路由失败）。
@@ -620,3 +655,9 @@ networks:
 - `scholarmind_api` 启动后 `unhealthy`，日志卡在 `[nltk_data] Downloading package ...`：
   - 根因：第三方库（llama-index 等）在 import 时静默 `nltk.download`，ECS 无 VPN → 卡死阻塞 uvicorn 启动
   - 解法：执行 4.0 节 NLTK 数据预置，再 `up -d --no-deps --force-recreate scholarmind_api`
+- `git pull` 报 `HTTP2 framing layer` / `GnuTLS recv error (-110)` / `Connection timed out`：
+  - 根因：ECS 到 GitHub Anycast 抖动 + HTTP/2 多路复用 / GnuTLS 不耐抖
+  - 解法：执行 10.8 节一次性 git config，之后用 `git fetch origin` + `git merge --ff-only origin/main` 两步法
+- ECS 直连 `api.openai.com` 大概率 timeout 或被切，`LLMClient` 把每个 OpenAI 候选都 fallback 一遍导致总时延数分钟、浏览器报 Network Error：
+  - 根因：ECS 国内出口到 OpenAI 不稳定，本地 VPN 通不代表 ECS 通
+  - 解法：开 Cloudflare AI Gateway（免费）→ 把 `OPENAI_BASE_URL` 改为 `https://gateway.ai.cloudflare.com/v1/<account_id>/<gateway>/openai`；不开 Authenticated Gateway / Cache / Retry，应用层已有 fallback + provider 熔断
