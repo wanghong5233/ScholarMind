@@ -1,11 +1,12 @@
 /* 更接近 GitHub/Prose 的成熟排版，兼顾中英混排可读性 */
 .doc-studio-chat-markdown {
-  font-size: 15px;
+  font-size: var(--doc-markdown-font-size, 15px);
   line-height: 1.72;
-  color: #1f2328;
+  color: var(--doc-markdown-text-color, #1f2328);
   word-break: break-word;
   white-space: normal;
-  font-family:
+  font-family: var(
+    --doc-markdown-font-family,
     'Inter',
     -apple-system,
     BlinkMacSystemFont,
@@ -14,7 +15,8 @@
     'Hiragino Sans GB',
     'Microsoft YaHei',
     'Noto Sans CJK SC',
-    sans-serif;
+    sans-serif
+  );
 
   > :first-child {
     margin-top: 0 !important;
@@ -42,7 +44,7 @@
     margin: 1.1em 0 0.62em !important;
     font-weight: 600 !important;
     line-height: 1.35 !important;
-    color: #111827;
+    color: var(--doc-markdown-heading-color, #111827);
   }
 
   h1 {
@@ -85,8 +87,8 @@
   }
 
   code {
-    background: #f6f8fa;
-    border: 1px solid rgba(27, 31, 35, 0.08);
+    background: var(--doc-markdown-code-bg, #f6f8fa);
+    border: 1px solid var(--doc-markdown-code-border, rgba(27, 31, 35, 0.08));
     border-radius: 6px;
     padding: 0.14em 0.38em;
     font-size: 0.9em;
@@ -94,8 +96,8 @@
   }
 
   pre {
-    background: #f6f8fa;
-    border: 1px solid #e6ebf1;
+    background: var(--doc-markdown-pre-bg, #f6f8fa);
+    border: 1px solid var(--doc-markdown-pre-border, #e6ebf1);
     border-radius: 8px;
     padding: 12px 14px;
     overflow-x: auto;
@@ -112,12 +114,12 @@
   blockquote {
     margin: 0.8em 0 !important;
     padding: 0.1em 0 0.1em 0.9em;
-    border-left: 3px solid #d0d7de;
-    color: #57606a;
+    border-left: 3px solid var(--doc-markdown-quote-border, #d0d7de);
+    color: var(--doc-markdown-quote-text, #57606a);
   }
 
   a {
-    color: #0969da;
+    color: var(--doc-markdown-link, #0969da);
     text-decoration: none;
   }
 
@@ -129,25 +131,25 @@
     width: 100%;
     border-collapse: collapse;
     border-spacing: 0;
-    border: 1px solid #d0d7de;
+    border: 1px solid var(--doc-markdown-table-border, #d0d7de);
     border-radius: 8px;
     overflow: hidden;
   }
 
   th,
   td {
-    border: 1px solid #d0d7de;
+    border: 1px solid var(--doc-markdown-table-border, #d0d7de);
     padding: 6px 10px;
   }
 
   th {
-    background: #f6f8fa;
+    background: var(--doc-markdown-th-bg, #f6f8fa);
     font-weight: 600;
   }
 
   hr {
     border: 0;
-    border-top: 1px solid #d0d7de;
+    border-top: 1px solid var(--doc-markdown-hr, #d0d7de);
     margin: 1em 0;
   }
 

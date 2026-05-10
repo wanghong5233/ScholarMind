@@ -5,7 +5,7 @@
  */
 import 'katex/dist/katex.min.css'
 import './ChatMarkdown.scss'
-import { useMemo } from 'react'
+import { useMemo, type CSSProperties } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
@@ -22,13 +22,24 @@ const markdownComponents = {
   ),
 }
 
-type ChatMarkdownProps = { children: string }
+type ChatMarkdownProps = {
+  children: string
+  className?: string
+  style?: CSSProperties
+}
 
-export function ChatMarkdown({ children }: ChatMarkdownProps) {
+export function ChatMarkdown({ children, className, style }: ChatMarkdownProps) {
   const processed = useMemo(() => preprocessMarkdownMath(children), [children])
+  const rootClassName = useMemo(
+    () =>
+      ['doc-studio-chat-markdown', 'doc-studio-chat-markdown--react', className]
+        .filter(Boolean)
+        .join(' '),
+    [className],
+  )
 
   return (
-    <div className="doc-studio-chat-markdown doc-studio-chat-markdown--react">
+    <div className={rootClassName} style={style}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkMath, remarkBreaks]}
         rehypePlugins={[[rehypeKatex, { strict: false, throwOnError: false }], rehypeRaw]}

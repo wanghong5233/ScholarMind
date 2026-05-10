@@ -574,6 +574,150 @@
     flex-direction: column;
   }
 
+  &__center-main {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+
+  &__center-main--hidden {
+    display: none;
+  }
+
+  &__center-main--markdown-preview {
+    background: #f6f8fc;
+  }
+
+  &__center-main--markdown-preview-dark {
+    background: #0b1220;
+  }
+
+  &__editor-wrapper--markdown-preview {
+    padding: 0;
+    background: #f6f8fc;
+  }
+
+  &__center-markdown-preview {
+    flex: 1;
+    min-height: 0;
+    height: 100%;
+    overflow: auto;
+    padding: 20px clamp(14px, 2.2vw, 30px) 28px;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable both-edges;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  &__center-markdown-preview-inner {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    margin: 0;
+    padding: clamp(16px, 2.4vw, 28px) clamp(18px, 2.8vw, 36px);
+    border: 1px solid #e5e8ef;
+    border-radius: 12px;
+    background: #fff;
+    box-shadow: 0 4px 16px rgba(15, 23, 42, 0.05);
+  }
+
+  &__center-markdown-preview-inner--centered {
+    max-width: 980px;
+    margin: 0 auto;
+  }
+
+  &__center-markdown-preview-inner--fluid {
+    max-width: none;
+    margin: 0;
+  }
+
+  &__compile-markdown-preview-inner {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    margin: 0;
+    padding: clamp(12px, 1.6vw, 20px) clamp(14px, 2vw, 26px);
+    border: 1px solid #e5e8ef;
+    border-radius: 10px;
+    background: #fff;
+  }
+
+  &__compile-markdown-preview-inner--centered {
+    max-width: 760px;
+    margin: 0 auto;
+  }
+
+  &__compile-markdown-preview-inner--fluid {
+    max-width: none;
+    margin: 0;
+  }
+
+  &__markdown-surface {
+    --doc-markdown-font-size: 15px;
+    --doc-markdown-font-family:
+      'Inter',
+      -apple-system,
+      BlinkMacSystemFont,
+      'Segoe UI',
+      'PingFang SC',
+      'Hiragino Sans GB',
+      'Microsoft YaHei',
+      'Noto Sans CJK SC',
+      sans-serif;
+    --doc-markdown-text-color: #1f2328;
+    --doc-markdown-heading-color: #111827;
+    --doc-markdown-code-bg: #f6f8fa;
+    --doc-markdown-code-border: rgba(27, 31, 35, 0.08);
+    --doc-markdown-pre-bg: #f6f8fa;
+    --doc-markdown-pre-border: #e6ebf1;
+    --doc-markdown-quote-border: #d0d7de;
+    --doc-markdown-quote-text: #57606a;
+    --doc-markdown-link: #0969da;
+    --doc-markdown-table-border: #d0d7de;
+    --doc-markdown-th-bg: #f6f8fa;
+    --doc-markdown-hr: #d0d7de;
+  }
+
+  &__markdown-surface--dark {
+    border-color: #2b3952;
+    background: #111a2a;
+    box-shadow: none;
+    --doc-markdown-text-color: #d6dbe7;
+    --doc-markdown-heading-color: #f3f6fb;
+    --doc-markdown-code-bg: #1a2639;
+    --doc-markdown-code-border: rgba(148, 163, 184, 0.34);
+    --doc-markdown-pre-bg: #0f172a;
+    --doc-markdown-pre-border: #2b3952;
+    --doc-markdown-quote-border: #475569;
+    --doc-markdown-quote-text: #9aa7bc;
+    --doc-markdown-link: #7cb5ff;
+    --doc-markdown-table-border: #334155;
+    --doc-markdown-th-bg: #1b283d;
+    --doc-markdown-hr: #334155;
+  }
+
+  &__markdown-appearance-panel {
+    min-width: 248px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  &__markdown-appearance-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  &__markdown-appearance-size-value {
+    min-width: 54px;
+    text-align: center;
+    color: #4b5565;
+    font-size: 12px;
+  }
+
   &__review-shell {
     flex: 1;
     min-height: 0;

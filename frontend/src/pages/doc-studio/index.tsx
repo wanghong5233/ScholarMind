@@ -11,10 +11,12 @@ import {
   Layout,
   message,
   Modal,
+  Popover,
   Popconfirm,
   Select,
   Space,
   Spin,
+  Switch,
   Tabs,
   Tag,
   Timeline,
@@ -52,6 +54,7 @@ import {
   MenuFoldOutlined,
   RollbackOutlined,
   SearchOutlined,
+  SettingOutlined,
   ShareAltOutlined,
   CheckOutlined,
 } from '@ant-design/icons'
@@ -770,8 +773,29 @@ const buildLlmModelOptionsFromCatalog = (
 const MIN_LEFT_SIDER_WIDTH = 200
 const MAX_LEFT_SIDER_WIDTH = 600
 const MIN_RIGHT_SIDER_WIDTH = 260
-const MAX_RIGHT_SIDER_WIDTH = 800
 const MIN_CENTER_WIDTH = 420
+const MIN_MARKDOWN_FONT_SIZE = 13
+const MAX_MARKDOWN_FONT_SIZE = 22
+
+type MarkdownThemePreset = 'light' | 'dark'
+type MarkdownFontFamilyPreset = 'sans' | 'serif' | 'mono'
+type MarkdownSurfaceStyle = React.CSSProperties & {
+  '--doc-markdown-font-size'?: string
+  '--doc-markdown-font-family'?: string
+}
+
+const MARKDOWN_FONT_FAMILY_MAP: Record<MarkdownFontFamilyPreset, string> = {
+  sans:
+    "'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif",
+  serif:
+    "'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', 'STSong', 'Times New Roman', Georgia, serif",
+  mono: "'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace",
+}
+
+const resolveMaxRightSiderWidth = (containerWidth: number, leftWidth: number) => {
+  const availableWidth = Math.floor(containerWidth - leftWidth - MIN_CENTER_WIDTH)
+  return Math.max(MIN_RIGHT_SIDER_WIDTH, availableWidth)
+}
 
 const normalizeLlmProvider = (value: unknown): LlmProviderValue => {
   const normalized = String(value || '').trim().toLowerCase()
@@ -942,6 +966,30 @@ const LatexEditorPage = () => {
   const [leftPanelClosed, setLeftPanelClosed] = useState(() => {
     if (typeof window === 'undefined') return false
     return localStorage.getItem('doc_studio_left_panel_closed') === 'true'
+  })
+  const [markdownTheme, setMarkdownTheme] = useState<MarkdownThemePreset>(() => {
+    if (typeof window === 'undefined') return 'light'
+    return localStorage.getItem('doc_studio_markdown_theme') === 'dark' ? 'dark' : 'light'
+  })
+  const [markdownFontFamily, setMarkdownFontFamily] = useState<MarkdownFontFamilyPreset>(() => {
+    if (typeof window === 'undefined') return 'sans'
+    const saved = String(localStorage.getItem('doc_studio_markdown_font_family') || '').trim()
+    return saved === 'serif' || saved === 'mono' ? saved : 'sans'
+  })
+  const [markdownFontSize, setMarkdownFontSize] = useState<number>(() => {
+    if (typeof window === 'undefined') return 15
+    const saved = Number(localStorage.getItem('doc_studio_markdown_font_size'))
+    if (!Number.isFinite(saved)) return 15
+    return Math.min(MAX_MARKDOWN_FONT_SIZE, Math.max(MIN_MARKDOWN_FONT_SIZE, Math.floor(saved)))
+  })
+  const [markdownCentered, setMarkdownCentered] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false
+    return localStorage.getItem('doc_studio_markdown_centered') === 'true'
+  })
+  const [markdownCenterMode, setMarkdownCenterMode] = useState<'source' | 'preview'>(() => {
+    if (typeof window === 'undefined') return 'preview'
+    const saved = localStorage.getItem('doc_studio_markdown_center_mode')
+    return saved === 'source' ? 'source' : 'preview'
   })
   const [llmModel, setLlmModel] = useState<LlmModelValue>(DEFAULT_OPENAI_MODEL)
   const [llmModelCatalog, setLlmModelCatalog] = useState<LlmModelCatalog | null>(null)
@@ -1552,6 +1600,21 @@ const LatexEditorPage = () => {
     snap.compileResult?.data?.target_path,
     snap.files,
   ])
+  const showCenterMarkdownPreview = isMarkdownActiveFile && markdownCenterMode === 'preview'
+  const markdownSurfaceStyle = useMemo<MarkdownSurfaceStyle>(
+    () => ({
+      '--doc-markdown-font-size': `${markdownFontSize}px`,
+      '--doc-markdown-font-family': MARKDOWN_FONT_FAMILY_MAP[markdownFontFamily],
+    }),
+    [markdownFontFamily, markdownFontSize],
+  )
+  const markdownTextStyle = useMemo<React.CSSProperties>(
+    () => ({
+      fontSize: `${markdownFontSize}px`,
+      fontFamily: MARKDOWN_FONT_FAMILY_MAP[markdownFontFamily],
+    }),
+    [markdownFontFamily, markdownFontSize],
+  )
 
   const workspaceFilePaths = useMemo(
     () => collectAllFilePaths((snap.fileTree || []) as DocStudioAPI.FileNode[]),
@@ -2955,6 +3018,31 @@ const LatexEditorPage = () => {
     localStorage.setItem('doc_studio_left_panel_closed', String(leftPanelClosed))
   }, [leftPanelClosed])
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    localStorage.setItem('doc_studio_markdown_center_mode', markdownCenterMode)
+  }, [markdownCenterMode])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    localStorage.setItem('doc_studio_markdown_theme', markdownTheme)
+  }, [markdownTheme])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    localStorage.setItem('doc_studio_markdown_font_family', markdownFontFamily)
+  }, [markdownFontFamily])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    localStorage.setItem('doc_studio_markdown_font_size', String(markdownFontSize))
+  }, [markdownFontSize])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    localStorage.setItem('doc_studio_markdown_centered', String(markdownCentered))
+  }, [markdownCentered])
+
   const rightPanelClosedRef = useRef(rightPanelClosed)
   rightPanelClosedRef.current = rightPanelClosed
 
@@ -3046,17 +3134,12 @@ const LatexEditorPage = () => {
         if (container) {
           const containerRect = container.getBoundingClientRect()
           const cursorWidth = containerRect.right - e.clientX
-          const dynamicMaxRight = Math.min(
-            MAX_RIGHT_SIDER_WIDTH,
-            containerRect.width - leftSiderWidth - MIN_CENTER_WIDTH,
+          const dynamicMaxRight = resolveMaxRightSiderWidth(containerRect.width, leftSiderWidth)
+          const nextRightWidth = Math.max(
+            MIN_RIGHT_SIDER_WIDTH,
+            Math.min(dynamicMaxRight, cursorWidth),
           )
-          if (dynamicMaxRight >= MIN_RIGHT_SIDER_WIDTH) {
-            const nextRightWidth = Math.max(
-              MIN_RIGHT_SIDER_WIDTH,
-              Math.min(dynamicMaxRight, cursorWidth),
-            )
-            setRightSiderWidth(nextRightWidth)
-          }
+          setRightSiderWidth(nextRightWidth)
         }
       }
     }
@@ -3097,11 +3180,8 @@ const LatexEditorPage = () => {
         MIN_LEFT_SIDER_WIDTH,
         Math.min(MAX_LEFT_SIDER_WIDTH, leftSiderWidth),
       )
-      const maxRightByCurrentLeft = Math.min(
-        MAX_RIGHT_SIDER_WIDTH,
-        containerRect.width - nextLeftWidth - MIN_CENTER_WIDTH,
-      )
-      let nextRightWidth = Math.max(
+      const maxRightByCurrentLeft = resolveMaxRightSiderWidth(containerRect.width, nextLeftWidth)
+      const nextRightWidth = Math.max(
         MIN_RIGHT_SIDER_WIDTH,
         Math.min(
           maxRightByCurrentLeft >= MIN_RIGHT_SIDER_WIDTH
@@ -3557,7 +3637,11 @@ const LatexEditorPage = () => {
       const markdownContent = String(docStudioState.files[markdownPath]?.content || '')
       const markdownResult = buildMarkdownCompileResult(markdownPath, markdownContent)
       docStudioActions.setCompileResult(markdownResult)
-      setRightTab('compile')
+      setMarkdownCenterMode('preview')
+      if (!markdownResult.success) {
+        setRightPanelClosed(false)
+        setRightTab('compile')
+      }
       if (markdownResult.success) {
         message.success(markdownResult.summary || 'Markdown 检查通过')
       } else {
@@ -3655,8 +3739,11 @@ const LatexEditorPage = () => {
 
     const markdownResult = buildMarkdownCompileResult(activePath, currentFileBuffer.content || '')
     docStudioActions.setCompileResult(markdownResult)
-    setRightPanelClosed(false)
-    setRightTab('compile')
+    setMarkdownCenterMode('preview')
+    if (!markdownResult.success) {
+      setRightPanelClosed(false)
+      setRightTab('compile')
+    }
     autoCompileHandledRef.current = true
     clearAutoCompileFlagFromUrl()
     if (markdownResult.success) {
@@ -6705,6 +6792,81 @@ const LatexEditorPage = () => {
     ]
   })()
 
+  const markdownAppearancePanel = useMemo(
+    () => (
+      <div className="doc-studio__markdown-appearance-panel">
+        <div className="doc-studio__markdown-appearance-row">
+          <Text type="secondary">主题</Text>
+          <Space size={6}>
+            <Button
+              size="small"
+              type={markdownTheme === 'light' ? 'primary' : 'default'}
+              onClick={() => setMarkdownTheme('light')}
+            >
+              浅色
+            </Button>
+            <Button
+              size="small"
+              type={markdownTheme === 'dark' ? 'primary' : 'default'}
+              onClick={() => setMarkdownTheme('dark')}
+            >
+              深色
+            </Button>
+          </Space>
+        </div>
+        <div className="doc-studio__markdown-appearance-row">
+          <Text type="secondary">字体</Text>
+          <Select<MarkdownFontFamilyPreset>
+            size="small"
+            value={markdownFontFamily}
+            onChange={(value) => setMarkdownFontFamily(value)}
+            options={[
+              { label: '无衬线', value: 'sans' },
+              { label: '衬线', value: 'serif' },
+              { label: '等宽', value: 'mono' },
+            ]}
+            style={{ width: 110 }}
+          />
+        </div>
+        <div className="doc-studio__markdown-appearance-row">
+          <Text type="secondary">字号</Text>
+          <Space size={6} align="center">
+            <Button
+              size="small"
+              onClick={() =>
+                setMarkdownFontSize((prev) => Math.max(MIN_MARKDOWN_FONT_SIZE, prev - 1))
+              }
+              disabled={markdownFontSize <= MIN_MARKDOWN_FONT_SIZE}
+            >
+              A-
+            </Button>
+            <span className="doc-studio__markdown-appearance-size-value">{markdownFontSize}px</span>
+            <Button
+              size="small"
+              onClick={() =>
+                setMarkdownFontSize((prev) => Math.min(MAX_MARKDOWN_FONT_SIZE, prev + 1))
+              }
+              disabled={markdownFontSize >= MAX_MARKDOWN_FONT_SIZE}
+            >
+              A+
+            </Button>
+          </Space>
+        </div>
+        <div className="doc-studio__markdown-appearance-row">
+          <Text type="secondary">布局</Text>
+          <Switch
+            size="small"
+            checked={markdownCentered}
+            onChange={(checked) => setMarkdownCentered(Boolean(checked))}
+            checkedChildren="居中"
+            unCheckedChildren="铺满"
+          />
+        </div>
+      </div>
+    ),
+    [markdownCentered, markdownFontFamily, markdownFontSize, markdownTheme],
+  )
+
   const headerOverflowMenuItems = useMemo<MenuProps['items']>(() => {
     const items: MenuProps['items'] = [
       {
@@ -6995,6 +7157,33 @@ const LatexEditorPage = () => {
                         />
                       </Tooltip>
                     )}
+                    {isMarkdownActiveFile && (
+                      <Tooltip title={showCenterMarkdownPreview ? '切换到源码编辑' : '切换到渲染预览'}>
+                        <Button
+                          type="text"
+                          className={`doc-studio__header-icon-btn ${showCenterMarkdownPreview ? 'doc-studio__header-icon-btn--primary' : ''}`}
+                          icon={showCenterMarkdownPreview ? <EditOutlined /> : <EyeOutlined />}
+                          onClick={() =>
+                            setMarkdownCenterMode((prev) =>
+                              prev === 'preview' ? 'source' : 'preview',
+                            )
+                          }
+                        />
+                      </Tooltip>
+                    )}
+                    {isMarkdownActiveFile && (
+                      <Popover
+                        trigger="click"
+                        placement="bottomRight"
+                        content={markdownAppearancePanel}
+                      >
+                        <Button
+                          type="text"
+                          className="doc-studio__header-icon-btn"
+                          icon={<SettingOutlined />}
+                        />
+                      </Popover>
+                    )}
                     {supportsCompilePanel && (
                       <Tooltip title={compileActionTitle}>
                         <Button
@@ -7026,7 +7215,9 @@ const LatexEditorPage = () => {
             </Header>
             <Content className="doc-studio__content">
               {snap.openedFiles.length || isAgentDiffReviewActive ? (
-                <div className="doc-studio__editor-wrapper">
+                <div
+                  className={`doc-studio__editor-wrapper${showCenterMarkdownPreview ? ' doc-studio__editor-wrapper--markdown-preview' : ''}`}
+                >
                   {isAgentDiffReviewActive && currentReviewDiff ? (
                     <div className="doc-studio__review-shell">
                       <div className="doc-studio__review-toolbar">
@@ -7107,17 +7298,47 @@ const LatexEditorPage = () => {
                     </div>
                   ) : null}
                   <div
-                    style={{
-                      flex: 1,
-                      overflow: 'hidden',
-                      minHeight: 0,
-                      display: isAgentDiffReviewActive && currentReviewDiff ? 'none' : 'block',
-                    }}
+                    className={`doc-studio__center-main${
+                      showCenterMarkdownPreview ? ' doc-studio__center-main--markdown-preview' : ''
+                    }${
+                      showCenterMarkdownPreview && markdownTheme === 'dark'
+                        ? ' doc-studio__center-main--markdown-preview-dark'
+                        : ''
+                    }${isAgentDiffReviewActive && currentReviewDiff ? ' doc-studio__center-main--hidden' : ''}`}
                   >
-                      {snap.activeFilePath ? (
+                    {snap.activeFilePath ? (
+                      showCenterMarkdownPreview ? (
+                        <div className="doc-studio__center-markdown-preview">
+                          {markdownCompilePreviewContent ? (
+                            <div
+                              className={`doc-studio__center-markdown-preview-inner doc-studio__markdown-surface doc-studio__markdown-surface--${markdownTheme} ${
+                                markdownCentered
+                                  ? 'doc-studio__center-markdown-preview-inner--centered'
+                                  : 'doc-studio__center-markdown-preview-inner--fluid'
+                              }`}
+                              style={markdownSurfaceStyle}
+                            >
+                              <ChatMarkdown style={markdownTextStyle}>
+                                {markdownCompilePreviewContent}
+                              </ChatMarkdown>
+                            </div>
+                          ) : (
+                            <Empty
+                              description="暂无可渲染的 Markdown 内容"
+                              image={Empty.PRESENTED_IMAGE_SIMPLE}
+                            />
+                          )}
+                        </div>
+                      ) : (
                         <Editor
                           key={snap.activeFilePath}
-                          theme="vs-dark"
+                          theme={
+                            isMarkdownActiveFile
+                              ? markdownTheme === 'dark'
+                                ? 'vs-dark'
+                                : 'vs'
+                              : 'vs-dark'
+                          }
                           height="100%"
                           language={resolveEditorLanguage(snap.activeFilePath)}
                           loading={<Spin />}
@@ -7127,7 +7348,10 @@ const LatexEditorPage = () => {
                           options={{
                             readOnly: currentFileBuffer?.loading,
                             minimap: { enabled: false },
-                            fontSize: 14,
+                            fontSize: isMarkdownActiveFile ? markdownFontSize : 14,
+                            fontFamily: isMarkdownActiveFile
+                              ? MARKDOWN_FONT_FAMILY_MAP[markdownFontFamily]
+                              : undefined,
                             wordWrap: 'on',
                             automaticLayout: true,
                             selectOnLineNumbers: true,
@@ -7136,11 +7360,12 @@ const LatexEditorPage = () => {
                             // Monaco Editor ?????????????????
                           }}
                         />
-                      ) : (
-                        // 加载工作区时不显示引导，避免刷新时闪烁
-                        snap.workspaceLoading ? null : <DocStudioWelcome />
-                      )}
-                    </div>
+                      )
+                    ) : (
+                      // 加载工作区时不显示引导，避免刷新时闪烁
+                      snap.workspaceLoading ? null : <DocStudioWelcome />
+                    )}
+                  </div>
                 </div>
               ) : (
                 snap.workspaceLoading ? null : <DocStudioWelcome />
@@ -8317,7 +8542,18 @@ const LatexEditorPage = () => {
                         compileFormat === 'markdown' ? (
                           markdownCompilePreviewContent ? (
                             <div className="doc-studio__compile-markdown-preview doc-studio__compile-markdown-preview--full">
-                              <ChatMarkdown>{markdownCompilePreviewContent}</ChatMarkdown>
+                              <div
+                                className={`doc-studio__compile-markdown-preview-inner doc-studio__markdown-surface doc-studio__markdown-surface--${markdownTheme} ${
+                                  markdownCentered
+                                    ? 'doc-studio__compile-markdown-preview-inner--centered'
+                                    : 'doc-studio__compile-markdown-preview-inner--fluid'
+                                }`}
+                                style={markdownSurfaceStyle}
+                              >
+                                <ChatMarkdown style={markdownTextStyle}>
+                                  {markdownCompilePreviewContent}
+                                </ChatMarkdown>
+                              </div>
                             </div>
                           ) : (
                             <Empty
