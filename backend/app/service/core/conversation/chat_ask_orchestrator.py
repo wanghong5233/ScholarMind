@@ -7,7 +7,7 @@ import json
 import threading
 import time
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -870,6 +870,71 @@ class ChatAskOrchestrator:
                     }
 
                     answer_accum: list[str] = []
+                    stream_parse_buffer = ""
+                    stream_in_reasoning = False
+                    stream_tag_guard = max(
+                        len("<think>"),
+                        len("</think>"),
+                        len("<reasoning>"),
+                        len("</reasoning>"),
+                    )
+
+                    def _find_next_tag(text: str, tags: Tuple[str, ...]) -> Optional[Tuple[int, str]]:
+                        lowered = text.lower()
+                        best_idx = -1
+                        best_tag = ""
+                        for tag in tags:
+                            idx = lowered.find(tag)
+                            if idx < 0:
+                                continue
+                            if best_idx < 0 or idx < best_idx:
+                                best_idx = idx
+                                best_tag = tag
+                        if best_idx < 0:
+                            return None
+                        return best_idx, best_tag
+
+                    def _consume_stream_part(part_text: str, *, flush: bool = False) -> List[Tuple[str, str]]:
+                        nonlocal stream_parse_buffer, stream_in_reasoning
+                        emitted: List[Tuple[str, str]] = []
+                        if part_text:
+                            stream_parse_buffer += str(part_text)
+                        while stream_parse_buffer:
+                            tags: Tuple[str, ...] = (
+                                ("</think>", "</reasoning>")
+                                if stream_in_reasoning
+                                else ("<think>", "<reasoning>")
+                            )
+                            next_tag = _find_next_tag(stream_parse_buffer, tags)
+                            if next_tag:
+                                idx, tag = next_tag
+                                segment = stream_parse_buffer[:idx]
+                                if segment:
+                                    emitted.append(
+                                        ("reasoning" if stream_in_reasoning else "answer", segment)
+                                    )
+                                stream_parse_buffer = stream_parse_buffer[idx + len(tag):]
+                                stream_in_reasoning = not stream_in_reasoning
+                                continue
+                            if flush:
+                                emitted.append(
+                                    ("reasoning" if stream_in_reasoning else "answer", stream_parse_buffer)
+                                )
+                                stream_parse_buffer = ""
+                                break
+                            keep = min(len(stream_parse_buffer), max(stream_tag_guard - 1, 0))
+                            flush_upto = len(stream_parse_buffer) - keep
+                            if flush_upto <= 0:
+                                break
+                            segment = stream_parse_buffer[:flush_upto]
+                            if segment:
+                                emitted.append(
+                                    ("reasoning" if stream_in_reasoning else "answer", segment)
+                                )
+                            stream_parse_buffer = stream_parse_buffer[flush_upto:]
+                            break
+                        return emitted
+
                     runtime_model_emitted = False
                     effective_chunks = chunks0
                     extra_system_prompt = None
@@ -924,8 +989,49 @@ class ChatAskOrchestrator:
                             if runtime_model:
                                 runtime_model_emitted = True
                                 yield _emit("runtime_model", runtime_model)
-                        answer_accum.append(part)
-                        yield _emit("delta", {"content": part})
+                        part_text = ""
+                        part_channel = ""
+                        if isinstance(part, dict):
+                            part_text = str(part.get("content") or "")
+                            part_channel = str(part.get("channel") or "").strip().lower()
+                            if part_channel in {"thinking", "thought"}:
+                                part_channel = "reasoning"
+                        else:
+                            part_text = str(part or "")
+                        if not part_text:
+                            continue
+                        if part_channel == "reasoning":
+                            yield _emit(
+                                "reasoning_delta",
+                                {"content": part_text, "thinking": True, "channel": "reasoning"},
+                            )
+                            continue
+                        if part_channel == "answer":
+                            answer_accum.append(part_text)
+                            yield _emit("delta", {"content": part_text, "channel": "answer"})
+                            continue
+                        for channel, segment in _consume_stream_part(part_text):
+                            if not segment:
+                                continue
+                            if channel == "reasoning":
+                                yield _emit(
+                                    "reasoning_delta",
+                                    {"content": segment, "thinking": True, "channel": "reasoning"},
+                                )
+                                continue
+                            answer_accum.append(segment)
+                            yield _emit("delta", {"content": segment, "channel": "answer"})
+                    for channel, segment in _consume_stream_part("", flush=True):
+                        if not segment:
+                            continue
+                        if channel == "reasoning":
+                            yield _emit(
+                                "reasoning_delta",
+                                {"content": segment, "thinking": True, "channel": "reasoning"},
+                            )
+                            continue
+                        answer_accum.append(segment)
+                        yield _emit("delta", {"content": segment, "channel": "answer"})
                     generation_ms = int((time.perf_counter() - t_generate) * 1000)
                     if cancelled_during_generation and not answer_accum:
                         for frame in _cancel_frames("generation"):

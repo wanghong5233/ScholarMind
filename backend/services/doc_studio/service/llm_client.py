@@ -6,7 +6,7 @@ LLM 客户端
 1. API 模式：调用 DashScope/OpenAI API（当前使用）
 2. 本地模型模式：加载微调的 Qwen-7B 模型（未来升级）
 """
-from typing import Awaitable, Callable, Dict, Any, Optional, List
+from typing import Awaitable, Callable, Dict, Any, Optional, List, Tuple
 import asyncio
 import logging
 import os
@@ -515,7 +515,7 @@ class LLMClient:
         temperature: float = 0.3,
         llm_options: Optional[Dict[str, Any]] = None,
         image_attachments: Optional[List[Dict[str, Any]]] = None,
-        stream_text_callback: Optional[Callable[[str], Awaitable[None]]] = None,
+        stream_text_callback: Optional[Callable[[str, str], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         """
         生成回复（支持 API 和本地模型两种模式）
@@ -649,7 +649,7 @@ class LLMClient:
         resolved_policy: Optional[Any] = None,
         llm_options: Optional[Dict[str, Any]] = None,
         image_attachments: Optional[List[Dict[str, Any]]] = None,
-        stream_text_callback: Optional[Callable[[str], Awaitable[None]]] = None,
+        stream_text_callback: Optional[Callable[[str, str], Awaitable[None]]] = None,
     ) -> Dict[str, Any]:
         """
         使用 API 生成回复（DashScope/OpenAI）
@@ -724,22 +724,14 @@ class LLMClient:
                     if not delta:
                         continue
 
-                    delta_content = getattr(delta, "content", None)
-                    delta_text = ""
-                    if isinstance(delta_content, str):
-                        delta_text = delta_content
-                    elif isinstance(delta_content, list):
-                        delta_text = "".join(
-                            str(part.get("text", ""))
-                            for part in delta_content
-                            if isinstance(part, dict)
-                        )
-
+                    delta_text, reasoning_text = self._extract_stream_delta_channels(delta)
+                    if reasoning_text and stream_text_callback:
+                        await stream_text_callback(reasoning_text, "reasoning")
                     if not delta_text:
                         continue
                     chunks.append(delta_text)
                     if stream_text_callback:
-                        await stream_text_callback(delta_text)
+                        await stream_text_callback(delta_text, "answer")
 
                 if not received_any_chunk:
                     raise ValueError("No stream chunks in LLM response")
@@ -871,6 +863,87 @@ class LLMClient:
                 }
             )
         return [{"role": "user", "content": content_parts}]
+
+    @staticmethod
+    def _extract_text_payload(value: Any) -> str:
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            parts: List[str] = []
+            for item in value:
+                if isinstance(item, str):
+                    if item:
+                        parts.append(item)
+                    continue
+                if isinstance(item, dict):
+                    text = item.get("text") or item.get("content") or item.get("reasoning")
+                    if text:
+                        parts.append(str(text))
+                    continue
+                text = getattr(item, "text", None) or getattr(item, "content", None)
+                if text:
+                    parts.append(str(text))
+            return "".join(parts)
+        return ""
+
+    @classmethod
+    def _split_inline_reasoning_tags(cls, text: str) -> Tuple[str, str]:
+        raw = str(text or "")
+        if not raw:
+            return "", ""
+        lower = raw.lower()
+        cursor = 0
+        in_reasoning = False
+        answer_parts: List[str] = []
+        reasoning_parts: List[str] = []
+        while cursor < len(raw):
+            tags = ("</think>", "</reasoning>") if in_reasoning else ("<think>", "<reasoning>")
+            next_idx = -1
+            next_tag = ""
+            for tag in tags:
+                idx = lower.find(tag, cursor)
+                if idx < 0:
+                    continue
+                if next_idx < 0 or idx < next_idx:
+                    next_idx = idx
+                    next_tag = tag
+            if next_idx < 0:
+                segment = raw[cursor:]
+                if segment:
+                    if in_reasoning:
+                        reasoning_parts.append(segment)
+                    else:
+                        answer_parts.append(segment)
+                break
+            segment = raw[cursor:next_idx]
+            if segment:
+                if in_reasoning:
+                    reasoning_parts.append(segment)
+                else:
+                    answer_parts.append(segment)
+            cursor = next_idx + len(next_tag)
+            in_reasoning = not in_reasoning
+        return "".join(answer_parts), "".join(reasoning_parts)
+
+    @classmethod
+    def _extract_stream_delta_channels(cls, delta: Any) -> Tuple[str, str]:
+        if delta is None:
+            return "", ""
+        if isinstance(delta, dict):
+            getter = delta.get
+        else:
+            getter = lambda key, default=None: getattr(delta, key, default)
+
+        answer_text = cls._extract_text_payload(getter("content"))
+        explicit_reasoning = (
+            cls._extract_text_payload(getter("reasoning_content"))
+            or cls._extract_text_payload(getter("reasoning"))
+            or cls._extract_text_payload(getter("thinking"))
+            or cls._extract_text_payload(getter("thought"))
+        )
+        answer_clean, inline_reasoning = cls._split_inline_reasoning_tags(answer_text)
+        reasoning_text = f"{explicit_reasoning}{inline_reasoning}"
+        return answer_clean, reasoning_text
     
     async def reason_and_act(
         self,

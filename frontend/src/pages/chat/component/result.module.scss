@@ -39,6 +39,18 @@
     font-size: 14px;
   }
 
+  .chat-message-result__streaming-window {
+    max-height: 220px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-gutter: stable;
+    padding-right: 4px;
+  }
+
+  .chat-message-result__streaming-window--thinking {
+    max-height: 160px;
+  }
+
   .chat-message-result__actions {
     margin-top: 6px;
     display: flex;

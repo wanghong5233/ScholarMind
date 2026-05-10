@@ -113,6 +113,10 @@ const DEEP_RESEARCH_PERSIST_PROGRESS_LIMIT = 200
 const DEEP_RESEARCH_PERSIST_CITATIONS_LIMIT = 60
 const DEEP_RESEARCH_PERSIST_REPORT_CHARS = 6000
 const DEEP_RESEARCH_PERSIST_QUEUE_BLOCKS_LIMIT = 24
+const DEEP_RESEARCH_SUGGESTION_MIN_LENGTH = 56
+const DEEP_RESEARCH_SUGGESTION_MIN_SCORE = 6
+const DEEP_RESEARCH_SUGGESTION_AUTO_HIDE_MS = 12000
+const DEEP_RESEARCH_SUGGESTION_MAX_PER_SESSION = 1
 
 const FRIENDLY_MODEL_UNAVAILABLE = '当前模型暂时不可用，请稍后重试或尝试切换其他模型。'
 const FRIENDLY_MODEL_FALLBACK_FAILED =
@@ -176,6 +180,10 @@ type ChatUsageStats = {
   prompt_tokens: number
   completion_tokens: number
   total_tokens: number
+}
+type DeepResearchSuggestionEvaluation = {
+  reason: string
+  score: number
 }
 
 const DEFAULT_DASHSCOPE_MODEL = 'qwen3-max'
@@ -512,7 +520,7 @@ type LocalReplaceContext = {
   itemId: number
 }
 
-async function scrollToBottom() {
+async function scrollToBottom(behavior: ScrollBehavior = 'smooth') {
   await new Promise((resolve) => setTimeout(resolve))
 
   const threshold = 200
@@ -524,7 +532,7 @@ async function scrollToBottom() {
   if (distanceToBottom <= threshold) {
     window.scrollTo({
       top: document.documentElement.scrollHeight,
-      behavior: 'smooth',
+      behavior,
     })
   }
 }
@@ -1140,6 +1148,8 @@ export default function Index() {
   const deepResearchSubmitLockRef = useRef<Set<number>>(new Set())
   const suggestionDismissedRef = useRef<Set<string>>(new Set())
   const lastSuggestionTopicRef = useRef<string>('')
+  const suggestionAutoDismissTimerRef = useRef<number | null>(null)
+  const suggestionShownCountRef = useRef(0)
   const pendingSendRef = useRef<ChatPendingSendState | null>(null)
   const sessionNameRef = useRef('')
   const autoTitledSessionRef = useRef<Record<string, boolean>>({})
@@ -1172,6 +1182,13 @@ export default function Index() {
   useEffect(() => {
     activeDeepResearchItemIdRef.current = activeDeepResearchItemId
   }, [activeDeepResearchItemId])
+
+  useEffect(() => {
+    if (!researchSuggestion && suggestionAutoDismissTimerRef.current) {
+      window.clearTimeout(suggestionAutoDismissTimerRef.current)
+      suggestionAutoDismissTimerRef.current = null
+    }
+  }, [researchSuggestion])
 
   const getChatLayoutWidth = useCallback(() => {
     if (typeof document === 'undefined') return 0
@@ -1705,6 +1722,10 @@ export default function Index() {
       window.clearTimeout(researchPersistTimerRef.current)
       researchPersistTimerRef.current = null
     }
+    if (suggestionAutoDismissTimerRef.current) {
+      window.clearTimeout(suggestionAutoDismissTimerRef.current)
+      suggestionAutoDismissTimerRef.current = null
+    }
   })
 
   useEffect(() => {
@@ -1714,6 +1735,12 @@ export default function Index() {
     setFeedbackByMessageId({})
     pendingSendRef.current = null
     deepResearchSubmitLockRef.current.clear()
+    suggestionDismissedRef.current.clear()
+    suggestionShownCountRef.current = 0
+    if (suggestionAutoDismissTimerRef.current) {
+      window.clearTimeout(suggestionAutoDismissTimerRef.current)
+      suggestionAutoDismissTimerRef.current = null
+    }
     lastSuggestionTopicRef.current = ''
     setLocalReplaceContext(null)
     if (!user.token) {
@@ -2202,6 +2229,7 @@ export default function Index() {
         let temp = ''
         const decoder = new TextDecoder('utf-8')
         let currentEvent: string | null = null
+        let lastAutoScrollAt = 0
         while (true) {
           // 检查是否已中断
           if (abortControllerRef.current?.signal.aborted) {
@@ -2244,7 +2272,11 @@ export default function Index() {
             if (normalizedLine.startsWith('data:')) {
               const isCompletion = currentEvent === 'completion'
               parseData(normalizedLine, currentEvent || undefined)
-              scrollToBottom()
+              const now = Date.now()
+              if (now - lastAutoScrollAt >= 80) {
+                scrollToBottom('auto')
+                lastAutoScrollAt = now
+              }
               if (isCompletion || sawCompletion) {
                 // completion 事件已携带最终答案与引用，避免额外历史重载造成闪烁。
                 needReload = false
@@ -2302,6 +2334,12 @@ export default function Index() {
           streamRunId = json.run_id.trim()
           activeAskRunIdRef.current = streamRunId
         }
+        const normalizedEventName = String(eventName || json?.type || '').trim().toLowerCase()
+        const deltaChannel = String(json?.channel || '').trim().toLowerCase()
+        const isReasoningDelta =
+          normalizedEventName === 'reasoning_delta' ||
+          deltaChannel === 'reasoning' ||
+          Boolean(json?.thinking)
         if (eventName === 'completion' || json?.type === 'completion') {
           sawCompletion = true
         }
@@ -2398,14 +2436,24 @@ export default function Index() {
             }
             return normalizeProgressMessage(upstreamMessage)
           })()
-          if (statusText && !json?.content) {
+          const hasReasoningTrace =
+            typeof nextTarget.think === 'string' &&
+            nextTarget.think.trim().length > 0 &&
+            !nextTarget.think.trim().startsWith('⏳')
+          if (statusText && !json?.content && !hasReasoningTrace) {
             nextTarget.think = statusText
           }
         }
 
         if (json?.content) {
           markPendingCommitted()
-          if (json.thinking) {
+          if (isReasoningDelta) {
+            if (
+              typeof nextTarget.think === 'string' &&
+              nextTarget.think.startsWith('⏳')
+            ) {
+              nextTarget.think = ''
+            }
             nextTarget.think = `${nextTarget.think || ''}${json.content || ''}`
           } else {
             if (
@@ -3074,39 +3122,104 @@ export default function Index() {
     )
   }, [])
 
-  const evaluateDeepResearchSuggestion = useCallback((text: string) => {
+  const evaluateDeepResearchSuggestion = useCallback((text: string): DeepResearchSuggestionEvaluation | null => {
     const normalized = text.trim()
     if (!normalized) return null
-    const keywords = [
-      '调研',
-      '研究',
-      '综述',
-      '对比',
-      '比较',
-      '最新',
-      '进展',
-      '路线图',
-      '论文',
-      '文献',
-      'survey',
-      'state of the art',
-      'benchmark',
-      'sota',
+    if (normalized.length < DEEP_RESEARCH_SUGGESTION_MIN_LENGTH) return null
+    const exclusionPatterns = [
+      /^(你好|hi|hello|hey|嗨|在吗|在嘛)[，,\s!！?？]*/i,
+      /(你是谁|介绍一下你自己|你能做什么|能帮我做哪些事)/i,
+      /(翻译|润色|改写|扩写|压缩|总结|摘要|重写)/i,
+      /(报错|报错信息|修复|debug|排查)/i,
     ]
-    const hitKeyword = keywords.find((keyword) =>
-      normalized.toLowerCase().includes(keyword.toLowerCase()),
-    )
-    if (hitKeyword) {
-      return `包含“${hitKeyword}”等研究关键词，适合深度研究流程`
+    if (exclusionPatterns.some((pattern) => pattern.test(normalized))) {
+      return null
     }
-    if (normalized.length >= 60) {
-      return '问题较复杂，建议用深度研究进行系统性梳理'
+
+    const signalRules: Array<{ weight: number; pattern: RegExp; reason: string }> = [
+      {
+        weight: 4,
+        pattern:
+          /(深度调研|系统调研|全面调研|做一份(?:完整)?报告|research report|literature review|state of the art|\bsota\b)/i,
+        reason: '明确要求系统性调研',
+      },
+      {
+        weight: 2,
+        pattern: /(对比|比较|横向评估|benchmark|trade[-\s]?off|优劣)/i,
+        reason: '需要跨方案对比',
+      },
+      {
+        weight: 2,
+        pattern: /(对比表|矩阵|路线图|roadmap|研究空白|gap|选型建议)/i,
+        reason: '要求结构化研究产出',
+      },
+      {
+        weight: 1,
+        pattern: /(引用|来源|证据|可追溯|出处|citation|reference)/i,
+        reason: '强调证据可追溯',
+      },
+      {
+        weight: 1,
+        pattern: /(20\d{2}\s*[–\-~到至]\s*20\d{2}|近[一二两三四五六七八九十\d]+年|最新进展|latest|recent)/i,
+        reason: '限定了时间窗口',
+      },
+      {
+        weight: 1,
+        pattern: /(多篇|至少\d+篇|综述|survey)/i,
+        reason: '需要聚合多来源信息',
+      },
+    ]
+
+    let score = 0
+    const reasons: string[] = []
+    signalRules.forEach((rule) => {
+      if (!rule.pattern.test(normalized)) return
+      score += rule.weight
+      reasons.push(rule.reason)
+    })
+
+    const dimensionSignals = (normalized.match(/(?:\d+[)）.、]|；|;)/g) || []).length
+    if (dimensionSignals >= 3) {
+      score += 1
+      reasons.push('任务维度较多')
     }
-    if ((normalized.match(/[，,;；]/g) || []).length >= 2) {
-      return '问题包含多个维度，深度研究更容易覆盖全面'
+    if (normalized.length >= 180) {
+      score += 1
     }
-    return null
+    if (score < DEEP_RESEARCH_SUGGESTION_MIN_SCORE) {
+      return null
+    }
+
+    const reasonPrefix = reasons.slice(0, 2).join('，')
+    return {
+      reason: reasonPrefix
+        ? `${reasonPrefix}，可选使用深度研究获得更完整结果`
+        : '问题复杂度较高，可选使用深度研究获得更完整结果',
+      score,
+    }
   }, [])
+
+  const clearResearchSuggestionTimer = useCallback(() => {
+    if (suggestionAutoDismissTimerRef.current) {
+      window.clearTimeout(suggestionAutoDismissTimerRef.current)
+      suggestionAutoDismissTimerRef.current = null
+    }
+  }, [])
+
+  const queueResearchSuggestion = useCallback(
+    (nextSuggestion: { topic: string; reason: string }) => {
+      clearResearchSuggestionTimer()
+      setResearchSuggestion(nextSuggestion)
+      suggestionShownCountRef.current += 1
+      suggestionAutoDismissTimerRef.current = window.setTimeout(() => {
+        setResearchSuggestion((current) =>
+          current?.topic === nextSuggestion.topic ? null : current,
+        )
+        suggestionAutoDismissTimerRef.current = null
+      }, DEEP_RESEARCH_SUGGESTION_AUTO_HIDE_MS)
+    },
+    [clearResearchSuggestionTimer],
+  )
 
   const updateDeepResearchItem = useCallback(
     (itemId: number, updater: (data: API.DeepResearchCardState) => void) => {
@@ -4195,6 +4308,8 @@ export default function Index() {
       })) {
         return
       }
+      clearResearchSuggestionTimer()
+      setResearchSuggestion(null)
       const deepResearchPromptLeak = looksLikeDeepResearchInternalPrompt(normalizedText)
       const deepResearchLeakTopic = sanitizeDeepResearchTopic(normalizedText)
       const shouldDeepResearch = researchMode === 'deep' && !editingContext
@@ -4286,13 +4401,15 @@ export default function Index() {
         localReplaceItemId: localReplaceContext?.itemId,
       })
       setLocalReplaceContext(null)
-      const reason = evaluateDeepResearchSuggestion(normalizedText)
+      const suggestion = evaluateDeepResearchSuggestion(normalizedText)
       if (
-        reason &&
+        !draftRagEnabled &&
+        suggestion &&
+        suggestionShownCountRef.current < DEEP_RESEARCH_SUGGESTION_MAX_PER_SESSION &&
         !suggestionDismissedRef.current.has(normalizedText) &&
         lastSuggestionTopicRef.current !== normalizedText
       ) {
-        setResearchSuggestion({ topic: normalizedText, reason })
+        queueResearchSuggestion({ topic: normalizedText, reason: suggestion.reason })
         lastSuggestionTopicRef.current = normalizedText
       }
     },
@@ -4302,11 +4419,13 @@ export default function Index() {
       draftRagMode,
       draftUserKnowledgeBaseId,
       editingContext,
+      clearResearchSuggestionTimer,
       evaluateDeepResearchSuggestion,
       id,
       knowledgeBases,
       llmModel,
       navigate,
+      queueResearchSuggestion,
       user.token,
       pendingAttachments,
       pendingFiles,
@@ -4320,16 +4439,19 @@ export default function Index() {
 
   const handleAcceptSuggestion = useCallback(async () => {
     if (!researchSuggestion) return
+    clearResearchSuggestionTimer()
+    suggestionDismissedRef.current.add(researchSuggestion.topic)
     setResearchSuggestion(null)
     await sendDeepResearch(researchSuggestion.topic, { source: 'suggestion' })
-  }, [researchSuggestion, sendDeepResearch])
+  }, [clearResearchSuggestionTimer, researchSuggestion, sendDeepResearch])
 
   const handleDismissSuggestion = useCallback(() => {
     if (researchSuggestion?.topic) {
       suggestionDismissedRef.current.add(researchSuggestion.topic)
     }
+    clearResearchSuggestionTimer()
     setResearchSuggestion(null)
-  }, [researchSuggestion])
+  }, [clearResearchSuggestionTimer, researchSuggestion])
 
   const handleDeepResearchConfirm = useCallback(
     async (item: API.ChatItem) => {
@@ -5020,15 +5142,15 @@ export default function Index() {
           {researchSuggestion ? (
             <div className={styles['chat-page__research-suggestion']}>
               <div className={styles['chat-page__research-suggestion-text']}>
-                <strong>建议升级为深度研究：</strong>
+                <strong>可选建议：</strong>
                 {researchSuggestion.reason}
               </div>
               <Space size={8}>
-                <Button type="primary" size="small" onClick={handleAcceptSuggestion}>
-                  一键升级
+                <Button size="small" onClick={handleAcceptSuggestion}>
+                  试试深度研究
                 </Button>
-                <Button size="small" onClick={handleDismissSuggestion}>
-                  忽略
+                <Button size="small" type="text" onClick={handleDismissSuggestion}>
+                  稍后再说
                 </Button>
               </Space>
             </div>

@@ -7,7 +7,7 @@ import { ArrowRightOutlined, DislikeOutlined, LikeOutlined } from '@ant-design/i
 import { Button, Dropdown, Tooltip, message } from 'antd'
 import classNames from 'classnames'
 import dayjs from 'dayjs'
-import { useCallback, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useRef } from 'react'
 import styles from './result.module.scss'
 
 export function Result(props: {
@@ -20,6 +20,10 @@ export function Result(props: {
   onFeedback?: (rating: 'thumbs_up' | 'thumbs_down') => void
 }) {
   const { item, isEnd, onSend, onRefrence, onOpenCitations, feedback, onFeedback } = props
+  const thinkStreamingRef = useRef<HTMLDivElement | null>(null)
+  const contentStreamingRef = useRef<HTMLDivElement | null>(null)
+  const thinkStickToBottomRef = useRef(true)
+  const contentStickToBottomRef = useRef(true)
 
   const elapsedLabel = useMemo(() => {
     const raw = Number(item.elapsed_seconds)
@@ -103,14 +107,46 @@ export function Result(props: {
     }
   }, [item.content, item.think])
 
+  useEffect(() => {
+    if (!item.loading) return
+    if (thinkStickToBottomRef.current && thinkStreamingRef.current) {
+      thinkStreamingRef.current.scrollTop = thinkStreamingRef.current.scrollHeight
+    }
+  }, [item.loading, item.think])
+
+  useEffect(() => {
+    if (!item.loading) return
+    if (contentStickToBottomRef.current && contentStreamingRef.current) {
+      contentStreamingRef.current.scrollTop = contentStreamingRef.current.scrollHeight
+    }
+  }, [item.loading, item.content])
+
+  const handleThinkStreamingScroll = useCallback(() => {
+    const node = thinkStreamingRef.current
+    if (!node) return
+    const distanceToBottom = node.scrollHeight - node.scrollTop - node.clientHeight
+    thinkStickToBottomRef.current = distanceToBottom <= 24
+  }, [])
+
+  const handleContentStreamingScroll = useCallback(() => {
+    const node = contentStreamingRef.current
+    if (!node) return
+    const distanceToBottom = node.scrollHeight - node.scrollTop - node.clientHeight
+    contentStickToBottomRef.current = distanceToBottom <= 24
+  }, [])
+
   return (
     <div className={styles['chat-message-result']}>
       {item.think ? (
         item.loading ? (
           <div
+            ref={thinkStreamingRef}
+            onScroll={handleThinkStreamingScroll}
             className={classNames(
               styles['chat-message-result__think'],
               styles['chat-message-result__streaming'],
+              styles['chat-message-result__streaming-window'],
+              styles['chat-message-result__streaming-window--thinking'],
             )}
           >
             {item.think}
@@ -120,6 +156,8 @@ export function Result(props: {
             className={classNames(
               styles['chat-message-result__think'],
               styles['chat-message-result__md'],
+              styles['chat-message-result__streaming-window'],
+              styles['chat-message-result__streaming-window--thinking'],
             )}
             value={item.think}
             references={item.reference}
@@ -130,7 +168,14 @@ export function Result(props: {
 
       {item.content ? (
         item.loading ? (
-          <div className={styles['chat-message-result__streaming']}>
+          <div
+            ref={contentStreamingRef}
+            onScroll={handleContentStreamingScroll}
+            className={classNames(
+              styles['chat-message-result__streaming'],
+              styles['chat-message-result__streaming-window'],
+            )}
+          >
             {item.content}
           </div>
         ) : (

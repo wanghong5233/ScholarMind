@@ -301,31 +301,6 @@ const normalizeLiveDeltaText = (value?: string) =>
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n')
 
-const chunkTextByLength = (value: string, chunkSize: number) => {
-  const text = String(value || '')
-  const size = Math.max(24, Number(chunkSize) || 64)
-  const chunks: string[] = []
-  for (let i = 0; i < text.length; i += size) {
-    chunks.push(text.slice(i, i + size))
-  }
-  return chunks
-}
-
-const buildLivePreviewLines = (value?: string, maxLines = 6, chunkSize = 64) => {
-  const normalized = normalizeLiveDeltaText(value)
-  if (!normalized) return []
-  const rawLines = normalized.split('\n').map((line) => line.replace(/\t/g, '  ').trimEnd())
-  let lines = rawLines.filter((line) => line.trim().length > 0)
-  if (lines.length === 0) {
-    const compact = normalized.replace(/\s+/g, ' ').trim()
-    if (!compact) return []
-    lines = chunkTextByLength(compact, chunkSize)
-  } else if (lines.length === 1 && lines[0].length > chunkSize * 2) {
-    lines = chunkTextByLength(lines[0], chunkSize)
-  }
-  return lines.slice(-Math.max(1, maxLines))
-}
-
 type SelectionFragment = {
   id: string
   start: number
@@ -1065,6 +1040,7 @@ const LatexEditorPage = () => {
   const autoTitledSessionRef = useRef<Record<string, true>>({})
   const [chatToolbarCompact, setChatToolbarCompact] = useState(false)
   const lastAutoScrollMessageIdRef = useRef<string | null>(null)
+  const lastLiveAutoScrollAtRef = useRef(0)
   const promptInputRef = useRef<TextAreaRef | null>(null)
   const promptWrapperRef = useRef<HTMLDivElement | null>(null)
   const llmOptionsAppliedRef = useRef<string>('')
@@ -1094,6 +1070,7 @@ const LatexEditorPage = () => {
   const [liveAgentStatus, setLiveAgentStatus] = useState('')
   const [liveAgentTimeline, setLiveAgentTimeline] = useState<LiveTimelineEntry[]>([])
   const [liveAgentPreviewText, setLiveAgentPreviewText] = useState('')
+  const [liveAgentReasoningText, setLiveAgentReasoningText] = useState('')
   const [liveDeltaCharCount, setLiveDeltaCharCount] = useState(0)
   const [liveAgentElapsedSec, setLiveAgentElapsedSec] = useState(0)
   const diffEditorRef = useRef<any>(null)
@@ -1102,6 +1079,7 @@ const LatexEditorPage = () => {
   const diffEditorListenerRef = useRef<Array<{ dispose: () => void }>>([])
   const asyncRunResolvedRef = useRef(false)
   const liveDeltaStartedRef = useRef(false)
+  const liveReasoningStartedRef = useRef(false)
   const activeRunIdRef = useRef<string | null>(null)
   const pendingSendRef = useRef<PendingSendDraft | null>(null)
   const stopRequestedRef = useRef(false)
@@ -1110,9 +1088,14 @@ const LatexEditorPage = () => {
   const handledInteractionIdsRef = useRef<Set<string>>(new Set())
   const lastLiveEventSequenceRef = useRef(-1)
   const liveOutputRef = useRef<HTMLDivElement | null>(null)
-  const livePreviewLines = useMemo(
-    () => buildLivePreviewLines(liveAgentPreviewText, 4, 64),
+  const liveReasoningOutputRef = useRef<HTMLDivElement | null>(null)
+  const livePreviewText = useMemo(
+    () => normalizeLiveDeltaText(liveAgentPreviewText),
     [liveAgentPreviewText],
+  )
+  const liveReasoningPreviewText = useMemo(
+    () => normalizeLiveDeltaText(liveAgentReasoningText),
+    [liveAgentReasoningText],
   )
   
   // 侧边栏宽度持久化到 localStorage
@@ -2920,7 +2903,7 @@ const LatexEditorPage = () => {
     lastAutoScrollMessageIdRef.current = lastChatMessageId
     const container = chatMessagesContainerRef.current
     if (container) {
-      container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' })
+      container.scrollTo({ top: container.scrollHeight, behavior: 'auto' })
     }
   }, [lastChatMessageId])
 
@@ -2928,9 +2911,19 @@ const LatexEditorPage = () => {
     if (!chatLoading) return
     const container = chatMessagesContainerRef.current
     if (container) {
-      container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' })
+      const now = Date.now()
+      if (now - lastLiveAutoScrollAtRef.current >= 80) {
+        container.scrollTo({ top: container.scrollHeight, behavior: 'auto' })
+        lastLiveAutoScrollAtRef.current = now
+      }
     }
-  }, [chatLoading, liveAgentStatus, liveAgentTimeline.length, liveAgentPreviewText.length])
+  }, [
+    chatLoading,
+    liveAgentStatus,
+    liveAgentTimeline.length,
+    liveAgentPreviewText.length,
+    liveAgentReasoningText.length,
+  ])
 
   useEffect(() => {
     if (!chatLoading) return
@@ -2945,6 +2938,12 @@ const LatexEditorPage = () => {
     if (!el) return
     el.scrollTop = el.scrollHeight
   }, [liveAgentPreviewText])
+
+  useEffect(() => {
+    const el = liveReasoningOutputRef.current
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+  }, [liveAgentReasoningText])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -5146,9 +5145,11 @@ const LatexEditorPage = () => {
     setLiveAgentStatus('')
     setLiveAgentTimeline([])
     setLiveAgentPreviewText('')
+    setLiveAgentReasoningText('')
     setLiveDeltaCharCount(0)
     setLiveAgentElapsedSec(0)
     liveDeltaStartedRef.current = false
+    liveReasoningStartedRef.current = false
     seenLiveEventIdsRef.current = new Set()
     handledInteractionIdsRef.current = new Set()
     lastLiveEventSequenceRef.current = -1
@@ -5822,6 +5823,24 @@ const LatexEditorPage = () => {
             const payload = JSON.parse((event as MessageEvent<string>).data || '{}')
             const delta = normalizeLiveDeltaText(payload?.delta)
             if (!delta) return
+            const channel = String(payload?.channel || '').trim().toLowerCase()
+            if (channel === 'reasoning') {
+              markPendingSendCommitted('delta')
+              setLiveAgentReasoningText((prev) => {
+                const next = `${prev}${delta}`
+                return next.length > 16000 ? next.slice(next.length - 16000) : next
+              })
+              if (!liveReasoningStartedRef.current) {
+                liveReasoningStartedRef.current = true
+                setLiveAgentStatus('正在思考并规划回答...')
+                appendLiveTimelineEvent({
+                  text: '正在流式输出思考过程（可折叠预览）',
+                  eventType: 'reasoning_start',
+                  level: 'info',
+                })
+              }
+              return
+            }
             markPendingSendCommitted('delta')
             setLiveAgentPreviewText((prev) => {
               const next = `${prev}${delta}`
@@ -5839,6 +5858,29 @@ const LatexEditorPage = () => {
             }
           } catch (error) {
             console.warn('Failed to parse delta event', error)
+          }
+        })
+        source.addEventListener('reasoning_delta', (event) => {
+          try {
+            const payload = JSON.parse((event as MessageEvent<string>).data || '{}')
+            const delta = normalizeLiveDeltaText(payload?.delta)
+            if (!delta) return
+            markPendingSendCommitted('delta')
+            setLiveAgentReasoningText((prev) => {
+              const next = `${prev}${delta}`
+              return next.length > 16000 ? next.slice(next.length - 16000) : next
+            })
+            if (!liveReasoningStartedRef.current) {
+              liveReasoningStartedRef.current = true
+              setLiveAgentStatus('正在思考并规划回答...')
+              appendLiveTimelineEvent({
+                text: '正在流式输出思考过程（可折叠预览）',
+                eventType: 'reasoning_start',
+                level: 'info',
+              })
+            }
+          } catch (error) {
+            console.warn('Failed to parse reasoning_delta event', error)
           }
         })
 
@@ -7760,16 +7802,20 @@ const LatexEditorPage = () => {
                                     </span>
                                   )}
                                 </div>
+                                {liveReasoningStartedRef.current && liveReasoningPreviewText && (
+                                  <>
+                                    <div className="doc-studio__chat-live-reasoning-label">思考过程（流式）</div>
+                                    <div
+                                      ref={liveReasoningOutputRef}
+                                      className="doc-studio__chat-live-reasoning-output"
+                                    >
+                                      {liveReasoningPreviewText}
+                                    </div>
+                                  </>
+                                )}
                                 {liveDeltaStartedRef.current && (
                                   <div ref={liveOutputRef} className="doc-studio__chat-live-output">
-                                    {livePreviewLines.map((line, lineIndex) => (
-                                      <div
-                                        key={`live-preview-${lineIndex}`}
-                                        className="doc-studio__chat-live-output-line"
-                                      >
-                                        {line}
-                              </div>
-                            ))}
+                                    {livePreviewText}
                                   </div>
                                 )}
                               </div>
@@ -7789,16 +7835,20 @@ const LatexEditorPage = () => {
                                   </span>
                                 )}
                               </div>
+                              {liveReasoningStartedRef.current && liveReasoningPreviewText && (
+                                <>
+                                  <div className="doc-studio__chat-live-reasoning-label">思考过程（流式）</div>
+                                  <div
+                                    ref={liveReasoningOutputRef}
+                                    className="doc-studio__chat-live-reasoning-output"
+                                  >
+                                    {liveReasoningPreviewText}
+                                  </div>
+                                </>
+                              )}
                               {liveDeltaStartedRef.current && (
                                 <div ref={liveOutputRef} className="doc-studio__chat-live-output">
-                                  {livePreviewLines.map((line, lineIndex) => (
-                                    <div
-                                      key={`live-preview-empty-${lineIndex}`}
-                                      className="doc-studio__chat-live-output-line"
-                                    >
-                                      {line}
-                                    </div>
-                                  ))}
+                                  {livePreviewText}
                                 </div>
                               )}
                             </div>

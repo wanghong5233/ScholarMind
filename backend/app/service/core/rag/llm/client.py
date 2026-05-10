@@ -500,11 +500,14 @@ class LLMClient:
                                 choices = obj.get("choices") or []
                                 if choices:
                                     c0 = choices[0]
-                                    delta = c0.get("delta") or {}
-                                    content = delta.get("content") or c0.get("message", {}).get("content")
-                                    if content:
-                                        answer_parts.append(str(content))
-                                        yield content
+                                    answer_text, reasoning_text = self._extract_stream_delta_channels(c0)
+                                    if reasoning_text:
+                                        reasoning_payload = f"<think>{reasoning_text}</think>"
+                                        answer_parts.append(reasoning_payload)
+                                        yield reasoning_payload
+                                    if answer_text:
+                                        answer_parts.append(answer_text)
+                                        yield answer_text
                                 usage = self._coerce_usage(obj.get("usage"))
                                 if usage:
                                     self._last_usage = usage
@@ -696,6 +699,78 @@ class LLMClient:
             }
         except Exception:
             return None
+
+    @staticmethod
+    def _extract_text_payload(value: Any) -> str:
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            parts: List[str] = []
+            for item in value:
+                if isinstance(item, str):
+                    if item:
+                        parts.append(item)
+                    continue
+                if isinstance(item, dict):
+                    text = item.get("text") or item.get("content") or item.get("reasoning")
+                    if text:
+                        parts.append(str(text))
+            return "".join(parts)
+        return ""
+
+    @classmethod
+    def _split_inline_reasoning_tags(cls, text: str) -> tuple[str, str]:
+        raw = str(text or "")
+        if not raw:
+            return "", ""
+        lower = raw.lower()
+        cursor = 0
+        in_reasoning = False
+        answer_parts: List[str] = []
+        reasoning_parts: List[str] = []
+        while cursor < len(raw):
+            tags = ("</think>", "</reasoning>") if in_reasoning else ("<think>", "<reasoning>")
+            next_idx = -1
+            next_tag = ""
+            for tag in tags:
+                idx = lower.find(tag, cursor)
+                if idx < 0:
+                    continue
+                if next_idx < 0 or idx < next_idx:
+                    next_idx = idx
+                    next_tag = tag
+            if next_idx < 0:
+                segment = raw[cursor:]
+                if segment:
+                    if in_reasoning:
+                        reasoning_parts.append(segment)
+                    else:
+                        answer_parts.append(segment)
+                break
+            segment = raw[cursor:next_idx]
+            if segment:
+                if in_reasoning:
+                    reasoning_parts.append(segment)
+                else:
+                    answer_parts.append(segment)
+            cursor = next_idx + len(next_tag)
+            in_reasoning = not in_reasoning
+        return "".join(answer_parts), "".join(reasoning_parts)
+
+    @classmethod
+    def _extract_stream_delta_channels(cls, choice: Dict[str, Any]) -> tuple[str, str]:
+        delta = choice.get("delta") or {}
+        answer_text = cls._extract_text_payload(delta.get("content"))
+        if not answer_text:
+            answer_text = cls._extract_text_payload((choice.get("message") or {}).get("content"))
+        explicit_reasoning = (
+            cls._extract_text_payload(delta.get("reasoning_content"))
+            or cls._extract_text_payload(delta.get("reasoning"))
+            or cls._extract_text_payload(delta.get("thinking"))
+            or cls._extract_text_payload(delta.get("thought"))
+        )
+        answer_clean, inline_reasoning = cls._split_inline_reasoning_tags(answer_text)
+        return answer_clean, f"{explicit_reasoning}{inline_reasoning}"
 
     def _estimate_usage(self, *, messages: List[Dict[str, Any]], answer: str) -> Dict[str, int]:
         prompt_chars = sum(self._content_chars(item.get("content")) for item in (messages or []))

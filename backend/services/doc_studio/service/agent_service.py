@@ -1320,29 +1320,34 @@ class LaTeXEditAgent(BaseAgent):
             },
         )
 
-        stream_buffer: List[str] = []
-        last_emit_at = 0.0
+        stream_buffer_by_channel: Dict[str, List[str]] = {"answer": [], "reasoning": []}
+        last_emit_at_by_channel: Dict[str, float] = {"answer": 0.0, "reasoning": 0.0}
 
-        async def _on_stream_text(delta_text: str) -> None:
-            nonlocal last_emit_at
+        async def _on_stream_text(delta_text: str, channel: str = "answer") -> None:
             if should_cancel and should_cancel():
                 raise AgentCancelledError("cancelled_by_user")
             text = str(delta_text or "")
             if not text:
                 return
+            normalized_channel = str(channel or "answer").strip().lower()
+            if normalized_channel in {"thinking", "thought"}:
+                normalized_channel = "reasoning"
+            if normalized_channel not in {"answer", "reasoning"}:
+                normalized_channel = "answer"
             await self._emit_runtime_model(progress_callback, state)
+            stream_buffer = stream_buffer_by_channel[normalized_channel]
             stream_buffer.append(text)
             now = time.time()
             merged = "".join(stream_buffer)
             # Ask 模式流式粒度：兼顾实时性与回调开销。
-            if len(merged) >= 64 or (now - last_emit_at) >= 0.15:
+            if len(merged) >= 64 or (now - last_emit_at_by_channel[normalized_channel]) >= 0.15:
                 await self._emit_progress(
                     progress_callback,
-                    "delta",
-                    {"delta": merged, "mode": "ask"},
+                    "reasoning_delta" if normalized_channel == "reasoning" else "delta",
+                    {"delta": merged, "mode": "ask", "channel": normalized_channel},
                 )
                 stream_buffer.clear()
-                last_emit_at = now
+                last_emit_at_by_channel[normalized_channel] = now
 
         prompt = self._build_ask_prompt(state, user_intent, context_payload)
         ask_llm_options = dict(state.llm_options or {})
@@ -1363,11 +1368,19 @@ class LaTeXEditAgent(BaseAgent):
         await self._emit_runtime_model(progress_callback, state)
         if should_cancel and should_cancel():
             raise AgentCancelledError("cancelled_by_user")
-        if stream_buffer:
+        for channel_key in ("reasoning", "answer"):
+            stream_buffer = stream_buffer_by_channel[channel_key]
+            if not stream_buffer:
+                continue
             await self._emit_progress(
                 progress_callback,
-                "delta",
-                {"delta": "".join(stream_buffer), "mode": "ask", "flush": True},
+                "reasoning_delta" if channel_key == "reasoning" else "delta",
+                {
+                    "delta": "".join(stream_buffer),
+                    "mode": "ask",
+                    "channel": channel_key,
+                    "flush": True,
+                },
             )
         reply = str(llm_result.get("content") or "").strip()
         if not reply:
@@ -2069,7 +2082,7 @@ class LaTeXEditAgent(BaseAgent):
             await cls._emit_progress(
                 progress_callback,
                 "delta",
-                {"delta": part, "mode": mode, "synthetic": True},
+                {"delta": part, "mode": mode, "channel": "answer", "synthetic": True},
             )
             await asyncio.sleep(0.005)
 
