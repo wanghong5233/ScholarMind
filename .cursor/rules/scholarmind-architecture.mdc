@@ -1,0 +1,38 @@
+---
+description: ScholarMind project structure and agent architecture boundaries
+globs:
+  - "backend/**/*.py"
+  - "frontend/**/*.{ts,tsx}"
+  - "notes/**/*.md"
+  - "README*.md"
+alwaysApply: false
+---
+
+# ScholarMind Architecture
+
+## Source of Truth
+
+- Treat `README.md`, `backend/README.md`, `frontend/README.md`, and `notes/` as project documentation, but verify behavior against code before editing.
+- `DeepResearch_ReferenceProjects/` is reference material only. Do not copy code from it or import files from it into ScholarMind.
+- Build only capabilities that serve ScholarMind's RAG assistant, paper ingestion, DeepResearch, Doc Studio, admin/demo operation, or deployment.
+
+## Backend Boundaries
+
+- `backend/app/` is the main FastAPI service: authentication, sessions, knowledge bases, RAG orchestration, ingestion, and gateway routes.
+- `backend/services/deep_research/` owns DeepResearch planning, tool execution, evidence collection, and report generation.
+- `backend/services/doc_studio/` owns document workspace editing, agent actions, compile/check flows, and Doc Studio state.
+- `backend/services/mineru/`, `backend/services/reranker/`, and Grobid integration are infrastructure services; keep business policy in the main API or owning service.
+- Shared contracts should use Pydantic schemas and explicit API responses, not ad hoc dictionaries that drift from frontend types.
+
+## Agent Output Rules
+
+- RAG and DeepResearch claims must be traceable to retrieved chunks, paper metadata, web evidence, or explicit tool traces.
+- Prefer structured Pydantic outputs over free-form prose when code consumes model output.
+- Fail loudly on invalid model JSON, missing API keys, provider auth failures, schema mismatches, or ingestion/indexing failures.
+- Do not convert provider errors into empty results unless the caller explicitly treats empty results as a valid search outcome.
+
+## Frontend Contract Rules
+
+- TypeScript types must mirror backend response schemas and streaming event names.
+- User-facing UI should expose evidence, citations, progress, retryable failures, and next-step guidance instead of generic success or empty states.
+- Do not hide backend errors behind generic `Network Error`, `[]`, or success states.

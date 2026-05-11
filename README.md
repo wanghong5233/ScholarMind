@@ -6,7 +6,7 @@
 
 ## 🎯 在线演示
 
-**[https://demo-scholarmind.wh5233.me](https://demo-scholarmind.wh5233.me)**
+**[https://scholarmind.wh5233.me/demo](https://scholarmind.wh5233.me/demo)**
 
 体验 RAG 问答、DeepResearch 文献综述、Doc Studio 智能编辑，即刻开始无需本地部署。⭐ 若对你有帮助，欢迎 Star
 
@@ -21,7 +21,7 @@
 
 [English](README_EN.md) | **中文**
 
-ScholarMind 采用**四服务微服务架构**，集成生产级 RAG 检索管线、DeepResearch 深度研究 Agent 和 Doc Studio 文档智能编辑 Agent，支持论文理解、文献综述、学术写作和知识库管理。**功能预览**：RAG 对话、DeepResearch 报告、Doc Studio 编辑 → [在线演示](https://demo-scholarmind.wh5233.me)
+ScholarMind 采用**三服务微服务架构**（主 API + DeepResearch + Doc Studio），集成生产级 RAG 检索管线、DeepResearch 深度研究 Agent 和 Doc Studio 文档智能编辑 Agent，支持论文理解、文献综述、学术写作和知识库管理。**功能预览**：RAG 对话、DeepResearch 报告、Doc Studio 编辑 → [在线演示](https://scholarmind.wh5233.me/demo)
 
 ---
 
@@ -85,13 +85,17 @@ flowchart TB
         DS["doc_studio<br/>:8003<br/>Agent 编辑 / Workspace"]
     end
 
-    subgraph Infra["核心基础设施与组件"]
+    subgraph Infra["核心基础设施"]
         direction LR
-        PG[("PostgreSQL<br/>(用户/文档/审计)")]
-        ES[("Elasticsearch<br/>(向量 + BM25)")]
+        PG[("PostgreSQL<br/>(用户/文档/向量)")]
         Redis[("Redis<br/>(队列/SSE重放)")]
-        Rerank["Reranker<br/>:8002"]
-        Parse["MinerU + Grobid<br/>(PDF解析)"]
+    end
+
+    subgraph Cloud["云端 AI 能力"]
+        direction LR
+        LLM["LLM<br/>(OpenAI / DashScope)"]
+        EmbRerank["Embedding + Rerank<br/>(DashScope)"]
+        Parse["PDF 解析<br/>(LlamaParse / Unstructured)"]
     end
 
     UI_Chat --> API
@@ -106,24 +110,29 @@ flowchart TB
     DS -. "internal token /api/internal" .-> API
 
     API --- PG
-    API --- ES
     API --- Redis
-    API --- Rerank
-    API --- Parse
+    API -. HTTPS .- LLM
+    API -. HTTPS .- EmbRerank
+    API -. HTTPS .- Parse
 
     DR --- Redis
+    DR -. HTTPS .- LLM
+    DS -. HTTPS .- LLM
 
     classDef gateway fill:#ece9f6,stroke:#b9b3cc,stroke-width:1px,color:#4f4a60;
     classDef node fill:#f7f7f9,stroke:#d8d8df,stroke-width:1px,color:#444444;
     classDef infra fill:#f4f5f8,stroke:#cfd6e0,stroke-width:1px,color:#444444;
+    classDef cloud fill:#f5f3ec,stroke:#d6cfb9,stroke-width:1px,color:#5a5340;
     
     class API gateway;
     class UI_Chat,UI_DR,UI_Doc,UI_Admin,DR,DS node;
-    class PG,ES,Redis,Rerank,Parse infra;
+    class PG,Redis infra;
+    class LLM,EmbRerank,Parse cloud;
     
     style Frontend fill:transparent,stroke:#e3e3e8,stroke-width:1px,color:#666666,stroke-dasharray: 5 5;
     style Services fill:transparent,stroke:#e3e3e8,stroke-width:1px,color:#666666,stroke-dasharray: 5 5;
     style Infra fill:transparent,stroke:#e3e3e8,stroke-width:1px,color:#666666,stroke-dasharray: 5 5;
+    style Cloud fill:transparent,stroke:#e3e3e8,stroke-width:1px,color:#666666,stroke-dasharray: 5 5;
     linkStyle default stroke:#cfcfd6,stroke-width:1px,fill:none;
 ```
 
@@ -132,7 +141,8 @@ flowchart TB
 | `scholarmind_api` | 8000 | 主 API：用户认证、RAG 对话、Session 管理、文档处理 |
 | `deep_research` | 8004 | DeepResearch Agent：多轮研究、队列调度、报告生成 |
 | `doc_studio` | 8003 | Doc Studio Agent：LaTeX/Markdown 编辑、文件系统、HitL 确认 |
-| `reranker` | 8002 | Cross-Encoder 精排 |
+
+仓库内 MinerU / Grobid / 本地 Reranker 子服务为可选 GPU 重栈，生产默认不启用。
 
 ---
 
@@ -150,9 +160,9 @@ flowchart TB
 | **MMR 多样性** | Jaccard token 相似度，平衡相关性与多样性 |
 | **公式上下文扩展** | 公式 chunk 前后各 2 块纳入，保证定义与解释完整 |
 | **Metadata 重排** | 年份、引用数、章节、知识图谱 boost、多模态元素 |
-| **Cross-Encoder 精排** | BGE-Reranker-Large INT8 最终排序 |
+| **云端精排** | DashScope Rerank 最终排序 |
 
-**文档摄入**：MinerU 高保真解析 → Grobid 学术元数据 → 策略感知分块 → Embedding → ES 双索引。
+**文档摄入**：LlamaParse → Unstructured API → PyMuPDF 三档解析 → 策略感知分块 → Embedding → pgvector 双索引。
 
 **SSE 事件序列**：`progress.accepted` → `progress.history`（STM）→ `progress.memory`（LTM）→ `progress.retrieving` → `progress.rerank` → `delta.*`（流式 token）→ `completion`。支持 `Last-Event-ID` 断线重放。
 
@@ -359,31 +369,33 @@ flowchart TD
 
 ## 快速开始
 
-**环境**：Docker Compose、8GB+ RAM、NVIDIA GPU（无 GPU 见[故障排查](#故障排查)）、DashScope API Key
+**环境**：Docker Compose、4GB+ RAM、DashScope / OpenAI / LlamaParse API Key
 
 ```bash
 git clone https://github.com/wanghong5233/ScholarMind.git
 cd ScholarMind/backend
 cp .env.example .env
-# 编辑 .env，至少配置：DASHSCOPE_API_KEY、JWT_SECRET_KEY、ELASTIC_PASSWORD
+# 编辑 .env，至少配置：DASHSCOPE_API_KEY、OPENAI_API_KEY、SM_LLAMA_PARSE_API_KEY、JWT_SECRET_KEY
 make up-build && make migrate
 cd ../frontend && npm run dev   # 前端单独启动
 ```
 
 **访问**：前端 http://localhost:5173 | API 文档 http://localhost:8000/docs
 
-**必填环境变量**：`DASHSCOPE_API_KEY`、`JWT_SECRET_KEY`（`python -c "import secrets; print(secrets.token_hex(32))"` 生成）、`ELASTIC_PASSWORD`（8 位+）。可选：`SEMANTIC_SCHOLAR_API_KEY`、`TAVILY_API_KEY`/`SERPER_API_KEY`。详见 `backend/.env.example`。
-
+**必填环境变量**：`DASHSCOPE_API_KEY`、`OPENAI_API_KEY`、`SM_LLAMA_PARSE_API_KEY`、`JWT_SECRET_KEY`（`python -c "import secrets; print(secrets.token_hex(32))"` 生成）。可选：`SEMANTIC_SCHOLAR_API_KEY`、`TAVILY_API_KEY` / `SERPER_API_KEY`。详见 `backend/.env.example`。
 **常用命令**：`make up` 启动 | `make down` 停止 | `make logs-api` 日志
+
+云端部署见 [docs/LOW_COST_CLOUD_DEPLOYMENT_MANUAL.md](./docs/LOW_COST_CLOUD_DEPLOYMENT_MANUAL.md)。
 
 ### 故障排查
 
 | 现象 | 处理 |
 |------|------|
-| MinerU/Reranker 启动失败（无 GPU） | 在 `docker-compose.yml` 中：`mineru`、`reranker` 的 `dockerfile` 改为 `Dockerfile`，并注释 `deploy.resources.reservations`。Reranker 可用 DashScope 云端；MinerU 无 GPU 时解析受限 |
-| Elasticsearch 超时 | 确保 `.env` 中 `ELASTIC_PASSWORD` 已设置，ES 首次启动约 2–3 分钟 |
-| 前端空白 / 401 | 检查 `JWT_SECRET_KEY` 与后端一致 |
-| PDF 解析失败 | MinerU 需 GPU，确认 NVIDIA 驱动与 Container Toolkit 已安装 |
+| 前端空白 / 401 | 检查 `JWT_SECRET_KEY` 前后端一致与 CORS origin 配置 |
+| PDF 解析失败 | 检查 `SM_LLAMA_PARSE_API_KEY`；默认按 LlamaParse → Unstructured → PyMuPDF 三档降级 |
+| LLM 长时间无响应 | 通过 `OPENAI_BASE_URL` 配置 Cloudflare AI Gateway 反向代理 |
+| 容器启动卡在 `nltk_data Downloading` | 用 `backend/scripts/prepare_nltk_data.sh` 预置数据并 volume 注入 |
+| 启用本地 GPU 重栈（MinerU / Grobid / Reranker） | 保留为可选服务；无 GPU 注释对应 `deploy.resources.reservations` |
 
 ---
 
@@ -392,10 +404,10 @@ cd ../frontend && npm run dev   # 前端单独启动
 | 层级 | 技术 |
 |------|------|
 | **后端** | FastAPI、Python 3.11+、SQLAlchemy、Alembic |
-| **数据库** | PostgreSQL 15、Elasticsearch 8.x、Redis 7 |
+| **数据库** | PostgreSQL 15 + pgvector、Redis 7 |
 | **前端** | React 18、TypeScript、Ant Design、Valtio |
-| **AI** | DashScope / OpenAI（Embedding、LLM）、BGE-Reranker、MinerU、Grobid |
-| **运维** | Docker Compose |
+| **AI** | DashScope / OpenAI（Embedding、LLM、Rerank）、LlamaParse、Unstructured |
+| **运维** | Docker Compose、Cloudflare Tunnel、Vercel |
 
 ---
 
@@ -409,7 +421,8 @@ cd ../frontend && npm run dev   # 前端单独启动
 | **断线重放** | `AskStreamReplayBuffer` 双后端（内存 + Redis），`Last-Event-ID` 协议无感续流 |
 | **产品面隔离** | `sessions.surface` 区分 deep_chat / doc_studio，硬隔离会话宇宙 |
 | **GraphRAG** | 实体提取 → 图谱节点匹配 → `boost_chunk_ids` 传入 RAG Metadata 阶段 |
-| **MinerU + Grobid** | 双引擎对齐，高保真学术 PDF 解析（版面 + 元数据） |
+| **三档解析降级** | LlamaParse → Unstructured → PyMuPDF，云端为主、本地兜底，无 GPU 依赖 |
+| **Provider 级熔断** | 单请求内 LLM provider 出现连接错误立即跳过其全部模型，转下一 provider |
 
 ---
 

@@ -6,7 +6,7 @@
 
 ## 🎯 Live Demo
 
-**[https://demo-scholarmind.wh5233.me](https://demo-scholarmind.wh5233.me)**
+**[https://scholarmind.wh5233.me/demo](https://scholarmind.wh5233.me/demo)**
 
 Try RAG Q&A, DeepResearch literature review, and Doc Studio editing without local deployment. ⭐ Star the repo if it helps.
 
@@ -21,7 +21,7 @@ Try RAG Q&A, DeepResearch literature review, and Doc Studio editing without loca
 
 **English** | [中文](README.md)
 
-ScholarMind uses a **four-service microservice architecture**, integrating production-grade RAG retrieval, DeepResearch research Agent, and Doc Studio document editing Agent for paper understanding, literature review, academic writing, and knowledge base management. **Preview**: RAG chat, DeepResearch reports, Doc Studio editing → [Live Demo](https://demo-scholarmind.wh5233.me)
+ScholarMind uses a **three-service microservice architecture** (main API + DeepResearch + Doc Studio), integrating production-grade RAG retrieval, DeepResearch research Agent, and Doc Studio document editing Agent for paper understanding, literature review, academic writing, and knowledge base management. **Preview**: RAG chat, DeepResearch reports, Doc Studio editing → [Live Demo](https://scholarmind.wh5233.me/demo)
 
 ---
 
@@ -87,11 +87,15 @@ flowchart TB
 
     subgraph Infra["Core Infrastructure"]
         direction LR
-        PG[("PostgreSQL<br/>(users / documents / audit)")]
-        ES[("Elasticsearch<br/>(vector + BM25)")]
+        PG[("PostgreSQL<br/>(users / documents / vector)")]
         Redis[("Redis<br/>(queue / SSE replay)")]
-        Rerank["Reranker<br/>:8002"]
-        Parse["MinerU + Grobid<br/>(PDF parsing)"]
+    end
+
+    subgraph Cloud["Cloud AI"]
+        direction LR
+        LLM["LLM<br/>(OpenAI / DashScope)"]
+        EmbRerank["Embedding + Rerank<br/>(DashScope)"]
+        Parse["PDF Parsing<br/>(LlamaParse / Unstructured)"]
     end
 
     UI_Chat --> API
@@ -106,24 +110,29 @@ flowchart TB
     DS -. "internal token /api/internal" .-> API
 
     API --- PG
-    API --- ES
     API --- Redis
-    API --- Rerank
-    API --- Parse
+    API -. HTTPS .- LLM
+    API -. HTTPS .- EmbRerank
+    API -. HTTPS .- Parse
 
     DR --- Redis
+    DR -. HTTPS .- LLM
+    DS -. HTTPS .- LLM
 
     classDef gateway fill:#ece9f6,stroke:#b9b3cc,stroke-width:1px,color:#4f4a60;
     classDef node fill:#f7f7f9,stroke:#d8d8df,stroke-width:1px,color:#444444;
     classDef infra fill:#f4f5f8,stroke:#cfd6e0,stroke-width:1px,color:#444444;
+    classDef cloud fill:#f5f3ec,stroke:#d6cfb9,stroke-width:1px,color:#5a5340;
 
     class API gateway;
     class UI_Chat,UI_DR,UI_Doc,UI_Admin,DR,DS node;
-    class PG,ES,Redis,Rerank,Parse infra;
+    class PG,Redis infra;
+    class LLM,EmbRerank,Parse cloud;
 
     style Frontend fill:transparent,stroke:#e3e3e8,stroke-width:1px,color:#666666,stroke-dasharray: 5 5;
     style Services fill:transparent,stroke:#e3e3e8,stroke-width:1px,color:#666666,stroke-dasharray: 5 5;
     style Infra fill:transparent,stroke:#e3e3e8,stroke-width:1px,color:#666666,stroke-dasharray: 5 5;
+    style Cloud fill:transparent,stroke:#e3e3e8,stroke-width:1px,color:#666666,stroke-dasharray: 5 5;
     linkStyle default stroke:#cfcfd6,stroke-width:1px,fill:none;
 ```
 
@@ -132,7 +141,8 @@ flowchart TB
 | `scholarmind_api` | 8000 | Main API: auth, RAG chat, session management, document processing |
 | `deep_research` | 8004 | DeepResearch Agent: multi-turn research, queue scheduling, report generation |
 | `doc_studio` | 8003 | Doc Studio Agent: LaTeX/Markdown editing, file system, HitL confirmation |
-| `reranker` | 8002 | Cross-Encoder reranking |
+
+MinerU / Grobid / local Reranker remain available as optional GPU-heavy services and are not enabled by default in production.
 
 ---
 
@@ -150,9 +160,9 @@ Six-layer multi-strategy retrieval pipeline with hybrid search over in-session d
 | **MMR diversity** | Jaccard token similarity for relevance vs. diversity balance |
 | **Formula context expansion** | ±2 chunks around formula chunks for definitions and explanations |
 | **Metadata reranking** | Year, citation count, section, knowledge graph boost, multimodal |
-| **Cross-Encoder reranking** | BGE-Reranker-Large INT8 final ordering |
+| **Cloud reranking** | DashScope Rerank for final ordering |
 
-**Document ingestion**: MinerU high-fidelity parsing → Grobid metadata → strategy-aware chunking → Embedding → ES dual index.
+**Document ingestion**: LlamaParse → Unstructured API → PyMuPDF three-tier parsing → strategy-aware chunking → Embedding → pgvector dual index.
 
 **SSE event sequence**: `progress.accepted` → `progress.history` (STM) → `progress.memory` (LTM) → `progress.retrieving` → `progress.rerank` → `delta.*` (streaming tokens) → `completion`. Supports `Last-Event-ID` reconnection replay.
 
@@ -359,31 +369,34 @@ flowchart TD
 
 ## Quick Start
 
-**Requirements**: Docker Compose, 8GB+ RAM, NVIDIA GPU (see [Troubleshooting](#troubleshooting) without GPU), DashScope API Key.
+**Requirements**: Docker Compose, 4GB+ RAM, DashScope / OpenAI / LlamaParse API keys.
 
 ```bash
 git clone https://github.com/wanghong5233/ScholarMind.git
 cd ScholarMind/backend
 cp .env.example .env
-# Edit .env: DASHSCOPE_API_KEY, JWT_SECRET_KEY, ELASTIC_PASSWORD
+# Edit .env: DASHSCOPE_API_KEY, OPENAI_API_KEY, SM_LLAMA_PARSE_API_KEY, JWT_SECRET_KEY
 make up-build && make migrate
 cd ../frontend && npm run dev   # frontend separate
 ```
 
 **Access**: Frontend http://localhost:5173 | API docs http://localhost:8000/docs
 
-**Required env vars**: `DASHSCOPE_API_KEY`, `JWT_SECRET_KEY` (`python -c "import secrets; print(secrets.token_hex(32))"`), `ELASTIC_PASSWORD` (8+ chars). Optional: `SEMANTIC_SCHOLAR_API_KEY`, `TAVILY_API_KEY`/`SERPER_API_KEY`. See `backend/.env.example`.
+**Required env vars**: `DASHSCOPE_API_KEY`, `OPENAI_API_KEY`, `SM_LLAMA_PARSE_API_KEY`, `JWT_SECRET_KEY` (`python -c "import secrets; print(secrets.token_hex(32))"`). Optional: `SEMANTIC_SCHOLAR_API_KEY`, `TAVILY_API_KEY`/`SERPER_API_KEY`. See `backend/.env.example`.
 
 **Commands**: `make up` start | `make down` stop | `make logs-api` logs
+
+Cloud deployment: see [docs/LOW_COST_CLOUD_DEPLOYMENT_MANUAL.md](./docs/LOW_COST_CLOUD_DEPLOYMENT_MANUAL.md).
 
 ### Troubleshooting
 
 | Issue | Solution |
 |-------|----------|
-| MinerU/Reranker fails (no GPU) | In `docker-compose.yml`: set `dockerfile` to `Dockerfile` for mineru and reranker; comment out `deploy.resources.reservations`. Reranker can use DashScope cloud; MinerU without GPU has limited parsing |
-| Elasticsearch timeout | Set `ELASTIC_PASSWORD` in `.env`; ES first start ~2–3 min |
-| Blank frontend / 401 | Ensure `JWT_SECRET_KEY` matches backend |
-| PDF parsing fails | MinerU needs GPU; verify NVIDIA driver and Container Toolkit |
+| Blank frontend / 401 | Ensure `JWT_SECRET_KEY` matches backend and CORS origin is configured |
+| PDF parsing fails | Verify `SM_LLAMA_PARSE_API_KEY`; falls back LlamaParse → Unstructured → PyMuPDF |
+| LLM long no response | Configure `OPENAI_BASE_URL` to route via Cloudflare AI Gateway |
+| Container stuck on `nltk_data Downloading` | Pre-fetch with `backend/scripts/prepare_nltk_data.sh` and volume-mount |
+| Enable local GPU stack (MinerU / Grobid / Reranker) | Optional services; comment out `deploy.resources.reservations` without GPU |
 
 ---
 
@@ -392,10 +405,10 @@ cd ../frontend && npm run dev   # frontend separate
 | Layer | Technology |
 |-------|------------|
 | **Backend** | FastAPI, Python 3.11+, SQLAlchemy, Alembic |
-| **Database** | PostgreSQL 15, Elasticsearch 8.x, Redis 7 |
+| **Database** | PostgreSQL 15 + pgvector, Redis 7 |
 | **Frontend** | React 18, TypeScript, Ant Design, Valtio |
-| **AI** | DashScope / OpenAI (Embedding, LLM), BGE-Reranker, MinerU, Grobid |
-| **Ops** | Docker Compose |
+| **AI** | DashScope / OpenAI (Embedding, LLM, Rerank), LlamaParse, Unstructured |
+| **Ops** | Docker Compose, Cloudflare Tunnel, Vercel |
 
 ---
 
@@ -409,7 +422,8 @@ cd ../frontend && npm run dev   # frontend separate
 | **Reconnection replay** | `AskStreamReplayBuffer` (memory + Redis), `Last-Event-ID` seamless replay |
 | **Product isolation** | `sessions.surface` separates deep_chat / doc_studio |
 | **GraphRAG** | Entity extraction → graph node match → `boost_chunk_ids` in RAG metadata |
-| **MinerU + Grobid** | Dual-engine alignment for high-fidelity academic PDF parsing |
+| **Three-tier parsing fallback** | LlamaParse → Unstructured → PyMuPDF; cloud-first, local fallback, no GPU |
+| **Provider-level circuit breaker** | A connectivity error from any LLM provider in a single request skips all its remaining models and switches to the next provider |
 
 ---
 

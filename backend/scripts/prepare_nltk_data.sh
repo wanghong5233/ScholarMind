@@ -2,7 +2,7 @@
 # 用途：在国内主机（含阿里云 ECS）上一次性准备 NLTK 数据到 host 目录，
 #       由 docker-compose volume 挂载到容器，避免运行时联网下载。
 #
-# 背景与约束（见 notes/LOW_COST_CLOUD_DEPLOYMENT_MANUAL.md 6.1 / 10.2 节）：
+# 背景与约束（见 docs/LOW_COST_CLOUD_DEPLOYMENT_MANUAL.md 6.1 / 10.2 节）：
 #   - ECS 不继承本机 VPN/代理/DNS，访问 raw.githubusercontent.com 会卡死；
 #   - 生产 Docker build 不下载 NLTK / 模型权重 / parser 数据等非必要资源；
 #   - llama-index-core 在初始化分词器时会自动 nltk.download('punkt_tab' / 'stopwords')，

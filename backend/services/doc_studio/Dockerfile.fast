@@ -1,0 +1,35 @@
+# Doc Studio 增量更新 Dockerfile（fast path）
+#
+# 背景与约束（见 docs/LOW_COST_CLOUD_DEPLOYMENT_MANUAL.md §10.10）：
+#   - 原始 Dockerfile 第 4 层 `apt-get install texlive-*` 会下载并解压 ~1.5GB TeX Live；
+#   - 该层在 2C2G ECS 上必然触发 swap thrash → SSH 被 IO 饿死 → 部署死循环；
+#   - 即便老 image 还包含完整的 texlive 层，BuildKit build cache 与 image layer storage
+#     是两套独立存储；BuildKit 自身的 cache 一旦因 prune/GC/版本升级丢失，
+#     重新 build 不会从已有 image 借 layer，必然重跑 apt install。
+#
+# 解法：把已有的 doc_studio:latest 当作 base，本 Dockerfile 只 COPY 改动的代码，
+# 几秒内生成新 image，完全规避 texlive 重装。
+#
+# 使用流程（详见 backend/scripts/deploy_doc_studio_fast.sh）：
+#   1. `docker tag backend-doc_studio:latest backend-doc_studio:base`
+#   2. `docker build -f services/doc_studio/Dockerfile.fast -t backend-doc_studio:latest .`
+#   3. `docker compose up -d --no-build doc_studio`
+#
+# 何时不能用本 fast path：
+#   - requirements.txt 有变化 → 必须走原始 Dockerfile 重 build（建议本地 build + scp）
+#   - apt 系统依赖（texlive 包列表）有变化 → 同上
+#   - base image (python:3.11-slim) 需要升级 → 同上
+
+FROM backend-doc_studio:base
+
+COPY services/doc_studio/ /app/
+COPY shared/ /shared/
+
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app:/shared
+ENV PORT=8003
+ENV RAG_SERVICE_URL=http://scholarmind_api:8000
+
+EXPOSE 8003
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8003"]

@@ -207,20 +207,6 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 
-# Project-specific ignore rules
-# Personal development notes and planning documents
-二次开发计划.md
-开发笔记.md
-行动纲领.md
-note_original.md
-简历材料.md
-postman使用说明.md
-进度记录.md
-
-
-# Cursor editor files
-.cursor/
-
 # Local runtime data and storage
 storage_root/
 backend/.watchdog/
@@ -230,10 +216,6 @@ backend/test_*.pdf
 backend/test_*.docx
 backend/test_*.txt
 backend/testpdf/
-backend/RAG文档处理与分块流程图.pdf
-
-# Backup and original files
-backend/README_original.md
 
 # Large model files (optional: uncomment if you don't want to track ONNX models)
 # backend/app/service/core/rag/**/*.onnx
@@ -246,23 +228,8 @@ frontend/.env
 frontend/.env.local
 frontend/.env.production
 backend/app/logs/
-manual_rag_e2e_test_plan.md
 
-精排方案设计.md
-DeepResearch/
-
-DeepResearch/
-DeepResearch_ReferenceProjects/
-DEEP_RESEARCH_COMPARISON_AND_IMPLEMENTATION_PLAN.md
-SCHOLARMIND_DEEP_RESEARCH_FINAL_PLAN.md
-
-
-# Private learning notes 默认不入库（用 notes/* 而不是 notes/，否则下面的
-# negation 不生效：git 在祖先目录被忽略时不会再扫描子文件）。
-# 工程类维护文档（部署手册、Backlog）通过 ! 例外显式纳入。
-notes/*
-notes/*/
-!notes/KNOWN_ISSUES_AND_BACKLOG.md
-!notes/LOW_COST_CLOUD_DEPLOYMENT_MANUAL.md
+# 内部资料整体不入库（面经、简历、个人笔记、archived 设计稿、deepResearch 草稿等）。
+# 公开文档统一放 docs/。
+private/
 temp/
-简历/
