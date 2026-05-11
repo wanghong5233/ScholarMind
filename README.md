@@ -1,14 +1,14 @@
-# ScholarMind 🧠
+# ScholarMind
 
-> 面向学术研究者的 AI 助手平台：六层多策略 RAG、DeepResearch 多轮闭环 Agent、Doc Studio ReAct 智能编辑。
+> 面向学术研究者的 AI 助手平台：多阶段混合检索 RAG、DeepResearch 多轮闭环 Agent、Doc Studio ReAct 智能编辑。
 
 ---
 
-## 🎯 在线演示
+## 在线体验
 
 **[https://scholarmind.wh5233.me/demo](https://scholarmind.wh5233.me/demo)**
 
-体验 RAG 问答、DeepResearch 文献综述、Doc Studio 智能编辑，即刻开始无需本地部署。⭐ 若对你有帮助，欢迎 Star
+无需本地部署即可体验 RAG 问答、DeepResearch 文献综述和 Doc Studio 智能编辑。
 
 ---
 
@@ -21,13 +21,13 @@
 
 [English](README_EN.md) | **中文**
 
-ScholarMind 采用**三服务微服务架构**（主 API + DeepResearch + Doc Studio），集成生产级 RAG 检索管线、DeepResearch 深度研究 Agent 和 Doc Studio 文档智能编辑 Agent，支持论文理解、文献综述、学术写作和知识库管理。**功能预览**：RAG 对话、DeepResearch 报告、Doc Studio 编辑 → [在线演示](https://scholarmind.wh5233.me/demo)
+ScholarMind 采用**三服务微服务架构**（主 API + DeepResearch + Doc Studio），集成生产级 RAG 检索管线、DeepResearch 深度研究 Agent 和 Doc Studio 文档智能编辑 Agent，支持论文理解、文献综述、学术写作和知识库管理。可在线体验：RAG 对话、DeepResearch 报告、Doc Studio 编辑 → [在线体验](https://scholarmind.wh5233.me/demo)
 
 ---
 
 ## 目录
 
-- [在线演示](#-在线演示)
+- [在线体验](#在线体验)
 - [架构总览](#架构总览)
 - [核心模块](#核心模块)
   - [RAG 检索增强](#1-rag-检索增强)
@@ -150,7 +150,7 @@ flowchart TB
 
 ### 1. RAG 检索增强
 
-六层多策略检索管线，支持会话内文档与用户知识库的混合检索。
+多阶段混合检索管线，支持会话内文档与用户知识库的混合检索。
 
 | 阶段 | 说明 |
 |------|------|

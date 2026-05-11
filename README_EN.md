@@ -1,14 +1,14 @@
-# ScholarMind 🧠
+# ScholarMind
 
-> AI assistant platform for researchers: six-layer multi-strategy RAG, DeepResearch closed-loop Agent, Doc Studio ReAct intelligent editing.
+> AI assistant platform for researchers: multi-stage hybrid-retrieval RAG, DeepResearch closed-loop Agent, and Doc Studio ReAct editing.
 
 ---
 
-## 🎯 Live Demo
+## Try Online
 
 **[https://scholarmind.wh5233.me/demo](https://scholarmind.wh5233.me/demo)**
 
-Try RAG Q&A, DeepResearch literature review, and Doc Studio editing without local deployment. ⭐ Star the repo if it helps.
+Try RAG Q&A, DeepResearch literature review, and Doc Studio editing without local deployment.
 
 ---
 
@@ -21,13 +21,13 @@ Try RAG Q&A, DeepResearch literature review, and Doc Studio editing without loca
 
 **English** | [中文](README.md)
 
-ScholarMind uses a **three-service microservice architecture** (main API + DeepResearch + Doc Studio), integrating production-grade RAG retrieval, DeepResearch research Agent, and Doc Studio document editing Agent for paper understanding, literature review, academic writing, and knowledge base management. **Preview**: RAG chat, DeepResearch reports, Doc Studio editing → [Live Demo](https://scholarmind.wh5233.me/demo)
+ScholarMind uses a **three-service microservice architecture** (main API + DeepResearch + Doc Studio), integrating production-grade RAG retrieval, DeepResearch research Agent, and Doc Studio document editing Agent for paper understanding, literature review, academic writing, and knowledge base management. Try online: RAG chat, DeepResearch reports, Doc Studio editing → [Try Online](https://scholarmind.wh5233.me/demo)
 
 ---
 
 ## Table of Contents
 
-- [Live Demo](#-live-demo)
+- [Try Online](#try-online)
 - [Architecture Overview](#architecture-overview)
 - [Core Modules](#core-modules)
   - [RAG Retrieval](#1-rag-retrieval)
@@ -150,7 +150,7 @@ MinerU / Grobid / local Reranker remain available as optional GPU-heavy services
 
 ### 1. RAG Retrieval
 
-Six-layer multi-strategy retrieval pipeline with hybrid search over in-session documents and user knowledge bases.
+Multi-stage hybrid retrieval pipeline over in-session documents and user knowledge bases.
 
 | Stage | Description |
 |-------|-------------|
