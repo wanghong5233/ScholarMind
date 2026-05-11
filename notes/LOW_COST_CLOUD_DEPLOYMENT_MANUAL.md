@@ -540,7 +540,41 @@ networks:
 | 终止语义 | `timeout` 会向 Docker compose 客户端发信号并取消 build | 不用 `timeout` 包裹 Docker build / up |
 | 网络 | ECS 不继承本机 VPN、代理和 DNS | Dockerfile 内显式配置 apt / pip 国内源 |
 
-### 10.8 ECS 拉取 GitHub 代码
+### 10.8 增量发布纪律（2C2G 升级容器代码）
+
+> 教训：在三个服务都在运行的状态下执行 `docker compose ... up -d --force-recreate scholarmind_api doc_studio deep_research`，docker compose 会**并行 build 三个镜像** + **保持旧容器占用内存**，2C2G 的 ECS 直接进 swap 死循环：CPU 持续 95%+、SSH banner exchange 超时、云助手 agent 也被饿死。最后只能控制台重启实例，build 进度全丢。
+>
+> 根因：违反 §6.1 / §10.7 的"build 前停止运行态"不变量。`--force-recreate` 隐含的语义是"先 build 再切容器"，2C2G 同时承载旧服务 + 多个 build 必崩。
+
+**升级容器代码统一走"停 → build → 起"三步法**，并且 build 必须**逐个串行**而不是并行：
+
+```bash
+cd /opt/apps/scholarmind/backend
+docker compose -f docker-compose.prod.yml --env-file .env.production stop scholarmind_api doc_studio deep_research
+free -h
+df -h
+docker system df
+
+docker compose -f docker-compose.prod.yml --env-file .env.production build --pull=false scholarmind_api
+docker compose -f docker-compose.prod.yml --env-file .env.production build --pull=false deep_research
+docker compose -f docker-compose.prod.yml --env-file .env.production build --pull=false doc_studio
+
+docker compose -f docker-compose.prod.yml --env-file .env.production up -d --no-deps scholarmind_api doc_studio deep_research
+sleep 30
+docker compose -f docker-compose.prod.yml --env-file .env.production ps
+```
+
+| 操作 | 禁止 | 推荐 |
+|---|---|---|
+| 升级镜像 | `up -d --force-recreate <多服务>` 同时跑 | 先 `stop`，再单服务串行 `build`，最后 `up -d` |
+| 停服窗口 | 担心停服而保留旧容器 | 2C2G 没有"零停服"，几十秒切换比卡死实例划算 |
+| 多服务一起 build | `compose build a b c`（默认并行） | 三条独立 `build` 命令串行执行 |
+| 没监控 | 直接前台发命令 | build 之前 `free -h` / `df -h` / `docker system df` 先看资源 |
+| 长 build | SSH 不稳还硬等 | 用 `tmux` 固定会话；构建中断不要立刻重试，先 `docker buildx prune -f --keep-storage 2GB` 清半截 layer |
+
+`scholarmind_db` / `scholarmind_redis` / `cloudflared` 没有代码改动，**不要 stop**，否则会丢业务连接。
+
+### 10.9 ECS 拉取 GitHub 代码
 
 ECS 到 `github.com:443` 走的是国内出口 + GitHub Anycast，链路本身就抖。`git pull origin main` 默认开启 HTTP/2 多路复用 + 大对象走 GnuTLS，在抖动窗口里非常容易出现以下三类错误：
 
@@ -661,3 +695,6 @@ ScriptLens / homepage 等其他项目的 ECS 仓库同样适用此规则。
 - ECS 直连 `api.openai.com` 大概率 timeout 或被切，`LLMClient` 把每个 OpenAI 候选都 fallback 一遍导致总时延数分钟、浏览器报 Network Error：
   - 根因：ECS 国内出口到 OpenAI 不稳定，本地 VPN 通不代表 ECS 通
   - 解法：开 Cloudflare AI Gateway（免费）→ 把 `OPENAI_BASE_URL` 改为 `https://gateway.ai.cloudflare.com/v1/<account_id>/<gateway>/openai`；不开 Authenticated Gateway / Cache / Retry，应用层已有 fallback + provider 熔断
+- 实例 CPU 长时间 90%+、SSH 突然 banner exchange 超时、云助手报 Agent 未运行、VNC 输入卡死：
+  - 根因：在三个服务都在跑的状态下并行 build（`up -d --force-recreate` 多服务），2C2G 内存被旧容器 + 多个 build 进程瓜分进 swap 死循环
+  - 解法：控制台普通重启实例 → 严格按 10.8 节的"停 → 串行 build → 起"三步法重做
