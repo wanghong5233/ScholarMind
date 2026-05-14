@@ -414,7 +414,10 @@ class LLMClient:
         if isinstance(exc, (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError)):
             return True
         if isinstance(exc, httpx.HTTPStatusError):
-            if exc.response.status_code in {502, 503, 504}:
+            # 429 is treated as provider-capacity saturation for this request.
+            # Continuing with other models under the same provider usually
+            # amplifies latency without improving success probability.
+            if exc.response.status_code in {429, 502, 503, 504}:
                 return True
         return False
 

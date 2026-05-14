@@ -64,13 +64,16 @@
 | `SM_RAG_TOPK` | `8` | 受 MIN=4/MAX=8 夹紧 |
 | `SM_RETRIEVE_PAGE_SIZE` | `8` | 与 topK 同步 |
 | `SM_PARSER_ORDER` | **不设置** | 显式留空才能让代码默认 `llamaparse,unstructured_api,pymupdf` 生效 |
+| `ENABLE_WEB_SEARCH` | `true` | DeepResearch / Doc Studio 联网搜索入口；缺失会让深度调研在 search 阶段 fail-fast |
+| `WEB_SEARCH_PROVIDER` | `tavily` | 当前生产搜索 provider |
+| `WEB_SEARCH_API_KEY` / `TAVILY_API_KEY` | 至少一个有值 | DeepResearch 外部调研必需；本地有、ECS 缺会导致演示期才暴露 |
 
 **全局禁用名单**（不允许出现在任何 env / 代码 / 前端选择器）：
 - `qwen-plus`、`qwen-turbo` — 输出不稳定
 
 **维护原则**：
 - 业务变量在 `backend/.env.production.example` 显式列全（不依赖代码默认）
-- 改业务变量的发布顺序：**`.env.production.example`（入仓库）→ 同步本地 `.env` → ssh ECS 改 `/opt/apps/scholarmind/.env.production` → 重启容器**
+- 改业务变量的发布顺序：**`.env.production.example`（入仓库）→ 同步本地 `.env` → ssh ECS 改 `/opt/apps/scholarmind/backend/.env.production` → `up -d --no-build --no-deps <service>` 重建目标容器**
 
 ---
 
@@ -149,6 +152,17 @@
 - **解法**：仓库根 `.gitattributes` 已强制 `.sh` / `Dockerfile` / `*.yml` / `.env*` 为 LF；新增脚本时不要手动改 EOL。
 - **不变量**：§1.7
 
+### 4.8 [2026-05-13] DeepResearch 联网搜索 key 未进 prod env → search 阶段 fail-fast
+
+- **症状**：生产站点触发 DeepResearch 外部调研后报 `Web search is requested but WEB_SEARCH_API_KEY/TAVILY_API_KEY/SERPER_API_KEY is missing.`；本地同类流程正常。
+- **判别证据**：
+  - ECS 文件层：`.env.production` 存在，但 `grep -nE "^(ENABLE_WEB_SEARCH|WEB_SEARCH_PROVIDER|WEB_SEARCH_API_KEY|TAVILY_API_KEY|SERPER_API_KEY)=" .env.production` 无匹配。
+  - 容器层：`docker exec scholarmind_deep_research env | grep -E "ENABLE_WEB_SEARCH|WEB_SEARCH|TAVILY|SERPER"` 无输出。
+  - 模板层：`backend/.env.example` 有 Web Search 配置段，`backend/.env.production.example` 漏写，首次部署按模板同步必然缺。
+- **根因**：§1.6。代码同步不等于 env 同步；`.env.production` 不入 git，生产只会继承人工填写的变量。功能以 fail-fast 暴露缺 key 是正确的，但 `.env.production.example` 没把 `ENABLE_WEB_SEARCH` + provider key 纳入生产契约，导致演示前才触发。
+- **解法**：补齐 `backend/.env.production.example` 的 Web Search 段；ECS 上更新 `/opt/apps/scholarmind/backend/.env.production` 后，用 `docker compose -f docker-compose.prod.yml --env-file .env.production up -d --no-build --no-deps deep_research` 重建目标容器，不能只依赖 `restart`。
+- **不变量**：§1.6。任何 `ENABLE_*` 开关只要会在缺 key 时 fail-fast，对应 key 必须同时出现在 `backend/.env.example` 与 `backend/.env.production.example`；新增外部 API 能力必须做文件层 + 容器层双检。
+
 ---
 
 ## §5 关键工具脚本入口
@@ -181,6 +195,7 @@
 | 容器 `unhealthy`，日志卡 `[nltk_data] Downloading ...` | §4.4 |
 | 容器 `unhealthy`，日志卡 `Connecting to api.openai.com...` 或 fallback 链长达分钟级 | §4.2 |
 | `git pull/fetch` 报 `HTTP2 framing` / `GnuTLS` / `Connection timed out` | §4.5 |
+| DeepResearch 外部调研报 `WEB_SEARCH_API_KEY/TAVILY_API_KEY/SERPER_API_KEY is missing` | §4.8 |
 | `docker compose build` 卡在 `RUN apt-get install ... texlive-*` 数小时 + 磁盘 IO 打满 baseline | §4.1（**不要再误判为 4.3**）|
 | CPU 95%+、SSH banner timeout、VNC 卡死、云助手报 Agent 未运行 | §4.3（旧服务没停就 build），或 §4.1（doc_studio 在 ECS build）|
 | 本地能跑、ECS 不能跑，但日志看着没异常 | §4.6（先 diff §3 业务 env 表）|

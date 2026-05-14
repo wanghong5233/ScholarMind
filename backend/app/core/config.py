@@ -144,7 +144,7 @@ class Settings(BaseSettings):
     SM_RERANKER_FAIL_MAX: int = 3                                                # 精排失败阈值（熔断）
     SM_RERANKER_COOLDOWN_SECS: int = 120                                         # 精排熔断冷却时间（秒）
     SM_RERANKER_FALLBACK_TO_DASHSCOPE: bool = True                               # 本地 reranker 失败时是否兜底到 DashScope
-    SM_ASK_TIMEOUT_SECS: int = 120                                               # 问答全链路超时（秒），<=0 表示不限制
+    SM_ASK_TIMEOUT_SECS: int = 240                                               # 问答全链路超时（秒），<=0 表示不限制
     # Ask SSE 回放（run_id + seq）配置
     SM_ASK_REPLAY_REDIS_ENABLED: bool = True                                      # 是否启用 Redis 持久化回放
     SM_ASK_REPLAY_TTL_SECS: int = 600                                             # 回放缓存保留时长（秒）

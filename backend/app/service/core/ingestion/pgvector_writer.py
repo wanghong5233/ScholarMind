@@ -184,23 +184,23 @@ class PgVectorChunkWriter:
             return [dict(row._mapping) for row in result]
 
     def _build_row(self, *, record: Dict[str, Any], index_name: str) -> Dict[str, Any]:
-        chunk_id = str(record.get("id") or "").strip()
+        chunk_id = self._strip_nul_chars(str(record.get("id") or "").strip())
         if not chunk_id:
             raise ValueError("pgvector chunk record is missing id")
 
         kb_id = self._required_int(record.get("kb_id"), "kb_id")
         document_id = self._required_int(record.get("document_id"), "document_id")
         chunk_index = self._optional_int(record.get("chunk_index")) or 0
-        metadata = self._metadata_payload(record)
+        metadata = self._sanitize_json_value(self._metadata_payload(record))
 
         return {
-            "index_name": index_name,
+            "index_name": self._strip_nul_chars(index_name),
             "chunk_id": chunk_id,
             "kb_id": kb_id,
             "document_id": document_id,
             "session_id": self._session_id_from_index(index_name),
             "scope": "session" if index_name.startswith("sm_sess_") else "global",
-            "text": str(record.get("text") or ""),
+            "text": self._strip_nul_chars(str(record.get("text") or "")),
             "embedding": self._vector_literal(record.get("vector")),
             "metadata": json.dumps(metadata, ensure_ascii=False, default=str),
             "chunk_index": chunk_index,
@@ -251,7 +251,7 @@ class PgVectorChunkWriter:
     def _optional_text(self, value: Any) -> Optional[str]:
         if value is None:
             return None
-        text_value = str(value).strip()
+        text_value = self._strip_nul_chars(str(value)).strip()
         return text_value or None
 
     def _clip(self, value: Any, *, limit: int) -> Optional[str]:
@@ -259,6 +259,21 @@ class PgVectorChunkWriter:
         if text_value is None:
             return None
         return text_value[:limit]
+
+    def _strip_nul_chars(self, value: str) -> str:
+        return value.replace("\x00", "")
+
+    def _sanitize_json_value(self, value: Any) -> Any:
+        if isinstance(value, str):
+            return self._strip_nul_chars(value)
+        if isinstance(value, dict):
+            return {
+                self._strip_nul_chars(str(key)): self._sanitize_json_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [self._sanitize_json_value(item) for item in value]
+        return value
 
     def _validate_table_name(self, table_name: str) -> str:
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table_name or ""):

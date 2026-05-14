@@ -4,6 +4,8 @@ import os
 import re
 from typing import List, Tuple, Optional
 
+from sqlalchemy.exc import IntegrityError
+
 from service.core.ingestion.interfaces import ParsedBlock, MetadataExtractor
 from service.semantic_scholar_service import semantic_scholar_service
 from service.core.ingestion.grobid_client import get_grobid_client
@@ -209,9 +211,7 @@ class DefaultMetadataExtractor(MetadataExtractor):
                     changed = True
 
         if changed:
-            db.add(document)
-            db.commit()
-            db.refresh(document)
+            self._commit_metadata_update(db=db, document=document, logger=logger)
         
         logger.info(
             f"[METADATA_EXTRACT_DONE] doc_id={doc_id} "
@@ -219,6 +219,46 @@ class DefaultMetadataExtractor(MetadataExtractor):
             f"final_keywords={len(getattr(document, 'keywords', []) or [])}"
         )
         return document
+
+    def _commit_metadata_update(self, *, db, document, logger) -> None:
+        """
+        Persist metadata changes with a one-time conflict downgrade for identity fields.
+        This keeps ingestion moving for demo paths instead of hard-failing on duplicate DOI/S2 ID.
+        """
+        db.add(document)
+        try:
+            db.commit()
+            db.refresh(document)
+            return
+        except IntegrityError as exc:
+            db.rollback()
+            if not self._resolve_unique_identity_conflict(document=document, exc=exc, logger=logger):
+                raise
+        db.add(document)
+        db.commit()
+        db.refresh(document)
+
+    def _resolve_unique_identity_conflict(self, *, document, exc: IntegrityError, logger) -> bool:
+        message = str(exc)
+        lowered = message.lower()
+        resolved = False
+        doc_id = getattr(document, "id", "unknown")
+
+        if "uq_kb_doi" in lowered and getattr(document, "doi", None):
+            logger.warning(
+                f"[METADATA_IDENTITY_CONFLICT] doc_id={doc_id} field=doi action=clear_and_retry"
+            )
+            document.doi = None
+            resolved = True
+
+        if "uq_kb_semantic_id" in lowered and getattr(document, "semantic_scholar_id", None):
+            logger.warning(
+                f"[METADATA_IDENTITY_CONFLICT] doc_id={doc_id} field=semantic_scholar_id action=clear_and_retry"
+            )
+            document.semantic_scholar_id = None
+            resolved = True
+
+        return resolved
 
     def _extract_from_blocks(self, blocks: List[ParsedBlock]) -> Tuple[str | None, str | None, str | None, list | None]:
         title = None
