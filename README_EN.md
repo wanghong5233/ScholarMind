@@ -6,9 +6,10 @@
 
 ## Try Online
 
-**[https://scholarmind.wh5233.me/demo](https://scholarmind.wh5233.me/demo)**
+- **Live site**: [https://scholarmind.wh5233.me/demo](https://scholarmind.wh5233.me/demo)
+- **Demo video**: [scholarmind-demo-v0.mp4](https://wh5233.me/videos/scholarmind-demo-v0.mp4)
 
-Try RAG Q&A, DeepResearch literature review, and Doc Studio editing without local deployment.
+Try RAG Q&A, DeepResearch literature review, and Doc Studio editing without local deployment. The live environment runs on a low-cost cloud server and depends on third-party LLM / PDF parsing / web search APIs; if responses are slow, queued, or an upstream API is unavailable, watch the demo video for the complete workflow.
 
 ---
 
@@ -21,7 +22,7 @@ Try RAG Q&A, DeepResearch literature review, and Doc Studio editing without loca
 
 **English** | [中文](README.md)
 
-ScholarMind uses a **three-service microservice architecture** (main API + DeepResearch + Doc Studio), integrating production-grade RAG retrieval, DeepResearch research Agent, and Doc Studio document editing Agent for paper understanding, literature review, academic writing, and knowledge base management. Try online: RAG chat, DeepResearch reports, Doc Studio editing → [Try Online](https://scholarmind.wh5233.me/demo)
+ScholarMind uses a **three-service microservice architecture** (main API + DeepResearch + Doc Studio), integrating production-grade RAG retrieval, DeepResearch research Agent, and Doc Studio document editing Agent for paper understanding, literature review, academic writing, and knowledge base management. Try online: RAG chat, DeepResearch reports, Doc Studio editing → [Try Online](https://scholarmind.wh5233.me/demo) / [Demo Video](https://wh5233.me/videos/scholarmind-demo-v0.mp4)
 
 ---
 

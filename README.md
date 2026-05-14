@@ -6,9 +6,10 @@
 
 ## 在线体验
 
-**[https://scholarmind.wh5233.me/demo](https://scholarmind.wh5233.me/demo)**
+- **在线站点**：[https://scholarmind.wh5233.me/demo](https://scholarmind.wh5233.me/demo)
+- **演示视频**：[scholarmind-demo-v0.mp4](https://wh5233.me/videos/scholarmind-demo-v0.mp4)
 
-无需本地部署即可体验 RAG 问答、DeepResearch 文献综述和 Doc Studio 智能编辑。
+无需本地部署即可体验 RAG 问答、DeepResearch 文献综述和 Doc Studio 智能编辑。在线环境运行在低配云服务器，并依赖第三方 LLM / PDF 解析 / 联网搜索 API；如遇响应慢、队列等待或上游 API 不可用，可查看演示视频了解完整流程。
 
 ---
 
@@ -21,7 +22,7 @@
 
 [English](README_EN.md) | **中文**
 
-ScholarMind 采用**三服务微服务架构**（主 API + DeepResearch + Doc Studio），集成生产级 RAG 检索管线、DeepResearch 深度研究 Agent 和 Doc Studio 文档智能编辑 Agent，支持论文理解、文献综述、学术写作和知识库管理。可在线体验：RAG 对话、DeepResearch 报告、Doc Studio 编辑 → [在线体验](https://scholarmind.wh5233.me/demo)
+ScholarMind 采用**三服务微服务架构**（主 API + DeepResearch + Doc Studio），集成生产级 RAG 检索管线、DeepResearch 深度研究 Agent 和 Doc Studio 文档智能编辑 Agent，支持论文理解、文献综述、学术写作和知识库管理。可在线体验：RAG 对话、DeepResearch 报告、Doc Studio 编辑 → [在线体验](https://scholarmind.wh5233.me/demo) / [演示视频](https://wh5233.me/videos/scholarmind-demo-v0.mp4)
 
 ---
 
